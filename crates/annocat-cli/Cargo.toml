@@ -1,0 +1,30 @@
+[package]
+name = "annocat-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "annocat"
+path = "src/main.rs"
+
+[[bin]]
+name = "annocat-report-worker"
+path = "src/bin/annocat-report-worker.rs"
+
+[dependencies]
+annocat-core = { path = "../annocat-core" }
+rfd = "0.17.2"
+fs2 = "0.4.3"
+reqwest = { version = "0.13.4", features = ["blocking", "cookies"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+md5 = "0.8"
+crc32fast = "1"
+sha2 = "0.10"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+duckdb = { version = "1.10504.0", features = ["bundled", "parquet"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_WindowsAndMessaging"] }

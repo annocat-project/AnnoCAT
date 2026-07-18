@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 2,
+  "repository": "https://github.com/annocat-project/fastVEP",
+  "commit": "6e5ee0ca848d85bb16a6d5a1a6cb8ecb09c4541d",
+  "branch": "annocat/v0.1",
+  "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
+  "upstreamCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
+  "upstreamVersion": "0.2.0",
+  "license": "Apache-2.0",
+  "cargoLockSha256": "cf77c24db9add5400abc3797c1f70b6a34166ce52c1c4381f4c8cc717a899515",
+  "changes": [
+    {
+      "commit": "6178fee7ad992dd5d3d1cbd1789cada41eb073ab",
+      "purpose": "Allow sa-build to consume gzip/BGZF or plain input from a non-seekable stdin stream"
+    },
+    {
+      "commit": "50f13ff47e69f08ec9528099e1f43e1d3d075d9c",
+      "purpose": "Stream coordinate-sorted dbNSFP rows directly into the OSA writer with bounded memory"
+    },
+    {
+      "commit": "ea33e541716f34f53a47755da6d18621f5c80136",
+      "purpose": "Load chromosome OSA shards from a strict manifest as one fail-closed logical annotation provider"
+    },
+    {
+      "commit": "0d8087e469a2f8d1998c0c045664697ae5400d4c",
+      "purpose": "Reopen and fully validate OSA blocks, record JSON, chromosome bounds, and deterministic lookups before promotion"
+    },
+    {
+      "commit": "1d3900379ebb2eb7bfb3623af0a02d7aeab3e24a",
+      "purpose": "Route explicit custom VCF sources through the same plain/gzip/BGZF stdin reader as built-in sources"
+    },
+    {
+      "commit": "f316016b6dafd8224e935be203c9c58ee7d4b016",
+      "purpose": "Prevent concurrent full transcript-cache builders from exhausting memory across AnnoCAT process lifecycles"
+    },
+    {
+      "commit": "5fbca3825cc44e4a1438b343d2581e66a90df3fb",
+      "purpose": "Stream strict CADD v1.7 score rows into allele-matched OSA records without staging source tables"
+    },
+    {
+      "commit": "6eeadcb5c696586f6b9885a36db667ce3121f17d",
+      "purpose": "Stream strict REVEL v1.3 CSV rows into transcript-tagged allele-matched OSA records without chromosome buffering"
+    },
+    {
+      "commit": "5a91c88483c633a32122d99889531720685d878b",
+      "purpose": "Write lossless newline-delimited structured annotations beside VCF output without repeating prediction or supplementary lookups"
+    },
+    {
+      "commit": "231c1926a168800c3b9a0455d614699580871bee",
+      "purpose": "Retain AnnoCAT's versioned 135-field dbNSFP 4.9a contract without collapsing transcript-aligned values"
+    },
+    {
+      "commit": "36e5f292928dbdc45920c31371126466901d147d",
+      "purpose": "Apply a validated dbNSFP field subset per installation and avoid redundant full JSON reparsing during cache verification"
+    },
+    {
+      "commit": "6e5ee0ca848d85bb16a6d5a1a6cb8ecb09c4541d",
+      "purpose": "Validate and retain configurable field subsets for ClinVar, dbSNP, gnomAD, phyloP, CADD, SpliceAI, and REVEL caches"
+    }
+  ],
+  "windowsX86_64": {
+    "filename": "fastvep.exe",
+    "sizeBytes": 6232576,
+    "sha256": "4a363e00891a31ea64db0734a973f1f0189b8cea8bf4af20ff7695420d94454f",
+    "buildCommand": "cargo build --release --locked -p fastvep-cli",
+    "smokeTestStatus": "passed"
+  },
+  "reviewedOn": "2026-07-18",
+  "windowsTestStatus": "passed",
+  "notes": "Pinned to the tested annocat/v0.1 fork commit. The release artifact supports bounded stdin streaming for dbNSFP, gnomAD, PhyloP, CADD, and REVEL, configurable validated supplementary field subsets, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
+}

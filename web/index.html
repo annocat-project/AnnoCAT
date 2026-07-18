@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AnnoCAT</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/wizard.css">
+  <link rel="stylesheet" href="/batch.css">
+  <link rel="stylesheet" href="/light-theme.css">
+  <link rel="stylesheet" href="/downloads-ui.css">
+  <link rel="stylesheet" href="/resource-location.css">
+  <link rel="stylesheet" href="/report-share.css">
+  <link rel="stylesheet" href="/brand-theme.css">
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="icon-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="icon-logs" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.3a2 2 0 0 1-2 0l-.2-.1a2 2 0 0 0-2.7.7l-.2.4A2 2 0 0 0 4 9.9l.2.1a2 2 0 0 1 1 1.7v.6a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.2-.1a2 2 0 0 1 2 0l.4.3a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.3a2 2 0 0 1 2 0l.2.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.6a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.2.1a2 2 0 0 1-2 0l-.4-.3a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2Z"/></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"/></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3Z"/></symbol>
+    <symbol id="icon-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3M8 15h8"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+    <symbol id="icon-arrow-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+    <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
+  <aside id="sidebar-navigation" class="sidebar">
+    <div class="brand"><div><strong>Anno<span>CAT</span></strong><small>Annotation · Curation · Triage</small></div></div>
+    <nav aria-label="Main navigation">
+      <button class="nav-item active" data-page="annotate"><svg class="ui-icon"><use href="#icon-plus"/></svg> New annotation</button>
+      <button class="nav-item" data-page="browse"><svg class="ui-icon"><use href="#icon-search"/></svg> Browse results</button>
+      <button class="nav-item" data-page="resources"><svg class="ui-icon"><use href="#icon-database"/></svg> Data sources</button>
+      <button class="nav-item" data-page="logs"><svg class="ui-icon"><use href="#icon-logs"/></svg> Tasks</button>
+      <button class="nav-item" data-page="settings"><svg class="ui-icon"><use href="#icon-settings"/></svg> Settings</button>
+    </nav>
+    <div class="privacy"><span></span><div><strong>Runs locally</strong><small>Your variant data stays on this computer.</small></div></div>
+  </aside>
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar-navigation" aria-expanded="true" aria-label="Hide navigation" title="Hide navigation"><span aria-hidden="true"></span></button>
+
+  <main>
+    <header class="topbar">
+      <div id="crumb">New annotation</div>
+      <div class="global-status-host">
+        <button id="global-status-button" class="global-status-button ready" type="button" aria-expanded="false" aria-controls="global-status-panel"><span class="global-status-dot"></span><span id="global-status-summary">Ready</span></button>
+        <section id="global-status-panel" class="global-status-panel hidden" aria-label="AnnoCat status"><div class="global-status-heading"><strong>Current status</strong><button id="global-status-close" type="button" aria-label="Close status">×</button></div><div id="global-status-content"></div></section>
+      </div>
+    </header>
+
+    <section id="annotate" class="page active-page">
+      <div class="page-heading"><p class="kicker">NEW RUN</p><h1>Annotate VCF files</h1><p>Choose your input files and annotation sources. AnnoCAT validates everything before the first run starts.</p></div>
+      <div class="workspace">
+        <ol class="steps" aria-label="Annotation steps">
+          <li class="current"><b>1</b><div><strong>Input</strong><small>Select one or more VCFs</small></div></li>
+          <li><b>2</b><div><strong>Annotation</strong><small>Choose profile and sources</small></div></li>
+          <li><b>3</b><div><strong>Output</strong><small>Location and formats</small></div></li>
+          <li><b>4</b><div><strong>Review</strong><small>Validate and start</small></div></li>
+        </ol>
+
+        <form id="run-form" class="run-card">
+          <section class="wizard-panel active-panel" data-step="1"><div class="section-title"><span>1</span><div><h2>Input VCFs</h2><p>Choose one file or select several to annotate in sequence.</p></div></div><input id="vcf-files" type="file" accept=".vcf,.vcf.gz,.vcf.bgz,.gz,.bgz" multiple hidden><button id="choose-vcfs" class="choice vcf-picker-card" type="button"><svg class="ui-icon file-icon"><use href="#icon-upload"/></svg><strong>Choose VCF files</strong><small>Select one or more VCF, VCF.GZ, or BGZ files</small></button><div id="selected-files" class="batch-files hidden"></div><div class="inline-note"><span><svg class="ui-icon"><use href="#icon-info"/></svg></span><p><strong>Each file becomes a separate run.</strong> When you select multiple VCFs, AnnoCAT validates and annotates them one at a time in the order shown.</p></div></section>
+          <section class="wizard-panel" data-step="2"><div class="section-title"><span>2</span><div><h2>Annotation profile and sources</h2><p>Select a profile, then adjust its available sources if needed.</p></div></div><label class="profile-field"><span>Profile</span><select id="profile"><option value="">Loading profiles…</option></select></label><div class="source-option required-resource"><span><strong>Core annotation data</strong><small>GRCh38 reference and matching transcript cache</small></span><em data-reference-state>Not installed</em></div><div id="wizard-sources" class="wizard-sources"></div><div id="wizard-readiness" class="wizard-readiness"><span class="readiness-dot"></span><div><strong>Checking annotation resources…</strong><p>Please wait while AnnoCat checks this computer.</p></div><button type="button" data-page-link="resources">Manage sources</button></div></section>
+          <section class="wizard-panel" data-step="3"><div class="section-title"><span>3</span><div><h2>Output and run options</h2><p>Choose where AnnoCat should place this run.</p></div></div><input id="output-directory-fallback" type="file" webkitdirectory directory hidden><label class="output-field"><span>Output folder</span><div class="path-field"><input id="output-folder" placeholder="Choose an output folder or enter its path"><button id="browse-output" type="button">Browse…</button></div><small id="folder-message">The selected folder remains on this computer.</small></label><details><summary><span>Advanced output</span><small>Optional compatibility file</small></summary><div class="advanced-grid"><fieldset><legend>Additional output</legend><label><input id="keep-annotated-vcf" type="checkbox"> Keep annotated VCF</label><small>AnnoCat always creates the compact canonical result used by the viewer. Retaining VCF can substantially increase a WGS run's disk usage.</small></fieldset></div></details></section>
+          <section class="wizard-panel" data-step="4"><div class="section-title"><span>4</span><div><h2>Review and start</h2><p>Confirm the input, output, and resources that will be used.</p></div></div><div id="annotation-notice" class="annotation-notice hidden" role="alert"></div><div id="review-summary" class="review-summary"></div><h3 class="review-subhead">Resources</h3><div id="resource-review" class="resource-review"></div><div id="review-readiness" class="wizard-readiness"><span class="readiness-dot"></span><div><strong>Checking readiness…</strong><p>Selected resources are being verified.</p></div><button type="button" data-page-link="resources">Manage sources</button></div></section>
+          <div class="run-actions"><button class="secondary hidden" id="back-step" type="button">← Back</button><p><strong>Nothing will download or run without review.</strong><br>Your file is not uploaded anywhere.</p><button class="primary" id="continue" type="button" disabled>Continue <span>→</span></button></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="browse" class="page">
+      <div class="page-heading"><p class="kicker">RESULTS</p><h1>Browse completed annotations</h1><p>Completed local annotations appear here automatically. You can also open a result created elsewhere.</p></div>
+      <div id="completed-runs" class="completed-runs" aria-live="polite"><div class="empty-card compact"><svg class="ui-icon empty-icon"><use href="#icon-folder"/></svg><h2>Looking for completed annotations…</h2></div></div>
+      <h2 class="browse-subhead">Open another result</h2>
+      <div class="choice-grid"><button class="choice"><svg class="ui-icon"><use href="#icon-folder"/></svg><strong>Import report ZIP</strong><small>Choose an AnnoCat report ZIP or existing result file</small></button><button id="open-demo" class="choice"><svg class="ui-icon"><use href="#icon-flask"/></svg><strong>Open synthetic demo</strong><small>Explore dashboard interactions without private data</small></button></div>
+    </section>
+
+    <section id="logs" class="page">
+      <div class="page-heading"><p class="kicker">ACTIVITY</p><h1>Tasks</h1><p>See current and previous resource and annotation activity.</p></div>
+      <div class="jobs-summary"><article><span>Active</span><strong id="active-job-count">0</strong></article><article><span>Completed</span><strong id="completed-job-count">0</strong></article><article><span>Needs attention</span><strong id="failed-job-count">0</strong></article></div>
+      <div id="jobs-list" class="jobs-list"><div class="empty-card compact"><svg class="ui-icon empty-icon"><use href="#icon-check"/></svg><h2>No jobs yet</h2><p>Downloads, resource preparation, and annotation runs will appear here.</p></div></div>
+    </section>
+
+    <section id="results" class="page">
+      <div class="results-heading"><div><button id="back-to-browse" class="text-button">← Completed runs</button><h1>Synthetic demonstration</h1><p>No personal variant files are loaded.</p></div><div class="results-tools"><button id="rename-report" class="secondary hidden" type="button">Rename</button><button id="case-notes-button" class="secondary hidden" type="button">Case notes</button><button id="share-report" class="secondary hidden" type="button">Share report</button></div></div>
+      <div class="result-view-tabs" role="tablist" aria-label="Result view"><button id="all-variants-tab" class="active" type="button" role="tab" aria-selected="true">All variants</button><button id="candidates-tab" type="button" role="tab" aria-selected="false">Candidates <span id="candidate-count">0</span></button></div>
+      <section id="case-notes-panel" class="case-notes-panel hidden"><div><h2>Case notes</h2><p>Stored only in this local AnnoCat library and excluded from shared reports.</p></div><textarea id="case-notes-editor" maxlength="1048576" placeholder="Add private case notes…"></textarea><div class="case-notes-actions"><span id="case-notes-status">Not loaded</span><button id="revert-case-notes" type="button">Revert</button><button id="save-case-notes" type="button">Save now</button></div></section>
+      <div class="results-layout"><div class="results-panel"><div class="toolbar"><input id="search" placeholder="Search displayed annotation fields"><div class="result-pager"><span id="result-page-status" aria-live="polite"></span><button id="select-all-filtered" type="button">Select all</button><button id="clear-selection" class="hidden" type="button">Clear</button><button id="export-selected-genes" class="hidden" type="button">Export genes</button><button id="export-selected-rows" class="hidden" type="button">Export rows</button><button id="filters" type="button">Filters</button><button id="columns">Columns</button></div></div><section id="result-filters" class="result-filters hidden" aria-label="Variant filters"><div class="filter-preset-bar"><label><span>Saved filter</span><select id="saved-filter-presets"><option value="">Choose a saved filter…</option></select></label><button id="load-filter-preset" type="button">Load</button><button id="save-filter-preset" type="button">Save current</button><button id="delete-filter-preset" type="button">Delete</button></div><div id="filter-rules" class="filter-rules"></div><div class="result-filter-actions"><button id="add-filter-rule" type="button" aria-label="Add another filter">＋ Add filter</button><span id="filter-message" aria-live="polite"></span><button id="reset-filters" type="button">Reset</button><button id="apply-filters" class="primary" type="button">Apply filters</button></div></section><div id="column-menu" class="column-menu hidden"></div><div class="table-wrap"><table><thead><tr id="head"></tr></thead><tbody id="rows"></tbody></table><div id="result-scroll-sentinel" class="result-scroll-sentinel" aria-live="polite"></div></div></div><aside id="variant-detail" class="variant-detail hidden" aria-live="polite"><div class="variant-detail-heading"><div><span>VARIANT DETAILS</span><h2 id="variant-detail-title">Variant</h2></div><button id="detail-candidate-toggle" class="detail-candidate-toggle hidden" type="button" aria-pressed="false" aria-label="Add to candidates" title="Add to candidates">☆</button><button id="close-variant-detail" type="button" aria-label="Close variant details">×</button></div><div id="variant-detail-body"></div></aside></div>
+    </section>
+
+    <section id="resources" class="page"><div class="page-heading"><p class="kicker">RESOURCES</p><h1>Data sources</h1><p>Manage the core annotation resources here, then add only the supplementary databases you want.</p></div><div id="profile-install-actions" class="profile-install-actions"></div><section id="download-section" class="resource-activity hidden" aria-labelledby="download-section-title"><div class="resource-section-heading"><div><p class="kicker">ACTIVITY</p><h2 id="download-section-title">Downloads and installations</h2></div><small>Supplementary databases stream into caches. Reusable GRCh38 and Ensembl core files remain managed downloads.</small></div><div id="download-jobs" class="download-jobs"></div></section><div class="resource-section-divider" role="separator"></div><div class="resource-section-heading"><div><p class="kicker">CATALOG</p><h2>Individual data sources</h2></div><small>Install, update, or remove sources independently.</small></div><div id="source-list" class="source-list"></div></section>
+    <section id="settings" class="page"><div class="page-heading"><p class="kicker">PREFERENCES</p><h1>Settings</h1><p>Manage storage locations and the small set of defaults that affect AnnoCat.</p></div><div class="settings-grid"><article class="settings-storage"><h2>Storage</h2><p>Keep installed data sources and annotation results wherever they fit best.</p><div class="settings-path"><span>Resource directory</span><strong id="settings-resource-path">Loading…</strong><small>Contains installed annotation caches and resumable source parts.</small><button type="button" data-pick-resource>Browse…</button></div><div class="settings-path"><span>Downloads directory</span><strong id="settings-downloads-path">Loading…</strong><small>Contains managed core downloads and their verification files.</small></div><div class="settings-path"><span>Results directory</span><strong id="settings-results-path">Loading…</strong><small>New runs and imported report ZIPs are stored here.</small><button type="button" data-pick-results-folder>Browse…</button></div></article><article><h2>Startup</h2><p>Control whether AnnoCat offers setup when annotation data is unavailable.</p><label><input id="show-setup" type="checkbox" checked> Show the first-run setup prompt</label></article><article><h2>Default annotation profile</h2><p>Preselect a profile when starting a new annotation.</p><label><span>Profile</span><select id="default-profile"><option value="wgs">Comprehensive</option><option value="standard">Minimal</option></select></label></article><article><h2>Source installation</h2><p>Choose resumable temporary parts or direct streaming, and how many sources may run together.</p><label><span>Download safety</span><select id="source-input-mode"><option value="pure-streaming">Pure streaming — Recommended</option><option value="hybrid-resumable">Hybrid resumable — Uses temporary disk</option></select></label><label><span>Concurrent source installs</span><select id="installation-concurrency"><option value="1">1 — Recommended</option><option value="2">2 — Faster</option><option value="3">3 — High resource use</option><option value="4">4 — Maximum resource use</option></select></label></article><article><h2>Preferences</h2><p>Restore startup, profile, and installation choices to their defaults.</p><button id="reset-preferences" type="button">Reset preferences</button></article></div></section>
+  </main>
+  <div id="first-run" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <div class="setup-modal"><div class="setup-wordmark" aria-label="AnnoCAT">Anno<span>CAT</span></div><p class="kicker">WELCOME TO ANNOCAT</p><h1 id="setup-title">What would you like to do?</h1><p>Browse existing results immediately, or set up local annotation on this computer.</p><div class="setup-actions"><button id="setup-annotation" class="setup-choice primary-choice"><svg class="ui-icon"><use href="#icon-plus"/></svg><strong>Set up local annotation</strong><small>Choose a profile and install required resources</small></button><button id="setup-open-results" class="setup-choice"><svg class="ui-icon"><use href="#icon-folder"/></svg><strong>Open existing results</strong><small>No annotation databases or downloads required</small></button></div><button id="setup-later" class="text-button">Not now — explore the app</button></div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+##fileformat=VCFv4.2
+##contig=<ID=22,length=50818468>
+##INFO=<ID=SCORE,Number=1,Type=Float,Description="Fixture score">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+22	16050075	fixture-1	A	G	.	PASS	SCORE=0.25
+22	16050115	fixture-2	C	T	.	PASS	SCORE=0.75

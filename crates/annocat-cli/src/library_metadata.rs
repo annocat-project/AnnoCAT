@@ -1,0 +1,333 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const MAX_NAME_BYTES: usize = 256;
+const MAX_NOTES_BYTES: usize = 1_000_000;
+const MAX_CANDIDATES: usize = 10_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalMetadata {
+    schema_version: u16,
+    run_id: String,
+    display_name: String,
+    renamed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateOverlay {
+    schema_version: u16,
+    run_id: String,
+    revision: u64,
+    updated_at: String,
+    candidates: BTreeMap<String, CandidateEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CandidateEntry {
+    pub allele_id: String,
+    pub added_at: String,
+    pub reason: String,
+}
+
+pub fn display_name(runs: &Path, run_id: &str) -> Option<String> {
+    let metadata: LocalMetadata =
+        serde_json::from_slice(&fs::read(metadata_path(runs, run_id)).ok()?).ok()?;
+    (metadata.schema_version == 1 && metadata.run_id == run_id).then_some(metadata.display_name)
+}
+
+pub fn rename(runs: &Path, run_id: &str, name: &str) -> Result<String, String> {
+    validate_run_id(run_id)?;
+    let name = name.trim();
+    if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
+        return Err("report name must be 1–256 characters without control characters".into());
+    }
+    for entry in fs::read_dir(runs)
+        .map_err(|error| format!("cannot inspect report names: {error}"))?
+        .flatten()
+    {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || entry.file_name() == ".annocat-library"
+        {
+            continue;
+        }
+        let Ok(manifest) = fs::read(entry.path().join("manifest.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&manifest) else {
+            continue;
+        };
+        let Some(other_id) = manifest["runId"].as_str() else {
+            continue;
+        };
+        if other_id == run_id {
+            continue;
+        }
+        let other_name =
+            display_name(runs, other_id).or_else(|| manifest["name"].as_str().map(str::to_owned));
+        if other_name
+            .as_deref()
+            .is_some_and(|other| other.eq_ignore_ascii_case(name))
+        {
+            return Err("another report already uses that name".into());
+        }
+    }
+    let value = LocalMetadata {
+        schema_version: 1,
+        run_id: run_id.into(),
+        display_name: name.into(),
+        renamed_at: super::annotation::current_timestamp(),
+    };
+    atomic_write(
+        &metadata_path(runs, run_id),
+        &serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?,
+    )?;
+    Ok(name.into())
+}
+
+pub fn notes(runs: &Path, run_id: &str) -> Result<String, String> {
+    validate_run_id(run_id)?;
+    let path = notes_path(runs, run_id);
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("cannot read case notes: {error}"))?;
+    if bytes.len() > MAX_NOTES_BYTES {
+        return Err("case notes exceed the 1 MB limit".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "case notes are not valid UTF-8".into())
+}
+
+pub fn save_notes(runs: &Path, run_id: &str, notes: &str) -> Result<(), String> {
+    validate_run_id(run_id)?;
+    if notes.len() > MAX_NOTES_BYTES {
+        return Err("case notes exceed the 1 MB limit".into());
+    }
+    atomic_write(&notes_path(runs, run_id), notes.as_bytes())
+}
+
+pub fn candidates(runs: &Path, run_id: &str) -> Result<Vec<CandidateEntry>, String> {
+    Ok(read_candidates(runs, run_id)?
+        .candidates
+        .into_values()
+        .collect())
+}
+
+pub fn update_candidates(
+    runs: &Path,
+    run_id: &str,
+    allele_ids: &[String],
+    add: bool,
+) -> Result<Vec<CandidateEntry>, String> {
+    validate_run_id(run_id)?;
+    if allele_ids.is_empty() || allele_ids.len() > 1_000 {
+        return Err("candidate update needs between 1 and 1,000 allele IDs".into());
+    }
+    for allele_id in allele_ids {
+        validate_allele_id(allele_id)?;
+    }
+    let mut overlay = read_candidates(runs, run_id)?;
+    if add && overlay.candidates.len().saturating_add(allele_ids.len()) > MAX_CANDIDATES {
+        return Err("a report can contain at most 10,000 manually curated candidates".into());
+    }
+    let now = super::annotation::current_timestamp();
+    for allele_id in allele_ids {
+        if add {
+            overlay
+                .candidates
+                .entry(allele_id.clone())
+                .or_insert_with(|| CandidateEntry {
+                    allele_id: allele_id.clone(),
+                    added_at: now.clone(),
+                    reason: "Added manually".into(),
+                });
+        } else {
+            overlay.candidates.remove(allele_id);
+        }
+    }
+    overlay.revision = overlay.revision.saturating_add(1);
+    overlay.updated_at = now;
+    atomic_write(
+        &candidates_path(runs, run_id),
+        &serde_json::to_vec_pretty(&overlay).map_err(|error| error.to_string())?,
+    )?;
+    Ok(overlay.candidates.into_values().collect())
+}
+
+fn read_candidates(runs: &Path, run_id: &str) -> Result<CandidateOverlay, String> {
+    validate_run_id(run_id)?;
+    let path = candidates_path(runs, run_id);
+    if !path.exists() {
+        return Ok(CandidateOverlay {
+            schema_version: 1,
+            run_id: run_id.into(),
+            revision: 0,
+            updated_at: String::new(),
+            candidates: BTreeMap::new(),
+        });
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("cannot read candidates: {error}"))?;
+    if bytes.len() > 4_000_000 {
+        return Err("candidate overlay exceeds its 4 MB limit".into());
+    }
+    let overlay: CandidateOverlay = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid candidate overlay: {error}"))?;
+    if overlay.schema_version != 1
+        || overlay.run_id != run_id
+        || overlay.candidates.len() > MAX_CANDIDATES
+        || overlay.candidates.iter().any(|(id, entry)| {
+            id != &entry.allele_id || validate_allele_id(&entry.allele_id).is_err()
+        })
+    {
+        return Err("candidate overlay identity or contents are invalid".into());
+    }
+    Ok(overlay)
+}
+
+fn library_directory(runs: &Path, run_id: &str) -> PathBuf {
+    runs.join(".annocat-library").join(run_id)
+}
+fn metadata_path(runs: &Path, run_id: &str) -> PathBuf {
+    library_directory(runs, run_id).join("metadata.json")
+}
+fn notes_path(runs: &Path, run_id: &str) -> PathBuf {
+    library_directory(runs, run_id).join("case-notes.md")
+}
+fn candidates_path(runs: &Path, run_id: &str) -> PathBuf {
+    library_directory(runs, run_id).join("candidates.json")
+}
+fn validate_allele_id(allele_id: &str) -> Result<(), String> {
+    if allele_id.len() > 64
+        || !allele_id.starts_with("allele-")
+        || !allele_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Err("invalid stable allele identifier".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), String> {
+    if run_id.is_empty()
+        || run_id.len() > 128
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Err("invalid run identifier".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("local metadata path has no parent")?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create local metadata directory: {error}"))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.partial",
+        path.file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("metadata"),
+        std::process::id()
+    ));
+    fs::write(&temporary, bytes)
+        .map_err(|error| format!("cannot write local metadata: {error}"))?;
+    replace_file(&temporary, path)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(format!(
+            "cannot publish local metadata: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(source, destination)
+        .map_err(|error| format!("cannot publish local metadata: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rename_and_notes_are_separate_from_the_run() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-library-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run = root.join("original");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("manifest.json"),
+            br#"{"runId":"run-1","name":"Original"}"#,
+        )
+        .unwrap();
+        assert_eq!(rename(&root, "run-1", "Renamed").unwrap(), "Renamed");
+        save_notes(&root, "run-1", "private note").unwrap();
+        let allele = "allele-0123456789abcdef".to_string();
+        assert_eq!(
+            update_candidates(&root, "run-1", std::slice::from_ref(&allele), true)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(candidates(&root, "run-1").unwrap()[0].allele_id, allele);
+        assert!(
+            update_candidates(&root, "run-1", &["allele-0123456789abcdef".into()], false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(display_name(&root, "run-1").as_deref(), Some("Renamed"));
+        assert_eq!(notes(&root, "run-1").unwrap(), "private note");
+        assert!(!run.join("case-notes.md").exists());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(run.join("manifest.json")).unwrap()
+            )
+            .unwrap()["name"],
+            "Original"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

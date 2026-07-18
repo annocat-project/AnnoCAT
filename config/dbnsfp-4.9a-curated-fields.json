@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "id": "dbnsfp-4.9a-annocat-core-v1",
+  "resourceId": "dbnsfp",
+  "release": "4.9a",
+  "assembly": "GRCh38",
+  "description": "Transcript-linked coding prediction bundle. Dedicated AnnoCat ClinVar, dbSNP, gnomAD, CADD, SpliceAI, and genome-wide conservation sources remain independently namespaced and take precedence for their domains.",
+  "recommendedFields": [
+    "SIFT_score", "SIFT_pred",
+    "Polyphen2_HDIV_score", "Polyphen2_HDIV_pred",
+    "REVEL_score",
+    "AlphaMissense_score", "AlphaMissense_pred",
+    "PrimateAI_score", "PrimateAI_pred",
+    "CADD_phred",
+    "phyloP100way_vertebrate",
+    "GERP++_RS"
+  ],
+  "groups": [
+    {
+      "id": "linkage",
+      "label": "Variant and transcript linkage",
+      "required": true,
+      "fields": [
+        "chr", "pos(1-based)", "ref", "alt", "aaref", "aaalt", "aapos",
+        "genename", "Ensembl_geneid", "Ensembl_transcriptid", "Ensembl_proteinid",
+        "Uniprot_acc", "HGVSc_VEP", "HGVSp_VEP", "APPRIS", "GENCODE_basic",
+        "TSL", "VEP_canonical"
+      ]
+    },
+    {
+      "id": "missense-prediction",
+      "label": "Missense predictions",
+      "required": false,
+      "fields": [
+        "SIFT_score", "SIFT_converted_rankscore", "SIFT_pred",
+        "SIFT4G_score", "SIFT4G_converted_rankscore", "SIFT4G_pred",
+        "Polyphen2_HDIV_score", "Polyphen2_HDIV_rankscore", "Polyphen2_HDIV_pred",
+        "Polyphen2_HVAR_score", "Polyphen2_HVAR_rankscore", "Polyphen2_HVAR_pred",
+        "MutationTaster_score", "MutationTaster_converted_rankscore", "MutationTaster_pred",
+        "MutationAssessor_score", "MutationAssessor_rankscore", "MutationAssessor_pred",
+        "PROVEAN_score", "PROVEAN_converted_rankscore", "PROVEAN_pred",
+        "VEST4_score", "VEST4_rankscore",
+        "MetaSVM_score", "MetaSVM_rankscore", "MetaSVM_pred",
+        "MetaLR_score", "MetaLR_rankscore", "MetaLR_pred",
+        "MetaRNN_score", "MetaRNN_rankscore", "MetaRNN_pred",
+        "M-CAP_score", "M-CAP_rankscore", "M-CAP_pred",
+        "REVEL_score", "REVEL_rankscore",
+        "MutPred_score", "MutPred_rankscore", "MutPred_Top5features",
+        "MVP_score", "MVP_rankscore", "gMVP_score", "gMVP_rankscore",
+        "MPC_score", "MPC_rankscore",
+        "PrimateAI_score", "PrimateAI_rankscore", "PrimateAI_pred",
+        "DEOGEN2_score", "DEOGEN2_rankscore", "DEOGEN2_pred",
+        "BayesDel_noAF_score", "BayesDel_noAF_rankscore", "BayesDel_noAF_pred",
+        "ClinPred_score", "ClinPred_rankscore", "ClinPred_pred",
+        "LIST-S2_score", "LIST-S2_rankscore", "LIST-S2_pred",
+        "VARITY_R_score", "VARITY_R_rankscore", "VARITY_ER_score", "VARITY_ER_rankscore",
+        "ESM1b_score", "ESM1b_rankscore", "ESM1b_pred",
+        "EVE_score", "EVE_rankscore",
+        "AlphaMissense_score", "AlphaMissense_rankscore", "AlphaMissense_pred",
+        "PHACTboost_score", "PHACTboost_rankscore",
+        "MutFormer_score", "MutFormer_rankscore", "MutScore_score", "MutScore_rankscore"
+      ]
+    },
+    {
+      "id": "general-and-lof-prediction",
+      "label": "General and loss-of-function predictions",
+      "required": false,
+      "fields": [
+        "Aloft_Fraction_transcripts_affected", "Aloft_prob_Tolerant",
+        "Aloft_prob_Recessive", "Aloft_prob_Dominant", "Aloft_pred", "Aloft_Confidence",
+        "CADD_raw", "CADD_raw_rankscore", "CADD_phred",
+        "DANN_score", "DANN_rankscore",
+        "fathmm-XF_coding_score", "fathmm-XF_coding_rankscore", "fathmm-XF_coding_pred",
+        "Eigen-raw_coding", "Eigen-raw_coding_rankscore", "Eigen-phred_coding",
+        "Eigen-PC-raw_coding", "Eigen-PC-raw_coding_rankscore", "Eigen-PC-phred_coding"
+      ]
+    },
+    {
+      "id": "conservation-and-domain",
+      "label": "Conservation and protein domains",
+      "required": false,
+      "fields": [
+        "GERP++_NR", "GERP++_RS", "GERP++_RS_rankscore",
+        "GERP_91_mammals", "GERP_91_mammals_rankscore",
+        "phyloP100way_vertebrate", "phyloP100way_vertebrate_rankscore",
+        "phyloP470way_mammalian", "phyloP470way_mammalian_rankscore",
+        "phastCons100way_vertebrate", "phastCons100way_vertebrate_rankscore",
+        "phastCons470way_mammalian", "phastCons470way_mammalian_rankscore",
+        "SiPhy_29way_logOdds", "SiPhy_29way_logOdds_rankscore",
+        "bStatistic", "bStatistic_converted_rankscore", "Interpro_domain"
+      ]
+    }
+  ],
+  "excludedFamilies": [
+    "hg18/hg19 coordinates and duplicate hg19 scores",
+    "ancient hominid alleles",
+    "1000 Genomes, UK10K, ESP, ExAC, ALFA, and dbNSFP population-frequency copies",
+    "dbNSFP gnomAD copies because AnnoCat uses a dedicated gnomAD source",
+    "dbNSFP ClinVar copies because AnnoCat uses rolling dedicated ClinVar",
+    "dbNSFP rsIDs because AnnoCat uses dedicated dbSNP",
+    "GTEx, eQTLGen, and Geuvadis fields pending a separate optional QTL source",
+    "redundant threshold-derived EVE class columns and VARITY leave-one-out research columns"
+  ]
+}

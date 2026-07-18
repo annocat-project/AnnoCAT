@@ -1,0 +1,9 @@
+[package]
+name = "annocat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2 = "1"
+noodles = { version = "0.109", features = ["core", "vcf", "bcf", "bgzf", "fasta", "csi", "tabix"] }

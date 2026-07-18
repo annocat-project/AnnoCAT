@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "resourceId": "revel",
+  "release": "1.3",
+  "assembly": "GRCh38",
+  "recordUrl": "https://zenodo.org/records/7072866",
+  "archives": [
+    {"chromosome":"1","filename":"revel-v1.3_segments_chrom_01.zip","bytes":68628598,"md5":"256767b203bb9caa3a266c96d8b5ae5f"},
+    {"chromosome":"2","filename":"revel-v1.3_segments_chrom_02.zip","bytes":50107773,"md5":"3980c77b28fec268d81bf8a67f84810e"},
+    {"chromosome":"3","filename":"revel-v1.3_segments_chrom_03.zip","bytes":39764607,"md5":"fcbb46dfde80aa7e6b5d78d388951e81"},
+    {"chromosome":"4","filename":"revel-v1.3_segments_chrom_04.zip","bytes":27590257,"md5":"2563cb360af7b5a4133f5941f3029f6b"},
+    {"chromosome":"5","filename":"revel-v1.3_segments_chrom_05.zip","bytes":30537855,"md5":"3822547d92ae2a82f9ad75e5837d3ac4"},
+    {"chromosome":"6","filename":"revel-v1.3_segments_chrom_06.zip","bytes":34038079,"md5":"3801ea32b8dd82ac57e09eb46b982f82"},
+    {"chromosome":"7","filename":"revel-v1.3_segments_chrom_07.zip","bytes":31392997,"md5":"decfc4428a398ea805f8137263c429f0"},
+    {"chromosome":"8","filename":"revel-v1.3_segments_chrom_08.zip","bytes":23501101,"md5":"016c2f38f46d7e348eac4e7b280b182f"},
+    {"chromosome":"9","filename":"revel-v1.3_segments_chrom_09.zip","bytes":27207491,"md5":"be38b2b9b64bd76c802ccd81df3b2992"},
+    {"chromosome":"10","filename":"revel-v1.3_segments_chrom_10.zip","bytes":26824243,"md5":"195370cd523558d3d9300de3410f974e"},
+    {"chromosome":"11","filename":"revel-v1.3_segments_chrom_11.zip","bytes":39521090,"md5":"ace4afd893bf2330d746ceb5ead0233e"},
+    {"chromosome":"12","filename":"revel-v1.3_segments_chrom_12.zip","bytes":35934024,"md5":"ae4f4fd6269e2c046184bc6db43d294c"},
+    {"chromosome":"13","filename":"revel-v1.3_segments_chrom_13.zip","bytes":11806861,"md5":"7174acf76b74756ae7228f57b8ba51d2"},
+    {"chromosome":"14","filename":"revel-v1.3_segments_chrom_14.zip","bytes":21833995,"md5":"63df374f699ed6900c9c17c016bee9d6"},
+    {"chromosome":"15","filename":"revel-v1.3_segments_chrom_15.zip","bytes":21589073,"md5":"b2a65feb2f4105110bdac4cd7e34f5a6"},
+    {"chromosome":"16","filename":"revel-v1.3_segments_chrom_16.zip","bytes":26843490,"md5":"6bfbe25857d11d08c72b4569e8c2e0ee"},
+    {"chromosome":"17","filename":"revel-v1.3_segments_chrom_17.zip","bytes":36479271,"md5":"007d0f5e2b3e46fafc1242048a74c222"},
+    {"chromosome":"18","filename":"revel-v1.3_segments_chrom_18.zip","bytes":9825868,"md5":"157a6d421a1379cb0ac3a047fb3dd3d5"},
+    {"chromosome":"19","filename":"revel-v1.3_segments_chrom_19.zip","bytes":40862900,"md5":"287b2b74da0e8b145079b50fab6eb0ca"},
+    {"chromosome":"20","filename":"revel-v1.3_segments_chrom_20.zip","bytes":16131769,"md5":"c6df0e06cc37df08fdd30f21db73f893"},
+    {"chromosome":"21","filename":"revel-v1.3_segments_chrom_21.zip","bytes":6832713,"md5":"c06bb2dcdbd11d36d51a8af5aa36f2b4"},
+    {"chromosome":"22","filename":"revel-v1.3_segments_chrom_22.zip","bytes":14543133,"md5":"830d9fbe4e3f700b177b43592c5c19ed"},
+    {"chromosome":"X","filename":"revel-v1.3_segments_chrom__X.zip","bytes":25148777,"md5":"af369f6678e25ee38c5d6fa26f1eb787"},
+    {"chromosome":"Y","filename":"revel-v1.3_segments_chrom__Y.zip","bytes":242673,"md5":"3f8cd7601fbb49a4c4211b09e1b0f59c"}
+  ]
+}

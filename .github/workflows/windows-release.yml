@@ -1,0 +1,38 @@
+name: Windows release bundle
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+      - name: Fetch pinned AnnoCAT fastVEP fork
+        shell: pwsh
+        run: |
+          $pin = Get-Content -LiteralPath config/fastvep-pin.json -Raw | ConvertFrom-Json
+          git clone $pin.repository "$env:RUNNER_TEMP\fastVEP"
+          git -C "$env:RUNNER_TEMP\fastVEP" checkout --detach $pin.commit
+      - name: Build, test, and package AnnoCAT with fastVEP
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -FastVepSource "$env:RUNNER_TEMP\fastVEP"
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: annocat-windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error

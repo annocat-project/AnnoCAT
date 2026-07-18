@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "sourceRepository": "https://github.com/Huang-lab/fastVEP",
+  "sourceCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
+  "license": "Apache-2.0",
+  "generatedBy": {
+    "version": "fastvep 0.2.0",
+    "windowsBinarySha256": "c54cd76c9bd4efb5184c29e63e6eb0b170c7d342d6565410764d45577ca9ada7",
+    "command": "fastvep annotate -i test.vcf --gff3 test.gff3 -o expected.vcf"
+  },
+  "expected": {
+    "inputRecords": 8,
+    "loadedTranscripts": 48,
+    "csqFields": 49
+  },
+  "files": {
+    "test.gff3": "8362fb18a230c737cef94b1f356626c1c5d9865989bb93e20be1766b6df7a333",
+    "test.vcf": "08a41f327b53f20a908515e64e6eb8e2186b34aa99b7c0bda75b74052174fbde",
+    "expected.vcf": "e1d5d50e5dd82e3286436b1e223f8974285fe2309a104ea9f4c09184e8662734"
+  }
+}
