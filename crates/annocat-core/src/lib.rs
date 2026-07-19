@@ -1,5 +1,6 @@
 pub mod normalization;
 pub mod source_catalog;
+pub mod source_overrides;
 pub mod vcf;
 
 #[derive(Debug, Clone, Copy)]

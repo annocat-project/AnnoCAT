@@ -8,7 +8,8 @@
       "defaultEnabled": true,
       "fastvepSource": null,
       "delivery": "bundled-engine",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "bundled-open-source"
     },
     {
       "id": "dbnsfp",
@@ -17,7 +18,8 @@
       "defaultEnabled": true,
       "fastvepSource": "dbnsfp",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "clinvar",
@@ -26,7 +28,8 @@
       "defaultEnabled": true,
       "fastvepSource": "clinvar",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "dbsnp",
@@ -35,7 +38,8 @@
       "defaultEnabled": false,
       "fastvepSource": "dbsnp",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "clingen",
@@ -44,7 +48,8 @@
       "defaultEnabled": true,
       "fastvepSource": null,
       "delivery": "adapter-required",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "gencc",
@@ -53,7 +58,8 @@
       "defaultEnabled": true,
       "fastvepSource": null,
       "delivery": "adapter-required",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "gnomad",
@@ -62,7 +68,8 @@
       "defaultEnabled": false,
       "fastvepSource": "gnomad",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "gnomad-genomes",
@@ -71,7 +78,8 @@
       "defaultEnabled": false,
       "fastvepSource": "gnomad",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "spliceai",
@@ -80,7 +88,8 @@
       "defaultEnabled": false,
       "fastvepSource": "spliceai",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "cadd",
@@ -89,7 +98,8 @@
       "defaultEnabled": false,
       "fastvepSource": "cadd",
       "delivery": "managed-public-noncommercial",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "noncommercial-restricted"
     },
     {
       "id": "phylop",
@@ -98,7 +108,8 @@
       "defaultEnabled": false,
       "fastvepSource": "phylop",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "gerp",
@@ -107,7 +118,8 @@
       "defaultEnabled": false,
       "fastvepSource": "gerp",
       "delivery": "catalog-pending",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "revel",
@@ -116,7 +128,8 @@
       "defaultEnabled": false,
       "fastvepSource": "revel",
       "delivery": "managed-public",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "publisher-terms"
     },
     {
       "id": "primateai",
@@ -125,7 +138,8 @@
       "defaultEnabled": false,
       "fastvepSource": "primateai",
       "delivery": "catalog-pending",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "dann",
@@ -134,7 +148,8 @@
       "defaultEnabled": false,
       "fastvepSource": "dann",
       "delivery": "catalog-pending",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "alphamissense",
@@ -143,7 +158,8 @@
       "defaultEnabled": false,
       "fastvepSource": null,
       "delivery": "adapter-required",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "gnomad-constraint",
@@ -152,7 +168,8 @@
       "defaultEnabled": false,
       "fastvepSource": "gnomad_genes",
       "delivery": "catalog-pending",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "pending-review"
     },
     {
       "id": "omim",
@@ -161,7 +178,8 @@
       "defaultEnabled": false,
       "fastvepSource": "omim",
       "delivery": "user-supplied-licensed",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "user-supplied-license"
     },
     {
       "id": "cosmic",
@@ -170,7 +188,8 @@
       "defaultEnabled": false,
       "fastvepSource": "cosmic",
       "delivery": "user-supplied-licensed",
-      "assembly": "GRCh38"
+      "assembly": "GRCh38",
+      "licensePolicy": "user-supplied-license"
     }
   ],
   "profiles": [
@@ -234,6 +253,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-dbnsfp-v1",
       "manifestRef": "config/dbnsfp-4.9a-members.json",
+      "fieldContract": {
+        "manifestRef": "config/dbnsfp-4.9a-curated-fields.json",
+        "contractId": "dbnsfp-4.9a-annocat-core-v1"
+      },
       "release": {
         "version": "4.9a",
         "policy": "pinned",
@@ -254,6 +277,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-clinvar-v1",
       "manifestRef": null,
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "clinvar-fastvep-fields-v1"
+      },
       "release": {
         "version": "20260706",
         "policy": "rolling",
@@ -274,6 +301,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-dbsnp-v1",
       "manifestRef": null,
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "dbsnp-fastvep-fields-v1"
+      },
       "release": {
         "version": "b157-GRCh38.p14",
         "policy": "rolling",
@@ -294,6 +325,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-gnomad-v1",
       "manifestRef": "config/wgs-streams.json",
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "gnomad-fastvep-fields-v1"
+      },
       "release": {
         "version": "4.1.1-exomes",
         "policy": "pinned",
@@ -314,6 +349,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-gnomad-v1",
       "manifestRef": "config/wgs-streams.json",
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "gnomad-genomes-fastvep-fields-v1"
+      },
       "release": {
         "version": "4.1.1-genomes",
         "policy": "pinned",
@@ -334,6 +373,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-cadd-v1",
       "manifestRef": null,
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "cadd-fastvep-fields-v1"
+      },
       "release": {
         "version": "1.7",
         "policy": "pinned",
@@ -354,6 +397,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-phylop-v1",
       "manifestRef": "config/wgs-streams.json",
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "phylop-fastvep-fields-v1"
+      },
       "release": {
         "version": "hg38-100way-2015-05-08",
         "policy": "pinned",
@@ -374,6 +421,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-spliceai-v1",
       "manifestRef": null,
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "spliceai-fastvep-fields-v1"
+      },
       "release": {
         "version": "ensembl-mane-v1.4-masked-snv",
         "policy": "pinned",
@@ -394,6 +445,10 @@
       "delivery": "stream-cache",
       "adapterContract": "annocat-revel-v1",
       "manifestRef": "config/revel-1.3-archives.json",
+      "fieldContract": {
+        "manifestRef": "config/supplementary-source-fields.json",
+        "contractId": "revel-fastvep-fields-v1"
+      },
       "release": {
         "version": "1.3",
         "policy": "pinned",

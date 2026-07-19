@@ -26,6 +26,7 @@ pub struct Source {
     pub fastvep_source: Option<String>,
     pub delivery: String,
     pub assembly: String,
+    pub license_policy: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +46,15 @@ pub struct Resource {
     pub delivery: String,
     pub adapter_contract: Option<String>,
     pub manifest_ref: Option<String>,
+    pub field_contract: Option<FieldContract>,
     pub release: Release,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FieldContract {
+    pub manifest_ref: String,
+    pub contract_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +73,7 @@ pub struct Release {
     pub resolver: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Checksum {
     pub algorithm: String,
@@ -194,6 +203,14 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                     | "catalog-pending"
                     | "user-supplied-licensed"
             )
+            || !matches!(
+                source.license_policy.as_str(),
+                "bundled-open-source"
+                    | "publisher-terms"
+                    | "noncommercial-restricted"
+                    | "user-supplied-license"
+                    | "pending-review"
+            )
             || source
                 .fastvep_source
                 .as_deref()
@@ -266,6 +283,25 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 resource.id
             ));
         }
+        if let Some(field_contract) = &resource.field_contract
+            && (!safe_id(&field_contract.contract_id)
+                || !embedded_field_contract_exists(
+                    &field_contract.manifest_ref,
+                    &resource.id,
+                    &field_contract.contract_id,
+                ))
+        {
+            return Err(format!(
+                "resource {} has an invalid retained-field contract",
+                resource.id
+            ));
+        }
+        if resource.delivery == "stream-cache" && resource.field_contract.is_none() {
+            return Err(format!(
+                "resource {} has no retained-field contract",
+                resource.id
+            ));
+        }
         if let Some(checksum) = &resource.release.checksum {
             let expected_length = match checksum.algorithm.as_str() {
                 "md5" => 32,
@@ -320,6 +356,31 @@ fn embedded_manifest_exists(path: &str) -> bool {
             | "config/revel-1.3-archives.json"
             | "config/wgs-streams.json"
     )
+}
+
+fn embedded_field_contract_exists(path: &str, resource_id: &str, contract_id: &str) -> bool {
+    let contents = match path {
+        "config/dbnsfp-4.9a-curated-fields.json" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/dbnsfp-4.9a-curated-fields.json"
+        )),
+        "config/supplementary-source-fields.json" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/supplementary-source-fields.json"
+        )),
+        _ => return false,
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(contents) else {
+        return false;
+    };
+    if path.ends_with("dbnsfp-4.9a-curated-fields.json") {
+        return value["resourceId"] == resource_id && value["id"] == contract_id;
+    }
+    value["sources"].as_array().is_some_and(|sources| {
+        sources.iter().any(|source| {
+            source["resourceId"] == resource_id && source["contractId"] == contract_id
+        })
+    })
 }
 
 fn safe_id(value: &str) -> bool {

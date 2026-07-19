@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "overrides": [
+    {
+      "sourceId": "dbnsfp",
+      "artifactId": "dbnsfp-official-variant-archive:4.9a",
+      "mirrors": [
+        {
+          "url": "https://mirror.example.org/dbNSFP4.9a.zip",
+          "expectedBytes": 38969753349,
+          "checksum": {
+            "algorithm": "md5",
+            "value": "be89346ab3dc5c14a8a7b602f50c66fb"
+          }
+        }
+      ]
+    }
+  ]
+}

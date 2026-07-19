@@ -30,6 +30,7 @@
 !/config/dbnsfp-4.9a-curated-fields.json
 !/config/wgs-streams.json
 !/config/source-catalog.json
+!/config/source-overrides.example.json
 *.vcf.gz
 *.tbi
 *.csi
