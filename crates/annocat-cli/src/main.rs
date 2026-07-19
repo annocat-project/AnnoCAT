@@ -1377,7 +1377,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     if let Some((profile_id, action)) = profile_preparation_api_route(path) {
         let response = match action {
             "status" => match profile_preparation_status(profile_id) {
-                Ok(body) => ("200 OK", body),
+                Ok(status) => ("200 OK", serialize_json(&status)),
                 Err(error) => (
                     "404 Not Found",
                     format!("{{\"error\":\"{}\"}}", json_escape(&error)),
@@ -2362,7 +2362,38 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn profile_preparation_status(profile_id: &str) -> Result<String, String> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileSourceStatus {
+    resource_id: String,
+    preparation: preparation::LivePreparationState,
+    catalog_ready: bool,
+    expected_compressed_bytes: Option<u64>,
+    release: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfilePreparationStatus {
+    profile_id: String,
+    state: String,
+    current_resource_id: Option<String>,
+    current_chromosome: Option<String>,
+    network_bytes: u64,
+    expected_network_bytes: u64,
+    prepared_bytes: u64,
+    disk: preparation::PreparationDiskPlan,
+    throughput_bytes_per_second: f64,
+    completed_chromosomes: u64,
+    remaining_chromosomes: u64,
+    completed_resources: usize,
+    remaining_resources: usize,
+    percent: f64,
+    blocked_resource_ids: Vec<String>,
+    sources: Vec<ProfileSourceStatus>,
+}
+
+fn profile_preparation_status(profile_id: &str) -> Result<ProfilePreparationStatus, String> {
     let profile = annocat_core::source_catalog::profile(profile_id)
         .ok_or_else(|| format!("unknown profile '{profile_id}'"))?;
     let resources = portable_paths()?.resources;
@@ -2375,49 +2406,55 @@ fn profile_preparation_status(profile_id: &str) -> Result<String, String> {
             let release = annocat_core::source_catalog::download_release(id);
             let catalog_ready =
                 state.state == "ready" || (preparation_available(id) && release.is_some());
-            serde_json::json!({
-                "resourceId": id,
-                "preparation": state,
-                "catalogReady": catalog_ready,
-                "expectedCompressedBytes": release.and_then(|release| release.download_bytes),
-                "release": release.map(|release| release.version)
-            })
+            ProfileSourceStatus {
+                resource_id: id.clone(),
+                preparation: state,
+                catalog_ready,
+                expected_compressed_bytes: release.and_then(|release| release.download_bytes),
+                release: release.map(|release| release.version.to_string()),
+            }
         })
         .collect::<Vec<_>>();
     let running_source = sources
         .iter()
-        .find(|source| source["preparation"]["state"] == "running");
+        .find(|source| source.preparation.state == "running");
     let failed = sources
         .iter()
-        .any(|source| source["preparation"]["state"] == "failed");
+        .any(|source| source.preparation.state == "failed");
     let actionable = sources
         .iter()
-        .filter(|source| source["catalogReady"] == true)
+        .filter(|source| source.catalog_ready)
         .collect::<Vec<_>>();
     let blocked_resource_ids = sources
         .iter()
-        .filter(|source| source["catalogReady"] == false)
-        .filter_map(|source| source["resourceId"].as_str())
+        .filter(|source| !source.catalog_ready)
+        .map(|source| source.resource_id.clone())
         .collect::<Vec<_>>();
-    let sum = |field: &str| {
-        actionable
-            .iter()
-            .filter_map(|source| source["preparation"][field].as_u64())
-            .sum::<u64>()
-    };
     let expected_network_bytes = actionable
         .iter()
-        .filter_map(|source| source["expectedCompressedBytes"].as_u64())
+        .filter_map(|source| source.expected_compressed_bytes)
         .sum::<u64>();
-    let network_bytes = sum("networkBytes");
-    let prepared_bytes = sum("preparedBytes");
+    let network_bytes = actionable
+        .iter()
+        .map(|source| source.preparation.network_bytes)
+        .sum::<u64>();
+    let prepared_bytes = actionable
+        .iter()
+        .map(|source| source.preparation.prepared_bytes)
+        .sum::<u64>();
     let disk =
         preparation::preparation_disk_plan(network_bytes, expected_network_bytes, prepared_bytes);
-    let completed_chromosomes = sum("completedChromosomes");
-    let remaining_chromosomes = sum("remainingChromosomes");
+    let completed_chromosomes = actionable
+        .iter()
+        .map(|source| u64::from(source.preparation.completed_chromosomes))
+        .sum::<u64>();
+    let remaining_chromosomes = actionable
+        .iter()
+        .map(|source| u64::from(source.preparation.remaining_chromosomes))
+        .sum::<u64>();
     let completed_resources = actionable
         .iter()
-        .filter(|source| source["preparation"]["state"] == "ready")
+        .filter(|source| source.preparation.state == "ready")
         .count();
     let percent = if expected_network_bytes == 0 {
         0.0
@@ -2439,25 +2476,27 @@ fn profile_preparation_status(profile_id: &str) -> Result<String, String> {
     } else {
         "idle"
     };
-    serde_json::to_string(&serde_json::json!({
-        "profileId": profile_id,
-        "state": state,
-        "currentResourceId": running_source.and_then(|source| source["resourceId"].as_str()),
-        "currentChromosome": running_source.and_then(|source| source["preparation"]["chromosome"].as_str()),
-        "networkBytes": network_bytes,
-        "expectedNetworkBytes": expected_network_bytes,
-        "preparedBytes": prepared_bytes,
-        "disk": disk,
-        "throughputBytesPerSecond": actionable.iter().filter_map(|source| source["preparation"]["throughputBytesPerSecond"].as_f64()).sum::<f64>(),
-        "completedChromosomes": completed_chromosomes,
-        "remainingChromosomes": remaining_chromosomes,
-        "completedResources": completed_resources,
-        "remainingResources": actionable.len().saturating_sub(completed_resources),
-        "percent": percent,
-        "blockedResourceIds": blocked_resource_ids,
-        "sources": sources
-    }))
-    .map_err(|error| error.to_string())
+    Ok(ProfilePreparationStatus {
+        profile_id: profile_id.to_string(),
+        state: state.to_string(),
+        current_resource_id: running_source.map(|source| source.resource_id.clone()),
+        current_chromosome: running_source.and_then(|source| source.preparation.chromosome.clone()),
+        network_bytes,
+        expected_network_bytes,
+        prepared_bytes,
+        disk,
+        throughput_bytes_per_second: actionable
+            .iter()
+            .map(|source| source.preparation.throughput_bytes_per_second)
+            .sum(),
+        completed_chromosomes,
+        remaining_chromosomes,
+        completed_resources,
+        remaining_resources: actionable.len().saturating_sub(completed_resources),
+        percent,
+        blocked_resource_ids,
+        sources,
+    })
 }
 
 fn managed_preparation_status(
@@ -4021,8 +4060,7 @@ mod profile_status_tests {
 
     #[test]
     fn profile_status_exposes_aggregate_progress_and_blockers() {
-        let value: serde_json::Value =
-            serde_json::from_str(&profile_preparation_status("wgs").unwrap()).unwrap();
+        let value = serde_json::to_value(profile_preparation_status("wgs").unwrap()).unwrap();
         assert_eq!(value["profileId"], "wgs");
         assert!(value["expectedNetworkBytes"].as_u64().unwrap() > 0);
         assert!(value["networkBytes"].is_u64());
