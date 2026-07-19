@@ -1823,8 +1823,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             resource_catalog_candidates_json(),
         ),
         "/api/resources/plan" => ("200 OK", "application/json", practical_resource_plan_json()),
-        "/api/resources/status" => match resources_status_json() {
-            Ok(body) => ("200 OK", "application/json", body),
+        "/api/resources/status" => match resources_status() {
+            Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
             Err(error) => (
                 "500 Internal Server Error",
                 "application/json",
@@ -3332,44 +3332,76 @@ fn completed_run_file(
     Ok(file)
 }
 
-fn setup_status_value(paths: &PortablePaths) -> serde_json::Value {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupStatus {
+    ready: bool,
+    reference_ready: bool,
+    engine_ready: bool,
+    transcript_cache_ready: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ResourcePreparationStatus {
+    Reference(reference::ReferenceStatus),
+    Transcript(transcript::TranscriptStatus),
+    Supplementary(preparation::LivePreparationState),
+}
+
+#[derive(Serialize)]
+struct ResourceStatus {
+    download: downloader::DownloadStatus,
+    prepare: ResourcePreparationStatus,
+}
+
+#[derive(Serialize)]
+struct ResourcesStatus {
+    resources: std::collections::BTreeMap<String, ResourceStatus>,
+    setup: SetupStatus,
+}
+
+fn setup_status(paths: &PortablePaths) -> SetupStatus {
     let reference_ready = reference::is_ready(&paths.resources);
     let engine_ready = fastvep::readiness().ready;
     let transcript_cache_ready = transcript::is_ready(&paths.resources);
-    serde_json::json!({
-        "ready": reference_ready && engine_ready && transcript_cache_ready,
-        "referenceReady": reference_ready,
-        "engineReady": engine_ready,
-        "transcriptCacheReady": transcript_cache_ready
-    })
+    SetupStatus {
+        ready: reference_ready && engine_ready && transcript_cache_ready,
+        reference_ready,
+        engine_ready,
+        transcript_cache_ready,
+    }
 }
 
-fn resources_status_json() -> Result<String, String> {
+fn resources_status() -> Result<ResourcesStatus, String> {
     let paths = portable_paths()?;
-    let mut statuses = serde_json::Map::new();
+    let mut statuses = std::collections::BTreeMap::new();
     for release in annocat_core::source_catalog::download_releases() {
-        let download = serde_json::to_value(downloader::status(&release, &paths.downloads))
-            .map_err(|error| error.to_string())?;
         let prepare = match release.resource_id {
-            "grch38-reference" => {
-                serde_json::to_value(reference::status(&paths.downloads, &paths.resources))
+            "grch38-reference" => ResourcePreparationStatus::Reference(reference::status(
+                &paths.downloads,
+                &paths.resources,
+            )),
+            "ensembl-gff3" => {
+                ResourcePreparationStatus::Transcript(transcript::status(&paths.resources))
             }
-            "ensembl-gff3" => serde_json::to_value(transcript::status(&paths.resources)),
-            id => serde_json::to_value(managed_preparation_status(id, &paths.resources)),
+            id => ResourcePreparationStatus::Supplementary(managed_preparation_status(
+                id,
+                &paths.resources,
+            )),
         };
         statuses.insert(
             release.resource_id.into(),
-            serde_json::json!({
-                "download": download,
-                "prepare": prepare.map_err(|error| error.to_string())?
-            }),
+            ResourceStatus {
+                download: downloader::status(&release, &paths.downloads),
+                prepare,
+            },
         );
     }
-    serde_json::to_string(&serde_json::json!({
-        "resources": statuses,
-        "setup": setup_status_value(&paths)
-    }))
-    .map_err(|error| error.to_string())
+    Ok(ResourcesStatus {
+        resources: statuses,
+        setup: setup_status(&paths),
+    })
 }
 
 fn resource_task_title(resource_id: &str) -> String {
