@@ -374,7 +374,19 @@ pub fn is_running() -> bool {
             .unwrap_or(false)
 }
 
-pub fn status_json(release: &ResourceRelease, root: &Path) -> String {
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadStatus {
+    pub state: String,
+    pub phase: String,
+    pub downloaded_bytes: u64,
+    pub expected_bytes: u64,
+    pub percent: f64,
+    pub queue_position: Option<usize>,
+    pub error: Option<String>,
+}
+
+pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
     let expected = release.download_bytes.unwrap_or(0);
     let final_bytes = final_path(root, release)
         .metadata()
@@ -442,18 +454,21 @@ pub fn status_json(release: &ResourceRelease, root: &Path) -> String {
     } else {
         0.0
     };
-    let error = belongs_to_resource
-        .then_some(state.error)
-        .flatten()
-        .map(|value| format!("\"{}\"", super::json_escape(&value)))
-        .unwrap_or_else(|| "null".into());
-    format!(
-        "{{\"state\":\"{effective_state}\",\"phase\":\"{}\",\"downloadedBytes\":{downloaded},\"expectedBytes\":{expected},\"percent\":{percent:.3},\"queuePosition\":{},\"error\":{error}}}",
-        state.phase,
-        queue_position
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "null".into())
-    )
+    DownloadStatus {
+        state: effective_state.into(),
+        phase: state.phase.into(),
+        downloaded_bytes: downloaded,
+        expected_bytes: expected,
+        percent,
+        queue_position,
+        error: belongs_to_resource.then_some(state.error).flatten(),
+    }
+}
+
+pub fn status_json(release: &ResourceRelease, root: &Path) -> String {
+    serde_json::to_string(&status(release, root)).unwrap_or_else(|_| {
+        r#"{"state":"failed","phase":"failed","downloadedBytes":0,"expectedBytes":0,"percent":0,"queuePosition":null,"error":"download state unavailable"}"#.into()
+    })
 }
 
 fn fill_download_slots(root: &Path) {
@@ -1132,10 +1147,10 @@ mod tests {
         let local_sha256 = validate_existing_archive_digests(&archive, &release, false).unwrap();
         write_verification(&archive, &release, &local_sha256).unwrap();
 
-        let status = status_json(&release, &root);
-        assert!(status.contains("\"state\":\"downloaded\""));
-        assert!(status.contains("\"downloadedBytes\":4"));
-        assert!(status.contains("\"percent\":100.000"));
+        let status = status(&release, &root);
+        assert_eq!(status.state, "downloaded");
+        assert_eq!(status.downloaded_bytes, 4);
+        assert_eq!(status.percent, 100.0);
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(verification_path(&root, &release)).unwrap()).unwrap();
         assert_eq!(manifest["localSha256"], local_sha256);

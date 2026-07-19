@@ -99,15 +99,16 @@ fn idle_state() -> State {
 }
 
 pub fn status_json() -> String {
-    serde_json::to_string(
-        &state()
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_else(|_| idle_state()),
-    )
-    .unwrap_or_else(|_| {
+    serde_json::to_string(&status()).unwrap_or_else(|_| {
         r#"{"state":"failed","phase":"Failed","detail":"Annotation state unavailable"}"#.into()
     })
+}
+
+pub fn status() -> State {
+    state()
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| idle_state())
 }
 
 pub fn is_running() -> bool {

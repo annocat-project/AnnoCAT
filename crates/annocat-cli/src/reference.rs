@@ -11,6 +11,18 @@ const EXPECTED_BYTES: u64 = 872_949_833;
 const VERSION: &str = "GCA_000001405.15";
 const FASTA: &str = "GRCh38_no_alt_analysis_set.fna";
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceStatus {
+    pub state: String,
+    pub phase: String,
+    pub completed_bytes: u64,
+    pub total_bytes: u64,
+    pub percent: f64,
+    pub detail: String,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 struct State {
     state: &'static str,
@@ -19,6 +31,7 @@ struct State {
     detail: String,
     error: Option<String>,
 }
+
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 static CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -146,9 +159,17 @@ pub fn forget() {
     }
 }
 
-pub fn status_json(downloads: &Path, resources: &Path) -> String {
+pub fn status(downloads: &Path, resources: &Path) -> ReferenceStatus {
     if is_ready(resources) {
-        return "{\"state\":\"ready\",\"phase\":\"Ready\",\"completedBytes\":1,\"totalBytes\":1,\"percent\":100.0,\"detail\":\"Indexed GRCh38 reference ready\",\"error\":null}".into();
+        return ReferenceStatus {
+            state: "ready".into(),
+            phase: "Ready".into(),
+            completed_bytes: 1,
+            total_bytes: 1,
+            percent: 100.0,
+            detail: "Indexed GRCh38 reference ready".into(),
+            error: None,
+        };
     }
     let downloaded = archive(downloads).metadata().map(|m| m.len()).unwrap_or(0);
     let s = state().lock().map(|s| s.clone()).unwrap_or(State {
@@ -168,17 +189,21 @@ pub fn status_json(downloads: &Path, resources: &Path) -> String {
     } else {
         s.completed as f64 * 100.0 / s.total as f64
     };
-    let error = s
-        .error
-        .as_ref()
-        .map(|e| format!("\"{}\"", super::json_escape(e)))
-        .unwrap_or_else(|| "null".into());
-    format!(
-        "{{\"state\":\"{effective}\",\"phase\":\"Preparing reference\",\"completedBytes\":{},\"totalBytes\":{},\"percent\":{percent:.3},\"detail\":\"{}\",\"error\":{error}}}",
-        s.completed,
-        s.total,
-        super::json_escape(&s.detail)
-    )
+    ReferenceStatus {
+        state: effective.into(),
+        phase: "Preparing reference".into(),
+        completed_bytes: s.completed,
+        total_bytes: s.total,
+        percent,
+        detail: s.detail,
+        error: s.error,
+    }
+}
+
+pub fn status_json(downloads: &Path, resources: &Path) -> String {
+    serde_json::to_string(&status(downloads, resources)).unwrap_or_else(|_| {
+        r#"{"state":"failed","phase":"Failed","completedBytes":0,"totalBytes":0,"percent":0,"detail":"Reference state unavailable","error":"serialization failed"}"#.into()
+    })
 }
 
 struct CountingReader {

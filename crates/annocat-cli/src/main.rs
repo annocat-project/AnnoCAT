@@ -299,6 +299,7 @@ mod report_import;
 mod report_library;
 mod report_package;
 mod results;
+mod tasks;
 mod transcript;
 mod worker;
 
@@ -431,12 +432,12 @@ fn format_terminal_size(bytes: u64) -> String {
     }
 }
 
-fn terminal_preparation_activity(state: &preparation::LivePreparationState) -> String {
-    let rate = format_terminal_rate(state.throughput_bytes_per_second);
+fn terminal_task_activity(task: &tasks::TaskSnapshot) -> String {
+    let rate = format_terminal_rate(task.throughput_bytes_per_second);
     if !rate.is_empty() {
-        return format!("{:.1}% {rate}", state.percent);
+        return format!("{:.1}% {rate}", task.percent);
     }
-    if let Some((_, detail)) = state.detail.split_once(": ") {
+    if let Some((_, detail)) = task.detail.split_once(": ") {
         if let Some(replay) = detail.strip_prefix("replaying ") {
             return format!(
                 "replay {}",
@@ -450,53 +451,30 @@ fn terminal_preparation_activity(state: &preparation::LivePreparationState) -> S
             return detail.to_owned();
         }
     }
-    format!("{:.1}% {}", state.percent, state.phase.replace('-', " "))
+    if task.kind == "annotation" {
+        return task.phase.replace('-', " ");
+    }
+    format!("{:.1}% {}", task.percent, task.phase.replace('-', " "))
 }
 
 fn terminal_active_summary() -> String {
-    let mut active = Vec::new();
-    for release in annocat_core::source_catalog::download_releases() {
-        let state = preparation::live_status(release.resource_id);
-        if state.state == "running" {
-            let chromosome = state
-                .chromosome
-                .as_deref()
-                .map(|value| format!(" chr{value}"))
-                .unwrap_or_default();
-            active.push(format!(
-                "{}{} {}",
-                release.resource_id,
-                chromosome,
-                terminal_preparation_activity(&state)
-            ));
-        }
-    }
-    if let Ok(paths) = portable_paths() {
-        for release in annocat_core::source_catalog::download_releases() {
-            if active
-                .iter()
-                .any(|item| item.starts_with(release.resource_id))
-            {
-                continue;
-            }
-            let Ok(status) = serde_json::from_str::<serde_json::Value>(&downloader::status_json(
-                &release,
-                &paths.downloads,
-            )) else {
-                continue;
-            };
-            if status["state"] == "running" {
-                active.push(format!(
-                    "{} {:.1}%",
-                    release.resource_id,
-                    status["percent"].as_f64().unwrap_or(0.0)
-                ));
-            }
-        }
-    }
-    if annotation::is_running() {
-        active.push("annotation active".into());
-    }
+    let active = portable_paths()
+        .map(|paths| {
+            task_snapshots(&paths)
+                .into_iter()
+                .filter(tasks::TaskSnapshot::is_active)
+                .map(|task| {
+                    let label = task.resource_id.as_deref().unwrap_or(task.kind).to_owned();
+                    let chromosome = task
+                        .chromosome
+                        .as_deref()
+                        .map(|value| format!(" chr{value}"))
+                        .unwrap_or_default();
+                    format!("{label}{chromosome} {}", terminal_task_activity(&task))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if active.is_empty() {
         String::new()
     } else {
@@ -1830,6 +1808,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         ),
         "/api/resources/plan" => ("200 OK", "application/json", practical_resource_plan_json()),
         "/api/resources/status" => match resources_status_json() {
+            Ok(body) => ("200 OK", "application/json", body),
+            Err(error) => (
+                "500 Internal Server Error",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
+        "/api/tasks" => match tasks_json() {
             Ok(body) => ("200 OK", "application/json", body),
             Err(error) => (
                 "500 Internal Server Error",
@@ -3185,9 +3171,22 @@ fn about_json() -> String {
     .to_string()
 }
 
-fn completed_runs_json(runs_directory: &std::path::Path) -> Result<String, String> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletedRunSummary {
+    id: String,
+    name: String,
+    original_name: String,
+    completed_at: String,
+    assembly: String,
+    variant_count: u64,
+    canonical_result_bytes: Option<u64>,
+    annotated_vcf_bytes: Option<u64>,
+}
+
+fn completed_runs(runs_directory: &std::path::Path) -> Result<Vec<CompletedRunSummary>, String> {
     if !runs_directory.exists() {
-        return Ok("{\"runs\":[]}".into());
+        return Ok(Vec::new());
     }
     let entries = std::fs::read_dir(runs_directory).map_err(|error| {
         format!(
@@ -3277,23 +3276,24 @@ fn completed_runs_json(runs_directory: &std::path::Path) -> Result<String, Strin
         }
         let display_name =
             library_metadata::display_name(runs_directory, id).unwrap_or_else(|| name.to_owned());
-        runs.push(serde_json::json!({
-            "id": id,
-            "name": display_name,
-            "originalName": name,
-            "completedAt": completed_at,
-            "assembly": assembly,
-            "variantCount": variant_count,
-            "canonicalResultBytes": canonical_result_bytes,
-            "annotatedVcfBytes": annotated_vcf_bytes
-        }));
+        runs.push(CompletedRunSummary {
+            id: id.into(),
+            name: display_name,
+            original_name: name.into(),
+            completed_at: completed_at.into(),
+            assembly: assembly.into(),
+            variant_count,
+            canonical_result_bytes,
+            annotated_vcf_bytes,
+        });
     }
-    runs.sort_by(|left, right| {
-        right["completedAt"]
-            .as_str()
-            .cmp(&left["completedAt"].as_str())
-    });
-    serde_json::to_string(&serde_json::json!({"runs": runs})).map_err(|error| error.to_string())
+    runs.sort_by(|left, right| right.completed_at.cmp(&left.completed_at));
+    Ok(runs)
+}
+
+fn completed_runs_json(runs_directory: &std::path::Path) -> Result<String, String> {
+    serde_json::to_string(&serde_json::json!({"runs": completed_runs(runs_directory)?}))
+        .map_err(|error| error.to_string())
 }
 
 fn completed_run_result(
@@ -3418,20 +3418,21 @@ fn resources_status_json() -> Result<String, String> {
     let paths = portable_paths()?;
     let mut statuses = serde_json::Map::new();
     for release in annocat_core::source_catalog::download_releases() {
-        let download: serde_json::Value =
-            serde_json::from_str(&downloader::status_json(&release, &paths.downloads))
-                .map_err(|error| error.to_string())?;
-        let prepare_json = match release.resource_id {
-            "grch38-reference" => reference::status_json(&paths.downloads, &paths.resources),
-            "ensembl-gff3" => transcript::status_json(&paths.resources),
-            id => serde_json::to_string(&managed_preparation_status(id, &paths.resources))
-                .map_err(|error| error.to_string())?,
+        let download = serde_json::to_value(downloader::status(&release, &paths.downloads))
+            .map_err(|error| error.to_string())?;
+        let prepare = match release.resource_id {
+            "grch38-reference" => {
+                serde_json::to_value(reference::status(&paths.downloads, &paths.resources))
+            }
+            "ensembl-gff3" => serde_json::to_value(transcript::status(&paths.resources)),
+            id => serde_json::to_value(managed_preparation_status(id, &paths.resources)),
         };
-        let prepare: serde_json::Value =
-            serde_json::from_str(&prepare_json).map_err(|error| error.to_string())?;
         statuses.insert(
             release.resource_id.into(),
-            serde_json::json!({"download": download, "prepare": prepare}),
+            serde_json::json!({
+                "download": download,
+                "prepare": prepare.map_err(|error| error.to_string())?
+            }),
         );
     }
     serde_json::to_string(&serde_json::json!({
@@ -3439,6 +3440,104 @@ fn resources_status_json() -> Result<String, String> {
         "setup": setup_status_value(&paths)
     }))
     .map_err(|error| error.to_string())
+}
+
+fn resource_task_title(resource_id: &str) -> String {
+    match resource_id {
+        "grch38-reference" => "GRCh38 reference".into(),
+        "ensembl-gff3" => "Ensembl transcript cache".into(),
+        id => annocat_core::source_catalog::source(id)
+            .map(|source| source.name.clone())
+            .unwrap_or_else(|| id.to_owned()),
+    }
+}
+
+fn task_snapshots(paths: &PortablePaths) -> Vec<tasks::TaskSnapshot> {
+    let mut snapshots = annocat_core::source_catalog::download_releases()
+        .filter_map(|release| {
+            let title = resource_task_title(release.resource_id);
+            let download = tasks::from_download(
+                release.resource_id,
+                &title,
+                downloader::status(&release, &paths.downloads),
+            );
+            let installation = match release.resource_id {
+                "grch38-reference" => tasks::from_reference(
+                    release.resource_id,
+                    &title,
+                    reference::status(&paths.downloads, &paths.resources),
+                ),
+                "ensembl-gff3" => tasks::from_transcript(
+                    release.resource_id,
+                    &title,
+                    transcript::status(&paths.resources),
+                ),
+                id => tasks::from_preparation(
+                    id,
+                    &title,
+                    managed_preparation_status(id, &paths.resources),
+                ),
+            };
+            tasks::choose_resource_task(download, installation)
+        })
+        .collect::<Vec<_>>();
+    let annotation = tasks::from_annotation(annotation::status());
+    if annotation.is_meaningful() {
+        snapshots.push(annotation);
+    }
+    snapshots.sort_by(|left, right| {
+        task_sort_rank(left)
+            .cmp(&task_sort_rank(right))
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    snapshots
+}
+
+fn task_sort_rank(task: &tasks::TaskSnapshot) -> u8 {
+    match task.state.as_str() {
+        "running" | "validating" | "cancelling" => 0,
+        "queued" => 1,
+        "failed" => 2,
+        "paused" | "cancelled" | "downloaded" => 3,
+        "ready" | "completed" => 4,
+        _ => 5,
+    }
+}
+
+fn tasks_json() -> Result<String, String> {
+    let paths = portable_paths()?;
+    let runs = completed_runs(&paths.runs)?;
+    let completed_ids = runs
+        .iter()
+        .map(|run| run.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut snapshots = task_snapshots(&paths);
+    snapshots.retain(|task| {
+        task.state != "completed"
+            || task
+                .run_id
+                .as_deref()
+                .is_none_or(|run_id| !completed_ids.contains(run_id))
+    });
+    snapshots.extend(runs.iter().map(|run| {
+        tasks::from_completed_run(
+            &run.id,
+            &run.name,
+            &run.completed_at,
+            &run.assembly,
+            run.variant_count,
+            run.canonical_result_bytes.unwrap_or(0),
+        )
+    }));
+    snapshots.sort_by(|left, right| {
+        task_sort_rank(left)
+            .cmp(&task_sort_rank(right))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+    serde_json::to_string(&serde_json::json!({"tasks": snapshots}))
+        .map_err(|error| error.to_string())
 }
 
 fn pick_output_folder() -> Result<Option<String>, String> {
@@ -3869,7 +3968,7 @@ mod profile_status_tests {
             ..preparation::LivePreparationState::default()
         };
         assert_eq!(
-            terminal_preparation_activity(&state),
+            terminal_task_activity(&tasks::from_preparation("dbsnp", "dbSNP", state)),
             "replay 0.18 GB/9.04 GB"
         );
         assert_eq!(format_terminal_size(872_900_000), "872.9 MB");

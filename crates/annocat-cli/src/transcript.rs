@@ -10,20 +10,20 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct State {
-    state: &'static str,
-    phase: &'static str,
-    detail: String,
-    error: Option<String>,
+pub struct TranscriptStatus {
+    pub state: &'static str,
+    pub phase: &'static str,
+    pub detail: String,
+    pub error: Option<String>,
 }
 
-fn state() -> &'static Mutex<State> {
-    static STATE: OnceLock<Mutex<State>> = OnceLock::new();
+fn state() -> &'static Mutex<TranscriptStatus> {
+    static STATE: OnceLock<Mutex<TranscriptStatus>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(idle_state()))
 }
 
-fn idle_state() -> State {
-    State {
+fn idle_state() -> TranscriptStatus {
+    TranscriptStatus {
         state: "idle",
         phase: "Waiting",
         detail: "Matching Ensembl transcript cache is not installed".into(),
@@ -110,23 +110,34 @@ pub fn cancel_background() -> bool {
 }
 
 pub fn status_json(resources: &Path) -> String {
+    serde_json::to_string(&status(resources)).unwrap_or_else(|_| r#"{"state":"failed","phase":"Failed","detail":"State unavailable","error":"serialization failed"}"#.into())
+}
+
+pub fn status(resources: &Path) -> TranscriptStatus {
     if is_ready(resources) {
-        return r#"{"state":"ready","phase":"Ready","detail":"Ensembl 115 transcript cache ready","error":null}"#.into();
+        return TranscriptStatus {
+            state: "ready",
+            phase: "Ready",
+            detail: "Ensembl 115 transcript cache ready".into(),
+            error: None,
+        };
     }
     let manifest = resources.join("transcript-cache").join("manifest.json");
     if manifest.exists() && !is_running() {
         let error = validate_installation(resources)
             .err()
             .unwrap_or_else(|| "transcript cache validation failed".into());
-        return serde_json::to_string(&State {
+        return TranscriptStatus {
             state: "failed",
             phase: "Needs attention",
             detail: "The Ensembl transcript cache is incomplete or inconsistent".into(),
             error: Some(error),
-        }).unwrap_or_else(|_| r#"{"state":"failed","phase":"Failed","detail":"State unavailable","error":"serialization failed"}"#.into());
+        };
     }
-    serde_json::to_string(&state().lock().map(|value| value.clone()).unwrap_or_else(|_| idle_state()))
-        .unwrap_or_else(|_| r#"{"state":"failed","phase":"Failed","detail":"State unavailable","error":"state lock failed"}"#.into())
+    state()
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| idle_state())
 }
 
 pub fn forget() {
@@ -151,7 +162,7 @@ pub fn start_background(
         if current.state == "running" {
             return Err("transcript cache preparation is already running".into());
         }
-        *current = State {
+        *current = TranscriptStatus {
             state: "running",
             phase: "Building",
             detail: "Building the Ensembl 115 binary transcript cache".into(),
@@ -163,19 +174,19 @@ pub fn start_background(
         let result = build(&fastvep, &gff3, &fasta, &resources);
         if let Ok(mut current) = state().lock() {
             *current = match result {
-                Ok(()) => State {
+                Ok(()) => TranscriptStatus {
                     state: "ready",
                     phase: "Ready",
                     detail: "Ensembl 115 transcript cache ready".into(),
                     error: None,
                 },
-                Err(error) if error == "cancelled" => State {
+                Err(error) if error == "cancelled" => TranscriptStatus {
                     state: "cancelled",
                     phase: "Cancelled",
                     detail: "Transcript cache installation was cancelled".into(),
                     error: None,
                 },
-                Err(error) => State {
+                Err(error) => TranscriptStatus {
                     state: "failed",
                     phase: "Failed",
                     detail: "Transcript cache preparation failed".into(),
