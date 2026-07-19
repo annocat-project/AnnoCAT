@@ -2,7 +2,7 @@ use annocat_core::{
     demo_variants_json, practical_resource_plan_json, profiles_json,
     resource_catalog_candidates_json, sources_json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -310,9 +310,14 @@ mod report_import;
 mod report_library;
 mod report_package;
 mod results;
+mod settings;
 mod tasks;
 mod transcript;
 mod worker;
+
+#[cfg(test)]
+use settings::AppConfig;
+use settings::{config_file, load_config, save_config};
 
 pub(crate) fn terminal_log(component: &str, message: impl AsRef<str>) {
     let mut width = terminal_line_width()
@@ -2890,12 +2895,6 @@ struct PortablePaths {
     config: std::path::PathBuf,
 }
 
-#[derive(Default, Deserialize, Serialize)]
-struct AppConfig {
-    resource_directory: Option<std::path::PathBuf>,
-    results_directory: Option<std::path::PathBuf>,
-}
-
 fn portable_home() -> Result<std::path::PathBuf, String> {
     if let Some(home) = std::env::var_os("ANNOCAT_HOME") {
         Ok(std::path::PathBuf::from(home))
@@ -2906,21 +2905,6 @@ fn portable_home() -> Result<std::path::PathBuf, String> {
             .ok_or_else(|| "AnnoCat executable has no parent directory".to_string())
             .map(std::path::Path::to_path_buf)
     }
-}
-
-fn config_file(home: &std::path::Path) -> std::path::PathBuf {
-    home.join("config").join("annocat.json")
-}
-
-fn load_config(home: &std::path::Path) -> Result<AppConfig, String> {
-    let file = config_file(home);
-    if !file.exists() {
-        return Ok(AppConfig::default());
-    }
-    let contents = std::fs::read_to_string(&file)
-        .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-    serde_json::from_str(&contents)
-        .map_err(|error| format!("invalid configuration {}: {error}", file.display()))
 }
 
 fn save_resource_directory(path: &std::path::Path) -> Result<(), String> {
@@ -2935,17 +2919,6 @@ fn save_results_directory(path: &std::path::Path) -> Result<(), String> {
     let mut config = load_config(&home)?;
     config.results_directory = Some(path.to_path_buf());
     save_config(&home, &config)
-}
-
-fn save_config(home: &std::path::Path, config: &AppConfig) -> Result<(), String> {
-    let directory = home.join("config");
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
-    let contents = serde_json::to_string_pretty(&config)
-        .map_err(|error| format!("cannot serialize configuration: {error}"))?;
-    let file = config_file(&home);
-    std::fs::write(&file, format!("{contents}\n"))
-        .map_err(|error| format!("cannot write {}: {error}", file.display()))
 }
 
 fn delete_managed_resource(resource_id: &str) -> Result<(), String> {
