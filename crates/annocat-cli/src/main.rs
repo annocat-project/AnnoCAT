@@ -1141,13 +1141,17 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let response = portable_paths().and_then(|paths| {
             let root = paths.resources.join("dbnsfp").join("4.9a");
             if method == "GET" {
-                preparation::dbnsfp_field_configuration_json(&root)
+                preparation::dbnsfp_field_configuration(&root).and_then(|configuration| {
+                    serde_json::to_string(&configuration).map_err(|error| error.to_string())
+                })
             } else if method == "POST" {
                 let selection =
                     serde_json::from_slice::<preparation::DbnsfpFieldSelection>(request_body)
                         .map_err(|error| format!("invalid dbNSFP field selection: {error}"))?;
                 preparation::save_dbnsfp_field_selection(&root, selection)?;
-                preparation::dbnsfp_field_configuration_json(&root)
+                preparation::dbnsfp_field_configuration(&root).and_then(|configuration| {
+                    serde_json::to_string(&configuration).map_err(|error| error.to_string())
+                })
             } else {
                 Err("GET or POST required".into())
             }
@@ -1170,7 +1174,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let response = portable_paths().and_then(|paths| {
             let root = paths.resources.join(resource_id);
             if method == "GET" {
-                preparation::supplementary_field_configuration_json(resource_id, &root)
+                preparation::supplementary_field_configuration(resource_id, &root).and_then(
+                    |configuration| {
+                        serde_json::to_string(&configuration).map_err(|error| error.to_string())
+                    },
+                )
             } else if method == "POST" {
                 if preparation::live_status(resource_id).state == "running" {
                     return Err(format!(
@@ -1182,7 +1190,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 )
                 .map_err(|error| format!("invalid {resource_id} field selection: {error}"))?;
                 preparation::save_supplementary_field_selection(resource_id, &root, selection)?;
-                preparation::supplementary_field_configuration_json(resource_id, &root)
+                preparation::supplementary_field_configuration(resource_id, &root).and_then(
+                    |configuration| {
+                        serde_json::to_string(&configuration).map_err(|error| error.to_string())
+                    },
+                )
             } else {
                 Err("GET or POST required".into())
             }

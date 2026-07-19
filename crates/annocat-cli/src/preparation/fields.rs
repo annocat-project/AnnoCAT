@@ -194,16 +194,14 @@ pub fn save_dbnsfp_field_selection(
     Ok(selection)
 }
 
-pub fn dbnsfp_field_configuration_json(resource_root: &Path) -> Result<String, String> {
-    let contract = dbnsfp_contract()?;
-    let selection = load_dbnsfp_field_selection(resource_root)?;
-    let locked = dbnsfp_selection_locked(resource_root)?;
-    serde_json::to_string(&serde_json::json!({
-        "contract": contract,
-        "selection": selection,
-        "locked": locked
-    }))
-    .map_err(|error| error.to_string())
+pub fn dbnsfp_field_configuration(
+    resource_root: &Path,
+) -> Result<FieldConfiguration<DbnsfpFieldSelection>, String> {
+    Ok(FieldConfiguration {
+        contract: dbnsfp_contract()?,
+        selection: load_dbnsfp_field_selection(resource_root)?,
+        locked: dbnsfp_selection_locked(resource_root)?,
+    })
 }
 
 pub(super) fn dbnsfp_schema_identity(selection: &DbnsfpFieldSelection) -> String {
@@ -228,6 +226,14 @@ pub struct SupplementaryFieldSelection {
     pub schema_version: u16,
     pub contract_id: String,
     pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldConfiguration<T> {
+    pub contract: serde_json::Value,
+    pub selection: T,
+    pub locked: bool,
 }
 
 fn supplementary_field_catalog() -> Result<serde_json::Value, String> {
@@ -449,16 +455,15 @@ pub fn save_supplementary_field_selection(
     Ok(selection)
 }
 
-pub fn supplementary_field_configuration_json(
+pub fn supplementary_field_configuration(
     resource_id: &str,
     resource_root: &Path,
-) -> Result<String, String> {
-    serde_json::to_string(&serde_json::json!({
-        "contract": supplementary_field_contract(resource_id)?,
-        "selection": load_supplementary_field_selection(resource_id, resource_root)?,
-        "locked": supplementary_selection_locked(resource_root)?
-    }))
-    .map_err(|error| error.to_string())
+) -> Result<FieldConfiguration<SupplementaryFieldSelection>, String> {
+    Ok(FieldConfiguration {
+        contract: supplementary_field_contract(resource_id)?,
+        selection: load_supplementary_field_selection(resource_id, resource_root)?,
+        locked: supplementary_selection_locked(resource_root)?,
+    })
 }
 
 pub fn supplementary_schema_identity(

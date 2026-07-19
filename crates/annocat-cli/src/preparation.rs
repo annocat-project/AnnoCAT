@@ -26,10 +26,9 @@ pub use checkpoint::{
 use fields::dbnsfp_schema_identity;
 pub use fields::{
     DBNSFP_CURATED_SCHEMA, DbnsfpFieldSelection, SupplementaryFieldSelection,
-    dbnsfp_field_configuration_json, load_dbnsfp_field_selection,
-    load_supplementary_field_selection, save_dbnsfp_field_selection,
-    save_supplementary_field_selection, supplementary_field_configuration_json,
-    supplementary_schema_identity,
+    dbnsfp_field_configuration, load_dbnsfp_field_selection, load_supplementary_field_selection,
+    save_dbnsfp_field_selection, save_supplementary_field_selection,
+    supplementary_field_configuration, supplementary_schema_identity,
 };
 #[cfg(test)]
 use fields::{
@@ -5421,8 +5420,8 @@ partial dbSNP row",
         let error = save_dbnsfp_field_selection(&root, default_dbnsfp_field_selection().unwrap())
             .unwrap_err();
         assert!(error.contains("remove the installed dbNSFP cache"));
-        let configuration: serde_json::Value =
-            serde_json::from_str(&dbnsfp_field_configuration_json(&root).unwrap()).unwrap();
+        let configuration =
+            serde_json::to_value(dbnsfp_field_configuration(&root).unwrap()).unwrap();
         assert_eq!(configuration["locked"], true);
         fs::remove_dir_all(root).unwrap();
     }
