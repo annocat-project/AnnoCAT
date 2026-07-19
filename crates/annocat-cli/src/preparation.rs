@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+pub const LEGACY_PREPARATION_IDENTITY_COMMIT: &str = "7038e7c17708e7d2226149e78e0bb297bcc6d1d6";
 pub const DBNSFP_CURATED_SCHEMA: &str = "dbnsfp-4.9a-annocat-core-v1";
 const DBNSFP_FIELD_SELECTION_SCHEMA_VERSION: u16 = 1;
 const DBNSFP_COORDINATE_FIELDS: &[&str] = &["chr", "pos(1-based)", "ref", "alt"];
@@ -114,6 +115,9 @@ pub struct PreparationIdentity {
     pub source_etag: Option<String>,
     pub source_last_modified: Option<String>,
     pub selected_schema: String,
+    /// Legacy schema-v1 identity field. It is retained at its original value so
+    /// existing checkpoints and hybrid source parts remain resumable. Exact builder
+    /// provenance and compatibility live in cache-contract-v2.json.
     pub fastvep_commit: String,
     pub osa_schema_version: u16,
 }
@@ -728,6 +732,12 @@ impl ShardPaths {
     pub fn verification(&self) -> PathBuf {
         self.final_directory.join("verified.json")
     }
+    pub fn cache_contract(&self) -> PathBuf {
+        self.final_directory.join("cache-contract-v2.json")
+    }
+    fn partial_cache_contract(&self) -> PathBuf {
+        self.partial_directory.join("cache-contract-v2.json")
+    }
     fn source_part(&self) -> &Path {
         &self.source_part
     }
@@ -750,11 +760,37 @@ impl ShardPaths {
 
 pub fn restart_decision(paths: &ShardPaths, identity: &PreparationIdentity) -> RestartDecision {
     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
-        return if checkpoint.state == CheckpointState::Verified && checkpoint.identity == *identity
-        {
-            RestartDecision::AlreadyVerified
-        } else {
-            RestartDecision::StaleIdentity
+        if checkpoint.state != CheckpointState::Verified {
+            return RestartDecision::StaleIdentity;
+        }
+        if paths.cache_contract().is_file() {
+            let Ok(installed) = super::cache_contract::read(&paths.cache_contract()) else {
+                return RestartDecision::StaleIdentity;
+            };
+            let expected = cache_contract_manifest(identity);
+            return if installed.compatibility_with(&expected)
+                == super::cache_contract::CacheCompatibilityDecision::Ready
+            {
+                RestartDecision::AlreadyVerified
+            } else {
+                RestartDecision::StaleIdentity
+            };
+        }
+        // A verified schema-v1 cache predates the compatibility sidecar. Preserve
+        // known OSA-v1 resources until their source-specific verifier can prove and
+        // atomically publish cache-contract-v2.json. Do not rebuild merely because
+        // the fork moved, and do not silently bless an unknown legacy adapter.
+        if checkpoint.identity != *identity {
+            return RestartDecision::StaleIdentity;
+        }
+        return match super::cache_contract::classify_legacy_manifest(
+            &identity.resource_id,
+            identity.osa_schema_version,
+        ) {
+            super::cache_contract::CacheCompatibilityDecision::VerifyAndUpgradeManifest => {
+                RestartDecision::AlreadyVerified
+            }
+            _ => RestartDecision::StaleIdentity,
         };
     }
     match read_checkpoint(&paths.checkpoint()) {
@@ -822,6 +858,10 @@ pub fn promote_verified(
         prepared_index_bytes: index_bytes,
     };
     write_checkpoint(&paths.partial_directory.join("verified.json"), &verified)?;
+    super::cache_contract::write_atomic(
+        &paths.partial_cache_contract(),
+        &cache_contract_manifest(&verified.identity),
+    )?;
     fs::create_dir_all(
         paths
             .final_directory
@@ -3095,6 +3135,24 @@ fn write_checkpoint(path: &Path, checkpoint: &PreparationCheckpoint) -> Result<(
     fs::write(path, bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+fn cache_contract_manifest(
+    identity: &PreparationIdentity,
+) -> super::cache_contract::CacheContractManifest {
+    super::cache_contract::CacheContractManifest::current(
+        super::fastvep::pinned_builder_provenance(),
+        &identity.resource_id,
+        &identity.release,
+        &identity.assembly,
+        &identity.chromosome,
+        identity.expected_compressed_bytes,
+        identity.source_etag.as_deref(),
+        identity.source_last_modified.as_deref(),
+        &identity.selected_schema,
+        identity.osa_schema_version,
+        Some(&identity.fastvep_commit),
+    )
+}
+
 fn read_checkpoint(path: &Path) -> Result<PreparationCheckpoint, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     let checkpoint: PreparationCheckpoint =
@@ -4167,7 +4225,7 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                 source_etag: shard.etag.clone(),
                 source_last_modified: shard.last_modified.clone(),
                 selected_schema: request.source.selected_schema.clone(),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &shard.chromosome)?;
@@ -4580,7 +4638,7 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
                 source_etag: None,
                 source_last_modified: plan.artifact.data_last_modified.clone(),
                 selected_schema: selected_schema.clone(),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
@@ -4739,7 +4797,7 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                     plans[0].artifact.data_last_modified, plans[1].artifact.data_last_modified
                 )),
                 selected_schema: selected_schema.clone(),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
@@ -4871,7 +4929,7 @@ fn run_revel_live(
                 source_etag: Some(format!("md5:{}", archive.md5)),
                 source_last_modified: None,
                 selected_schema: selected_schema.clone(),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &archive.chromosome)?;
@@ -5007,7 +5065,7 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                 source_etag: Some(plan.artifact.data_etag.into()),
                 source_last_modified: Some(plan.artifact.data_last_modified.into()),
                 selected_schema: selected_schema.clone(),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
@@ -5244,7 +5302,7 @@ fn run_dbnsfp_live(
                 source_etag: Some(format!("zip-crc32:{:08x}", member.crc32)),
                 source_last_modified: None,
                 selected_schema: dbnsfp_schema_identity(&selection),
-                fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+                fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &member.chromosome)?;
@@ -6017,8 +6075,26 @@ mod tests {
         fs::write(chr1.partial_osa(), b"osa").unwrap();
         fs::write(chr1.partial_index(), b"idx").unwrap();
         promote_verified(&chr1, identity("1"), 10, 2).unwrap();
+        let mut contract = crate::cache_contract::read(&chr1.cache_contract()).unwrap();
+        assert_eq!(
+            contract.builder_provenance,
+            crate::fastvep::pinned_builder_provenance()
+        );
+        contract.builder_provenance.commit = "future-compatible-fastvep".into();
+        contract.builder_provenance.binary_sha256 = "future-compatible-binary".into();
+        fs::write(
+            chr1.cache_contract(),
+            serde_json::to_vec_pretty(&contract).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             restart_decision(&chr1, &identity("1")),
+            RestartDecision::AlreadyVerified
+        );
+        let mut equivalent_mirror = identity("1");
+        equivalent_mirror.source_url = "https://equivalent-mirror.test/1.vcf.bgz".into();
+        assert_eq!(
+            restart_decision(&chr1, &equivalent_mirror),
             RestartDecision::AlreadyVerified
         );
 
@@ -6038,6 +6114,25 @@ mod tests {
             !chr2.partial_osa().exists(),
             "current partial output restarts from zero"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_legacy_cache_without_v2_sidecar_is_not_discarded() {
+        let root = root("legacy-cache-contract");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let expected = identity("1");
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_osa(), b"osa").unwrap();
+        fs::write(paths.partial_index(), b"idx").unwrap();
+        promote_verified(&paths, expected.clone(), 10, 2).unwrap();
+        fs::remove_file(paths.cache_contract()).unwrap();
+
+        assert_eq!(
+            restart_decision(&paths, &expected),
+            RestartDecision::AlreadyVerified
+        );
+        assert!(paths.final_osa().is_file());
         fs::remove_dir_all(root).unwrap();
     }
 

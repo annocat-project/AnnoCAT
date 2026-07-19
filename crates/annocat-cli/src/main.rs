@@ -288,6 +288,7 @@ fn resource_update_status_json(resource_id: &str) -> Result<String, String> {
 }
 
 mod annotation;
+mod cache_contract;
 mod csq;
 mod downloader;
 mod fastvep;
@@ -2899,7 +2900,7 @@ fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
                 .as_ref()
                 .and_then(|release| release.last_modified.clone()),
             selected_schema: format!("{resource_id}-{release_version}"),
-            fastvep_commit: "7038e7c17708e7d2226149e78e0bb297bcc6d1d6".into(),
+            fastvep_commit: preparation::LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
             osa_schema_version: 1,
         },
     })

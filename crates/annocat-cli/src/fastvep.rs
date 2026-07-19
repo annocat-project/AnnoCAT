@@ -16,6 +16,8 @@ const PIN_MANIFEST: &str = include_str!(concat!(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FastVepPin {
+    repository: String,
+    commit: String,
     upstream_version: String,
     #[serde(rename = "windowsX86_64")]
     windows_x86_64: WindowsPin,
@@ -36,6 +38,14 @@ fn pinned_sha256() -> &'static str {
 
 fn pinned_version() -> String {
     format!("fastvep {}", PIN.upstream_version)
+}
+
+pub fn pinned_builder_provenance() -> super::cache_contract::BuilderProvenance {
+    super::cache_contract::BuilderProvenance {
+        repository: PIN.repository.clone(),
+        commit: PIN.commit.clone(),
+        binary_sha256: PIN.windows_x86_64.sha256.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -253,5 +263,17 @@ mod tests {
         let value = serde_json::to_value(report).unwrap();
         assert!(value["ready"].is_boolean());
         assert!(value["nextAction"].is_string());
+    }
+
+    #[test]
+    fn builder_provenance_uses_the_annocat_fork_pin() {
+        let provenance = pinned_builder_provenance();
+        assert_eq!(provenance.repository, PIN.repository);
+        assert_eq!(provenance.commit, PIN.commit);
+        assert_eq!(provenance.binary_sha256, pinned_sha256());
+        assert_ne!(
+            provenance.commit,
+            "7038e7c17708e7d2226149e78e0bb297bcc6d1d6"
+        );
     }
 }
