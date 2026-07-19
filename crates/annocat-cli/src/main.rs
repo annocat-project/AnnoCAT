@@ -1,5 +1,5 @@
 use annocat_core::{
-    RESOURCE_RELEASES, SOURCES, demo_variants_json, practical_resource_plan_json, profiles_json,
+    SOURCES, demo_variants_json, practical_resource_plan_json, profiles_json,
     resource_catalog_candidates_json, sources_json,
 };
 use serde::{Deserialize, Serialize};
@@ -455,7 +455,7 @@ fn terminal_preparation_activity(state: &preparation::LivePreparationState) -> S
 
 fn terminal_active_summary() -> String {
     let mut active = Vec::new();
-    for release in RESOURCE_RELEASES {
+    for release in annocat_core::source_catalog::download_releases() {
         let state = preparation::live_status(release.resource_id);
         if state.state == "running" {
             let chromosome = state
@@ -472,7 +472,7 @@ fn terminal_active_summary() -> String {
         }
     }
     if let Ok(paths) = portable_paths() {
-        for release in RESOURCE_RELEASES {
+        for release in annocat_core::source_catalog::download_releases() {
             if active
                 .iter()
                 .any(|item| item.starts_with(release.resource_id))
@@ -480,7 +480,7 @@ fn terminal_active_summary() -> String {
                 continue;
             }
             let Ok(status) = serde_json::from_str::<serde_json::Value>(&downloader::status_json(
-                release,
+                &release,
                 &paths.downloads,
             )) else {
                 continue;
@@ -868,10 +868,7 @@ fn resource_command(args: &[String]) -> Result<(), String> {
                 .into_iter()
                 .chain(profile.source_ids.iter().copied())
             {
-                if let Some(release) = RESOURCE_RELEASES
-                    .iter()
-                    .find(|release| release.resource_id == id)
-                {
+                if let Ok(release) = resource_release(id) {
                     let size = release
                         .download_bytes
                         .map(format_terminal_size)
@@ -886,9 +883,11 @@ fn resource_command(args: &[String]) -> Result<(), String> {
         [command, resource, destination, action] if command == "download" => {
             let release = resource_release(resource)?;
             match action.as_str() {
-                "--yes" => downloader::download_release(release, std::path::Path::new(destination)),
+                "--yes" => {
+                    downloader::download_release(&release, std::path::Path::new(destination))
+                }
                 "--dry-run" => {
-                    downloader::print_download_plan(release, std::path::Path::new(destination))
+                    downloader::print_download_plan(&release, std::path::Path::new(destination))
                 }
                 _ => Err("download requires --dry-run or --yes".into()),
             }
@@ -897,8 +896,8 @@ fn resource_command(args: &[String]) -> Result<(), String> {
             let release = resource_release(resource)?;
             let destination = portable_paths()?.downloads;
             match action.as_str() {
-                "--yes" => downloader::download_release(release, &destination),
-                "--dry-run" => downloader::print_download_plan(release, &destination),
+                "--yes" => downloader::download_release(&release, &destination),
+                "--dry-run" => downloader::print_download_plan(&release, &destination),
                 _ => Err("download requires --dry-run or --yes".into()),
             }
         }
@@ -906,10 +905,8 @@ fn resource_command(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn resource_release(id: &str) -> Result<&'static annocat_core::ResourceRelease, String> {
-    RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == id)
+fn resource_release(id: &str) -> Result<annocat_core::ResourceRelease, String> {
+    annocat_core::source_catalog::download_release(id)
         .ok_or_else(|| format!("resource '{id}' is not present in the download catalog"))
 }
 
@@ -1243,7 +1240,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "status" => (
                     "200 OK",
                     downloader::status_json(
-                        release,
+                        &release,
                         &portable_paths()
                             .map(|paths| paths.downloads)
                             .unwrap_or_default(),
@@ -1253,7 +1250,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                     Ok(paths) => {
                         let downloads = paths.downloads.clone();
                         let resources = paths.resources.clone();
-                        match downloader::start_background(*release, downloads.clone()) {
+                        match downloader::start_background(release, downloads.clone()) {
                             Ok(()) => {
                                 if matches!(resource_id, "grch38-reference" | "ensembl-gff3") {
                                     schedule_preparation(release.resource_id, downloads, resources);
@@ -1317,17 +1314,15 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             let response = match (action, portable_paths()) {
                 ("status", Ok(paths)) => ("200 OK", transcript::status_json(&paths.resources)),
                 ("start", Ok(paths)) if method == "POST" => {
-                    let release = RESOURCE_RELEASES
-                        .iter()
-                        .find(|release| release.resource_id == "ensembl-gff3")
-                        .expect("Ensembl release is cataloged");
+                    let release =
+                        resource_release("ensembl-gff3").expect("Ensembl release is cataloged");
                     let executable = fastvep::readiness().executable;
                     match executable
                         .ok_or_else(|| "fastVEP executable is unavailable".to_string())
                         .and_then(|fastvep| {
                             transcript::start_background(
                                 fastvep,
-                                downloader::final_path(&paths.downloads, release),
+                                downloader::final_path(&paths.downloads, &release),
                                 reference::fasta_path(&paths.resources),
                                 paths.resources,
                             )
@@ -1847,24 +1842,18 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             ),
         },
         "/api/resources/dbnsfp/download/status" => {
-            let release = RESOURCE_RELEASES
-                .iter()
-                .find(|r| r.resource_id == "dbnsfp")
-                .unwrap();
+            let release = resource_release("dbnsfp").unwrap();
             let root = portable_paths()
                 .map(|paths| paths.downloads)
                 .unwrap_or_default();
             (
                 "200 OK",
                 "application/json",
-                downloader::status_json(release, &root),
+                downloader::status_json(&release, &root),
             )
         }
         "/api/resources/dbnsfp/download/start" => {
-            let release = *RESOURCE_RELEASES
-                .iter()
-                .find(|r| r.resource_id == "dbnsfp")
-                .unwrap();
+            let release = resource_release("dbnsfp").unwrap();
             let paths = portable_paths();
             let root = paths
                 .as_ref()
@@ -1909,22 +1898,16 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             )
         }
         "/api/resources/grch38-reference/download/status" => {
-            let release = RESOURCE_RELEASES
-                .iter()
-                .find(|r| r.resource_id == "grch38-reference")
-                .unwrap();
+            let release = resource_release("grch38-reference").unwrap();
             let root = portable_paths().map(|p| p.downloads).unwrap_or_default();
             (
                 "200 OK",
                 "application/json",
-                downloader::status_json(release, &root),
+                downloader::status_json(&release, &root),
             )
         }
         "/api/resources/grch38-reference/download/start" => {
-            let release = *RESOURCE_RELEASES
-                .iter()
-                .find(|r| r.resource_id == "grch38-reference")
-                .unwrap();
+            let release = resource_release("grch38-reference").unwrap();
             match portable_paths() {
                 Ok(paths) => {
                     let downloads = paths.downloads.clone();
@@ -2385,14 +2368,9 @@ fn profile_preparation_status(profile_id: &str) -> Result<String, String> {
         .filter(|id| **id != "fastvep")
         .map(|id| {
             let state = managed_preparation_status(id, &resources);
-            let release = RESOURCE_RELEASES
-                .iter()
-                .find(|release| release.resource_id == *id);
-            let catalog_ready = state.state == "ready"
-                || (preparation_available(id)
-                    && RESOURCE_RELEASES
-                        .iter()
-                        .any(|release| release.resource_id == *id));
+            let release = annocat_core::source_catalog::download_release(id);
+            let catalog_ready =
+                state.state == "ready" || (preparation_available(id) && release.is_some());
             serde_json::json!({
                 "resourceId": id,
                 "preparation": state,
@@ -2482,10 +2460,7 @@ fn managed_preparation_status(
     resource_id: &str,
     resources: &std::path::Path,
 ) -> preparation::LivePreparationState {
-    let Some(release) = RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == resource_id)
-    else {
+    let Some(release) = annocat_core::source_catalog::download_release(resource_id) else {
         return preparation::live_status(resource_id);
     };
     let chromosomes = if resource_id == "dbnsfp" {
@@ -2573,9 +2548,7 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
         .copied()
         .filter(|id| {
             preparation_available(id)
-                && RESOURCE_RELEASES
-                    .iter()
-                    .any(|release| release.resource_id == *id)
+                && annocat_core::source_catalog::download_release(id).is_some()
         })
         .filter(|id| managed_preparation_status(id, &resources).state != "ready")
         .collect::<Vec<_>>();
@@ -2736,9 +2709,7 @@ fn start_preparation_queue_worker() {
                 start_catalog_preparation(&resource_id)
             };
             if let Err(error) = started {
-                let expected = RESOURCE_RELEASES
-                    .iter()
-                    .find(|release| release.resource_id == resource_id)
+                let expected = annocat_core::source_catalog::download_release(&resource_id)
                     .and_then(|release| release.download_bytes)
                     .unwrap_or(0);
                 preparation::record_start_failure(&resource_id, error.clone(), expected);
@@ -2786,12 +2757,9 @@ fn preparation_available(resource_id: &str) -> bool {
 }
 
 fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
-    let release = RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == resource_id)
-        .ok_or_else(|| {
-            format!("resource '{resource_id}' has no pinned per-object preparation metadata")
-        })?;
+    let release = resource_release(resource_id).map_err(|_| {
+        format!("resource '{resource_id}' has no pinned per-object preparation metadata")
+    })?;
     let source_type = catalog_source_type(resource_id).ok_or_else(|| {
         format!("resource '{resource_id}' is not yet connected to a fastSA schema")
     })?;
@@ -2918,12 +2886,9 @@ fn start_dbnsfp_preparation() -> Result<(), String> {
         return Err("the installed fastVEP does not support verified shard preparation".into());
     }
     let paths = portable_paths()?;
-    let release = RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == "dbnsfp")
-        .expect("dbNSFP 4.9a is pinned");
-    let local_archive = downloader::is_downloaded(release, &paths.downloads)
-        .then(|| downloader::final_path(&paths.downloads, release));
+    let release = resource_release("dbnsfp").expect("dbNSFP 4.9a is pinned");
+    let local_archive = downloader::is_downloaded(&release, &paths.downloads)
+        .then(|| downloader::final_path(&paths.downloads, &release));
     preparation::start_dbnsfp_live(preparation::DbnsfpLiveRequest {
         fastvep_executable: executable,
         resource_root: paths.resources.join("dbnsfp").join("4.9a"),
@@ -3044,9 +3009,7 @@ fn invalidate_core_preparation(resource_id: &str) {
 }
 
 fn cancel_and_delete_managed_resource(resource_id: &str) -> Result<(), String> {
-    let managed_id = RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == resource_id)
+    let managed_id = annocat_core::source_catalog::download_release(resource_id)
         .map(|release| release.resource_id)
         .ok_or_else(|| format!("resource '{resource_id}' is not managed yet"))?;
     remove_profile_queue_resource(resource_id);
@@ -3093,9 +3056,7 @@ fn cancel_and_delete_managed_resource(resource_id: &str) -> Result<(), String> {
 }
 
 fn remove_managed_resource_files(resource_id: &str) -> Result<(), String> {
-    let release = RESOURCE_RELEASES
-        .iter()
-        .find(|release| release.resource_id == resource_id);
+    let release = annocat_core::source_catalog::download_release(resource_id);
     if release.is_none() {
         return Err(format!("resource '{resource_id}' is not managed yet"));
     }
@@ -3124,10 +3085,8 @@ fn remove_managed_resource_files(resource_id: &str) -> Result<(), String> {
     }
     if resource_id == "grch38-reference" {
         let release = release.expect("GRCh38 release is cataloged");
-        let transcript_release = RESOURCE_RELEASES
-            .iter()
-            .find(|release| release.resource_id == "ensembl-gff3")
-            .expect("Ensembl release is cataloged");
+        let transcript_release =
+            resource_release("ensembl-gff3").expect("Ensembl release is cataloged");
         targets.push(paths.downloads.join(transcript_release.filename));
         targets.push(
             paths
@@ -3473,9 +3432,9 @@ fn setup_status_value(paths: &PortablePaths) -> serde_json::Value {
 fn resources_status_json() -> Result<String, String> {
     let paths = portable_paths()?;
     let mut statuses = serde_json::Map::new();
-    for release in RESOURCE_RELEASES {
+    for release in annocat_core::source_catalog::download_releases() {
         let download: serde_json::Value =
-            serde_json::from_str(&downloader::status_json(release, &paths.downloads))
+            serde_json::from_str(&downloader::status_json(&release, &paths.downloads))
                 .map_err(|error| error.to_string())?;
         let prepare_json = match release.resource_id {
             "grch38-reference" => reference::status_json(&paths.downloads, &paths.resources),
@@ -3749,10 +3708,7 @@ fn schedule_preparation(
     let core_epoch = CORE_PREPARATION_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
-        let Some(release) = RESOURCE_RELEASES
-            .iter()
-            .find(|release| release.resource_id == resource_id)
-        else {
+        let Some(release) = annocat_core::source_catalog::download_release(resource_id) else {
             return;
         };
         while downloader::is_resource_active(resource_id) {
@@ -3764,7 +3720,7 @@ fn schedule_preparation(
         if CORE_PREPARATION_EPOCH.load(Ordering::SeqCst) != core_epoch {
             return;
         }
-        if !downloader::is_downloaded(release, &downloads) {
+        if !downloader::is_downloaded(&release, &downloads) {
             return;
         }
         while PREPARATION_ACTIVE
@@ -3805,14 +3761,12 @@ fn schedule_preparation(
                 if !reference::is_ready(&resources) {
                     false
                 } else {
-                    let release = RESOURCE_RELEASES
-                        .iter()
-                        .find(|release| release.resource_id == "ensembl-gff3")
-                        .expect("Ensembl release is cataloged");
+                    let release =
+                        resource_release("ensembl-gff3").expect("Ensembl release is cataloged");
                     fastvep::readiness().executable.is_some_and(|fastvep| {
                         transcript::start_background(
                             fastvep,
-                            downloader::final_path(&downloads, release),
+                            downloader::final_path(&downloads, &release),
                             reference::fasta_path(&resources),
                             resources.clone(),
                         )
@@ -3992,7 +3946,7 @@ mod profile_status_tests {
 
     #[test]
     fn mutable_latest_urls_must_use_the_rolling_checksum_policy() {
-        for release in RESOURCE_RELEASES {
+        for release in annocat_core::source_catalog::download_releases() {
             if release.url.contains("/latest") {
                 assert!(
                     is_rolling_resource(release.resource_id),

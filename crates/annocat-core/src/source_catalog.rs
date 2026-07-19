@@ -70,6 +70,39 @@ pub fn adapter_contract(id: &str) -> Option<&'static str> {
     resource(id)?.adapter_contract.as_deref()
 }
 
+pub fn download_release(id: &str) -> Option<crate::ResourceRelease> {
+    let resource = resource(id)?;
+    let release = &resource.release;
+    Some(crate::ResourceRelease {
+        resource_id: resource.id.as_str(),
+        version: release.version.as_str(),
+        filename: release.filename.as_str(),
+        url: release.primary_url.as_str(),
+        download_bytes: Some(release.download_bytes),
+        installed_bytes: None,
+        range_resume: release.range_resume,
+        size_checked_at: release.size_checked_at.as_str(),
+        archive_format: release.archive_format.as_str(),
+        publisher_md5: release
+            .checksum
+            .as_ref()
+            .filter(|checksum| checksum.algorithm == "md5")
+            .map(|checksum| checksum.value.as_str()),
+        publisher_sha256: release
+            .checksum
+            .as_ref()
+            .filter(|checksum| checksum.algorithm == "sha256")
+            .map(|checksum| checksum.value.as_str()),
+    })
+}
+
+pub fn download_releases() -> impl Iterator<Item = crate::ResourceRelease> {
+    catalog()
+        .resources
+        .iter()
+        .filter_map(|resource| download_release(&resource.id))
+}
+
 pub fn artifact_identity(
     resource_id: &str,
     release: &str,
@@ -195,6 +228,10 @@ mod tests {
         assert_eq!(catalog().resources.len(), crate::RESOURCE_RELEASES.len());
         for legacy in crate::RESOURCE_RELEASES {
             let current = resource(legacy.resource_id).expect("catalog resource");
+            let projected = download_release(legacy.resource_id).expect("download release");
+            assert_eq!(projected.resource_id, legacy.resource_id);
+            assert_eq!(projected.version, legacy.version);
+            assert_eq!(projected.url, legacy.url);
             assert_eq!(current.release.version, legacy.version);
             assert_eq!(current.release.primary_url, legacy.url);
             assert_eq!(current.release.filename, legacy.filename);
