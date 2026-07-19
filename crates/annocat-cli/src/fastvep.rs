@@ -183,15 +183,6 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn readiness_json() -> String {
-    serde_json::to_string(&readiness()).unwrap_or_else(|error| {
-        format!(
-            "{{\"ready\":false,\"error\":\"{}\"}}",
-            super::json_escape(&error.to_string())
-        )
-    })
-}
-
 pub fn supports_sa_verify(executable: &Path) -> bool {
     command_output(executable, &["sa-verify", "--help"]).is_ok()
 }

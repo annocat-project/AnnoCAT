@@ -744,7 +744,7 @@ fn command_available(name: &str, version_arg: &str) -> bool {
 
 fn doctor_command(args: &[String]) -> Result<(), String> {
     if args == ["--json"] {
-        println!("{}", fastvep::readiness_json());
+        println!("{}", serialize_json(&fastvep::readiness()));
         return Ok(());
     }
     if !args.is_empty() {
@@ -761,7 +761,7 @@ fn fastvep_command(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         [command, json] if command == "status" && json == "--json" => {
-            println!("{}", fastvep::readiness_json());
+            println!("{}", serialize_json(&fastvep::readiness()));
             Ok(())
         }
         _ => Err("usage: annocat fastvep status [--json]".into()),
@@ -1228,12 +1228,12 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             Ok(release) => match action {
                 "status" => (
                     "200 OK",
-                    downloader::status_json(
+                    serialize_json(&downloader::status(
                         &release,
                         &portable_paths()
                             .map(|paths| paths.downloads)
                             .unwrap_or_default(),
-                    ),
+                    )),
                 ),
                 "start" if method == "POST" => match portable_paths() {
                     Ok(paths) => {
@@ -1301,7 +1301,10 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     if let Some((resource_id, action)) = preparation_api_route(path) {
         if resource_id == "ensembl-gff3" {
             let response = match (action, portable_paths()) {
-                ("status", Ok(paths)) => ("200 OK", transcript::status_json(&paths.resources)),
+                ("status", Ok(paths)) => (
+                    "200 OK",
+                    serialize_json(&transcript::status(&paths.resources)),
+                ),
                 ("start", Ok(paths)) if method == "POST" => {
                     let release =
                         resource_release("ensembl-gff3").expect("Ensembl release is cataloged");
@@ -1844,7 +1847,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             (
                 "200 OK",
                 "application/json",
-                downloader::status_json(&release, &root),
+                serialize_json(&downloader::status(&release, &root)),
             )
         }
         "/api/resources/dbnsfp/download/start" => {
@@ -1898,7 +1901,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             (
                 "200 OK",
                 "application/json",
-                downloader::status_json(&release, &root),
+                serialize_json(&downloader::status(&release, &root)),
             )
         }
         "/api/resources/grch38-reference/download/start" => {
@@ -1944,7 +1947,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             Ok(paths) => (
                 "200 OK",
                 "application/json",
-                reference::status_json(&paths.downloads, &paths.resources),
+                serialize_json(&reference::status(&paths.downloads, &paths.resources)),
             ),
             Err(error) => (
                 "500 Internal Server Error",
@@ -1973,7 +1976,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         ),
         "/api/paths" => ("200 OK", "application/json", portable_paths_json()),
         "/api/about" => ("200 OK", "application/json", about_json()),
-        "/api/fastvep/status" => ("200 OK", "application/json", fastvep::readiness_json()),
+        "/api/fastvep/status" => (
+            "200 OK",
+            "application/json",
+            serialize_json(&fastvep::readiness()),
+        ),
         "/api/setup/status" => match portable_paths() {
             Ok(paths) => {
                 let reference_ready = reference::is_ready(&paths.resources);
@@ -1995,7 +2002,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             ),
         },
         "/api/demo/variants" => ("200 OK", "application/json", demo_variants_json()),
-        "/api/annotations/status" => ("200 OK", "application/json", annotation::status_json()),
+        "/api/annotations/status" => (
+            "200 OK",
+            "application/json",
+            serialize_json(&annotation::status()),
+        ),
         "/api/runs" => match portable_paths().and_then(|paths| completed_runs_json(&paths.runs)) {
             Ok(body) => ("200 OK", "application/json", body),
             Err(error) => (
@@ -2792,6 +2803,12 @@ fn write_http_response(
         body.len()
     );
     stream.write_all(response.as_bytes())
+}
+
+fn serialize_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        serde_json::json!({"error": format!("cannot serialize response: {error}")}).to_string()
+    })
 }
 
 fn json_escape(value: &str) -> String {

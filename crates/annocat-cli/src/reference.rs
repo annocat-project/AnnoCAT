@@ -200,12 +200,6 @@ pub fn status(downloads: &Path, resources: &Path) -> ReferenceStatus {
     }
 }
 
-pub fn status_json(downloads: &Path, resources: &Path) -> String {
-    serde_json::to_string(&status(downloads, resources)).unwrap_or_else(|_| {
-        r#"{"state":"failed","phase":"Failed","completedBytes":0,"totalBytes":0,"percent":0,"detail":"Reference state unavailable","error":"serialization failed"}"#.into()
-    })
-}
-
 struct CountingReader {
     inner: File,
     count: u64,

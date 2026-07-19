@@ -98,12 +98,6 @@ fn idle_state() -> State {
     }
 }
 
-pub fn status_json() -> String {
-    serde_json::to_string(&status()).unwrap_or_else(|_| {
-        r#"{"state":"failed","phase":"Failed","detail":"Annotation state unavailable"}"#.into()
-    })
-}
-
 pub fn status() -> State {
     state()
         .lock()

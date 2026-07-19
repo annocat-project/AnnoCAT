@@ -109,10 +109,6 @@ pub fn cancel_background() -> bool {
     }
 }
 
-pub fn status_json(resources: &Path) -> String {
-    serde_json::to_string(&status(resources)).unwrap_or_else(|_| r#"{"state":"failed","phase":"Failed","detail":"State unavailable","error":"serialization failed"}"#.into())
-}
-
 pub fn status(resources: &Path) -> TranscriptStatus {
     if is_ready(resources) {
         return TranscriptStatus {

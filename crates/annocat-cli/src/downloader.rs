@@ -465,12 +465,6 @@ pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
     }
 }
 
-pub fn status_json(release: &ResourceRelease, root: &Path) -> String {
-    serde_json::to_string(&status(release, root)).unwrap_or_else(|_| {
-        r#"{"state":"failed","phase":"failed","downloadedBytes":0,"expectedBytes":0,"percent":0,"queuePosition":null,"error":"download state unavailable"}"#.into()
-    })
-}
-
 fn fill_download_slots(root: &Path) {
     let Ok(scheduler) = SCHEDULER.lock() else {
         return;
