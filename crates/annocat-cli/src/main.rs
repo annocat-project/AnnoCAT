@@ -449,14 +449,17 @@ fn format_terminal_size(bytes: u64) -> String {
 }
 
 fn terminal_task_activity(task: &tasks::TaskSnapshot) -> String {
+    if let Some((_, detail)) = task.detail.split_once(": ") {
+        if detail.starts_with("reconnecting")
+            || detail.starts_with("validating")
+            || task.phase == "building-cache"
+        {
+            return detail.to_owned();
+        }
+    }
     let rate = format_terminal_rate(task.throughput_bytes_per_second);
     if !rate.is_empty() {
         return format!("{:.1}% {rate}", task.percent);
-    }
-    if let Some((_, detail)) = task.detail.split_once(": ") {
-        if detail.starts_with("reconnecting") || detail.starts_with("validating") {
-            return detail.to_owned();
-        }
     }
     if task.kind == "annotation" {
         return task.phase.replace('-', " ");
@@ -2636,7 +2639,7 @@ fn set_preparation_concurrency(query: &str) -> Result<usize, String> {
 fn set_source_input_mode(query: &str) -> Result<preparation::SourceInputMode, String> {
     let value = query_parameter(query, "sourceMode")
         .transpose()?
-        .unwrap_or_else(|| "pure-streaming".to_string());
+        .unwrap_or_else(|| "resumable".to_string());
     preparation::set_source_input_mode(&value)
 }
 

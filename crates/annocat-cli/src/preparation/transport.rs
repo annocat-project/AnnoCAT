@@ -1,7 +1,6 @@
 use std::io::Read;
 use std::time::Duration;
 
-const HTTP_RANGE_BYTES: u64 = 64 * 1024 * 1024;
 const HTTP_RECONNECT_ATTEMPTS: u32 = 4;
 
 pub(super) struct ReconnectingRangeReader {
@@ -15,7 +14,6 @@ pub(super) struct ReconnectingRangeReader {
     expected_etag: Option<String>,
     expected_last_modified: Option<String>,
     response: Option<reqwest::blocking::Response>,
-    response_end: u64,
 }
 
 impl ReconnectingRangeReader {
@@ -46,30 +44,28 @@ impl ReconnectingRangeReader {
             expected_etag: expected_etag.map(str::to_owned),
             expected_last_modified: expected_last_modified.map(str::to_owned),
             response: None,
-            response_end: absolute_start,
         })
     }
 
-    fn open_chunk(&mut self) -> Result<(), String> {
-        let chunk_end = self
-            .current
-            .saturating_add(HTTP_RANGE_BYTES.saturating_sub(1))
-            .min(self.absolute_end);
+    fn open_response(&mut self) -> Result<(), String> {
         let response = self
             .client
             .get(&self.source_url)
             .header(
                 reqwest::header::RANGE,
-                format!("bytes={}-{}", self.current, chunk_end),
+                format!("bytes={}-{}", self.current, self.absolute_end),
             )
             .send()
             .map_err(|error| format!("range request failed: {error}"))?;
-        let expected_bytes = chunk_end - self.current + 1;
+        let expected_bytes = self.absolute_end - self.current + 1;
         let valid_full_response = self.current == 0
-            && chunk_end + 1 == self.object_bytes
+            && self.absolute_end + 1 == self.object_bytes
             && response.status().is_success()
             && response.content_length() == Some(expected_bytes);
-        let expected_range = format!("bytes {}-{chunk_end}/{}", self.current, self.object_bytes);
+        let expected_range = format!(
+            "bytes {}-{}/{}",
+            self.current, self.absolute_end, self.object_bytes
+        );
         let valid_range_response = response.status() == reqwest::StatusCode::PARTIAL_CONTENT
             && response.content_length() == Some(expected_bytes)
             && response
@@ -79,9 +75,10 @@ impl ReconnectingRangeReader {
                 == Some(expected_range.as_str());
         if !valid_full_response && !valid_range_response {
             return Err(format!(
-                "HTTP {} returned incompatible metadata for bytes {}-{chunk_end}",
+                "HTTP {} returned incompatible metadata for bytes {}-{}",
                 response.status(),
-                self.current
+                self.current,
+                self.absolute_end
             ));
         }
         super::validate_optional_header(
@@ -103,7 +100,6 @@ impl ReconnectingRangeReader {
             )?;
         }
         self.response = Some(response);
-        self.response_end = chunk_end;
         Ok(())
     }
 
@@ -128,7 +124,7 @@ impl Read for ReconnectingRangeReader {
         let mut attempts = 0_u32;
         loop {
             if self.response.is_none() {
-                if let Err(error) = self.open_chunk() {
+                if let Err(error) = self.open_response() {
                     if attempts >= HTTP_RECONNECT_ATTEMPTS {
                         return Err(std::io::Error::other(format!(
                             "resumable range reconnect failed at source byte {}: {error}",
@@ -140,7 +136,7 @@ impl Read for ReconnectingRangeReader {
                     continue;
                 }
             }
-            let remaining = self.response_end - self.current + 1;
+            let remaining = self.absolute_end - self.current + 1;
             let bounded = output.len().min(remaining as usize);
             let result = self
                 .response
@@ -150,12 +146,8 @@ impl Read for ReconnectingRangeReader {
             match result {
                 Ok(0) => {
                     self.response = None;
-                    if self.current > self.response_end {
-                        attempts = 0;
-                        if self.current > self.absolute_end {
-                            return Ok(0);
-                        }
-                        continue;
+                    if self.current > self.absolute_end {
+                        return Ok(0);
                     }
                     let error = "response ended before its advertised byte range";
                     if attempts >= HTTP_RECONNECT_ATTEMPTS {
@@ -169,7 +161,7 @@ impl Read for ReconnectingRangeReader {
                 }
                 Ok(read) => {
                     self.current = self.current.saturating_add(read as u64);
-                    if self.current > self.response_end {
+                    if self.current > self.absolute_end {
                         self.response = None;
                     }
                     return Ok(read);

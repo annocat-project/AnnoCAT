@@ -18,6 +18,7 @@ pub struct EnqueueResult {
 struct InstallQueueState {
     waiting: VecDeque<String>,
     paused: HashSet<String>,
+    scheduling_paused: bool,
     concurrency: usize,
     worker_active: bool,
 }
@@ -27,6 +28,7 @@ impl Default for InstallQueueState {
         Self {
             waiting: VecDeque::new(),
             paused: HashSet::new(),
+            scheduling_paused: false,
             concurrency: 1,
             worker_active: false,
         }
@@ -35,6 +37,9 @@ impl Default for InstallQueueState {
 
 impl InstallQueueState {
     fn enqueue(&mut self, resource_id: &str, prioritize: bool) -> EnqueueResult {
+        // Enqueue is an explicit user action. It resumes scheduling, while any
+        // other paused sources remain available for a later explicit resume.
+        self.scheduling_paused = false;
         let inserted = if self.waiting.iter().any(|queued| queued == resource_id) {
             false
         } else {
@@ -56,7 +61,7 @@ impl InstallQueueState {
     }
 
     fn next(&mut self, running: usize) -> NextWork {
-        if running.saturating_add(self.paused.len()) >= self.concurrency {
+        if self.scheduling_paused || running >= self.concurrency {
             return NextWork::Wait;
         }
         match self.waiting.pop_front() {
@@ -102,9 +107,10 @@ pub fn next(running: usize) -> NextWork {
 }
 
 pub fn hold(resource_id: &str) -> bool {
-    state()
-        .lock()
-        .is_ok_and(|mut state| state.paused.insert(resource_id.into()))
+    state().lock().is_ok_and(|mut state| {
+        state.scheduling_paused = true;
+        state.paused.insert(resource_id.into())
+    })
 }
 
 pub fn release_hold(resource_id: &str) -> bool {
@@ -123,6 +129,9 @@ pub fn remove(resource_id: &str) -> bool {
     state().lock().is_ok_and(|mut state| {
         let waiting = state.remove_waiting(resource_id);
         let paused = state.paused.remove(resource_id);
+        if paused {
+            state.scheduling_paused = false;
+        }
         waiting || paused
     })
 }
@@ -166,14 +175,24 @@ mod tests {
     }
 
     #[test]
-    fn paused_sources_reserve_concurrency_slots() {
+    fn pause_stops_automatic_queue_advance() {
         let mut state = InstallQueueState::default();
         state.concurrency = 2;
         state.enqueue("cadd", false);
         state.paused.insert("dbsnp".into());
+        state.scheduling_paused = true;
         assert_eq!(state.next(1), NextWork::Wait);
-        state.paused.remove("dbsnp");
-        assert_eq!(state.next(1), NextWork::Start("cadd".into()));
+    }
+
+    #[test]
+    fn explicit_start_resumes_queue_without_counting_other_paused_sources() {
+        let mut state = InstallQueueState::default();
+        state.concurrency = 1;
+        state.paused.insert("dbsnp".into());
+        state.scheduling_paused = true;
+        state.enqueue("cadd", false);
+        assert_eq!(state.next(0), NextWork::Start("cadd".into()));
+        assert!(state.paused.contains("dbsnp"));
     }
 
     #[test]

@@ -302,7 +302,11 @@ where
             retained_bytes: request.identity.expected_compressed_bytes,
             expected_compressed_bytes: request.identity.expected_compressed_bytes,
             elapsed,
-            bytes_per_second: 0.0,
+            bytes_per_second: if elapsed.is_zero() {
+                0.0
+            } else {
+                consumed as f64 / elapsed.as_secs_f64()
+            },
         });
     };
     let result = if let Some(expected_md5) = identity_md5(request.identity) {
@@ -656,18 +660,32 @@ fn stream_revel_archive_to_partial_osa(
                         let elapsed = started.elapsed().as_secs_f64();
                         let consumed = count.load(Ordering::Relaxed);
                         let downloaded = if resumable { archive.bytes } else { consumed };
-                        update_revel_progress(
-                            &archive.chromosome,
-                            completed,
-                            base_network.saturating_add(downloaded),
-                            total_network,
-                            prepared_bytes,
-                            if resumable || elapsed == 0.0 {
-                                0.0
-                            } else {
-                                downloaded as f64 / elapsed
-                            },
-                        );
+                        if resumable {
+                            update_local_build_progress_detail(
+                                "REVEL",
+                                &archive.chromosome,
+                                consumed,
+                                archive.bytes,
+                                if elapsed == 0.0 {
+                                    0.0
+                                } else {
+                                    consumed as f64 / elapsed
+                                },
+                            );
+                        } else {
+                            update_revel_progress(
+                                &archive.chromosome,
+                                completed,
+                                base_network.saturating_add(downloaded),
+                                total_network,
+                                prepared_bytes,
+                                if elapsed == 0.0 {
+                                    0.0
+                                } else {
+                                    downloaded as f64 / elapsed
+                                },
+                            );
+                        }
                     }
                     let mut remaining = decoder.into_inner();
                     if remaining.limit() != 0 {
@@ -2060,18 +2078,32 @@ fn stream_cadd_ranges_to_partial_osa(
                 } else {
                     current
                 };
-                update_cadd_progress(
-                    &request.identity.chromosome,
-                    completed,
-                    base_network.saturating_add(downloaded),
-                    total_network,
-                    prepared_bytes,
-                    if resumable || elapsed == 0.0 {
-                        0.0
-                    } else {
-                        downloaded as f64 / elapsed
-                    },
-                );
+                if resumable {
+                    update_local_build_progress_detail(
+                        "CADD",
+                        &request.identity.chromosome,
+                        current,
+                        request.identity.expected_compressed_bytes,
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            current as f64 / elapsed
+                        },
+                    );
+                } else {
+                    update_cadd_progress(
+                        &request.identity.chromosome,
+                        completed,
+                        base_network.saturating_add(downloaded),
+                        total_network,
+                        prepared_bytes,
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            downloaded as f64 / elapsed
+                        },
+                    );
+                }
                 last_report = current;
             }
         }
@@ -2305,18 +2337,32 @@ fn stream_spliceai_range_to_partial_osa(
                 } else {
                     current
                 };
-                update_spliceai_progress(
-                    &range.chromosome,
-                    completed,
-                    base_network.saturating_add(downloaded),
-                    total_network,
-                    prepared_bytes,
-                    if resumable || elapsed == 0.0 {
-                        0.0
-                    } else {
-                        downloaded as f64 / elapsed
-                    },
-                );
+                if resumable {
+                    update_local_build_progress_detail(
+                        "SpliceAI",
+                        &range.chromosome,
+                        current,
+                        request.identity.expected_compressed_bytes,
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            current as f64 / elapsed
+                        },
+                    );
+                } else {
+                    update_spliceai_progress(
+                        &range.chromosome,
+                        completed,
+                        base_network.saturating_add(downloaded),
+                        total_network,
+                        prepared_bytes,
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            downloaded as f64 / elapsed
+                        },
+                    );
+                }
                 last_report = current;
             }
         }
@@ -2780,20 +2826,34 @@ fn stream_dbsnp_range_to_partial_osa(
             if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
                 let elapsed = started.elapsed().as_secs_f64();
                 let downloaded = if resumable { range.len() } else { current };
-                update_indexed_progress(
-                    "dbSNP",
-                    &range.chromosome,
-                    completed,
-                    DBSNP_PRIMARY_CONTIGS.len() as u16,
-                    base_network.saturating_add(downloaded),
-                    total_network,
-                    prepared_bytes,
-                    if resumable || elapsed == 0.0 {
-                        0.0
-                    } else {
-                        downloaded as f64 / elapsed
-                    },
-                );
+                if resumable {
+                    update_local_build_progress_detail(
+                        "dbSNP",
+                        &range.chromosome,
+                        current,
+                        range.len(),
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            current as f64 / elapsed
+                        },
+                    );
+                } else {
+                    update_indexed_progress(
+                        "dbSNP",
+                        &range.chromosome,
+                        completed,
+                        DBSNP_PRIMARY_CONTIGS.len() as u16,
+                        base_network.saturating_add(downloaded),
+                        total_network,
+                        prepared_bytes,
+                        if elapsed == 0.0 {
+                            0.0
+                        } else {
+                            downloaded as f64 / elapsed
+                        },
+                    );
+                }
                 last_report = current;
             }
         }
@@ -2846,7 +2906,13 @@ fn update_resumable_progress_detail(label: &str, chromosome: &str, progress: Str
             progress.expected_compressed_bytes,
         );
     } else {
-        update_local_build_detail(label, chromosome);
+        update_local_build_progress_detail(
+            label,
+            chromosome,
+            progress.consumed_bytes,
+            progress.expected_compressed_bytes,
+            progress.bytes_per_second,
+        );
     }
 }
 
@@ -2862,11 +2928,28 @@ fn update_resumable_download_detail(label: &str, chromosome: &str, persisted: u6
 }
 
 fn update_local_build_detail(label: &str, chromosome: &str) {
+    update_local_build_progress_detail(label, chromosome, 0, 0, 0.0);
+}
+
+fn update_local_build_progress_detail(
+    label: &str,
+    chromosome: &str,
+    consumed: u64,
+    expected: u64,
+    throughput: f64,
+) {
     if let Ok(mut state) = live_state().lock() {
         state.phase = "building-cache".into();
-        state.throughput_bytes_per_second = 0.0;
-        state.detail =
-            format!("{label} chromosome {chromosome}: building cache from completed source part");
+        state.throughput_bytes_per_second = throughput;
+        state.detail = if consumed > 0 && expected > 0 {
+            format!(
+                "{label} chromosome {chromosome}: building cache from {} of {} saved source data",
+                format_decimal_bytes(consumed),
+                format_decimal_bytes(expected)
+            )
+        } else {
+            format!("{label} chromosome {chromosome}: building cache from completed source part")
+        };
     }
 }
 
