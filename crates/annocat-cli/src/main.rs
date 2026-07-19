@@ -1831,8 +1831,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
             ),
         },
-        "/api/tasks" => match tasks_json() {
-            Ok(body) => ("200 OK", "application/json", body),
+        "/api/tasks" => match task_status() {
+            Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
             Err(error) => (
                 "500 Internal Server Error",
                 "application/json",
@@ -2007,14 +2007,16 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "application/json",
             serialize_json(&annotation::status()),
         ),
-        "/api/runs" => match portable_paths().and_then(|paths| completed_runs_json(&paths.runs)) {
-            Ok(body) => ("200 OK", "application/json", body),
-            Err(error) => (
-                "500 Internal Server Error",
-                "application/json",
-                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-            ),
-        },
+        "/api/runs" => {
+            match portable_paths().and_then(|paths| completed_runs_status(&paths.runs)) {
+                Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
+                Err(error) => (
+                    "500 Internal Server Error",
+                    "application/json",
+                    format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+                ),
+            }
+        }
         "/api/health" => (
             "200 OK",
             "application/json",
@@ -3153,6 +3155,11 @@ struct CompletedRunSummary {
     annotated_vcf_bytes: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct CompletedRunsStatus {
+    runs: Vec<CompletedRunSummary>,
+}
+
 fn completed_runs(runs_directory: &std::path::Path) -> Result<Vec<CompletedRunSummary>, String> {
     if !runs_directory.exists() {
         return Ok(Vec::new());
@@ -3260,9 +3267,10 @@ fn completed_runs(runs_directory: &std::path::Path) -> Result<Vec<CompletedRunSu
     Ok(runs)
 }
 
-fn completed_runs_json(runs_directory: &std::path::Path) -> Result<String, String> {
-    serde_json::to_string(&serde_json::json!({"runs": completed_runs(runs_directory)?}))
-        .map_err(|error| error.to_string())
+fn completed_runs_status(runs_directory: &std::path::Path) -> Result<CompletedRunsStatus, String> {
+    Ok(CompletedRunsStatus {
+        runs: completed_runs(runs_directory)?,
+    })
 }
 
 fn completed_run_result(
@@ -3506,7 +3514,12 @@ fn task_sort_rank(task: &tasks::TaskSnapshot) -> u8 {
     }
 }
 
-fn tasks_json() -> Result<String, String> {
+#[derive(Serialize)]
+struct TaskStatus {
+    tasks: Vec<tasks::TaskSnapshot>,
+}
+
+fn task_status() -> Result<TaskStatus, String> {
     let paths = portable_paths()?;
     let runs = completed_runs(&paths.runs)?;
     let completed_ids = runs
@@ -3537,8 +3550,7 @@ fn tasks_json() -> Result<String, String> {
             .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| left.title.cmp(&right.title))
     });
-    serde_json::to_string(&serde_json::json!({"tasks": snapshots}))
-        .map_err(|error| error.to_string())
+    Ok(TaskStatus { tasks: snapshots })
 }
 
 fn pick_output_folder() -> Result<Option<String>, String> {
@@ -4239,8 +4251,7 @@ mod profile_status_tests {
         )
         .unwrap();
         library_metadata::rename(&root, "run-2", "Renamed report").unwrap();
-        let value: serde_json::Value =
-            serde_json::from_str(&completed_runs_json(&root).unwrap()).unwrap();
+        let value = serde_json::to_value(completed_runs_status(&root).unwrap()).unwrap();
         assert_eq!(value["runs"].as_array().unwrap().len(), 1);
         assert_eq!(value["runs"][0]["id"], "run-2");
         assert_eq!(value["runs"][0]["name"], "Renamed report");
