@@ -100,7 +100,12 @@ impl CacheContractManifest {
                 release: release.into(),
                 assembly: assembly.into(),
                 chromosome: chromosome.into(),
-                artifact_id: format!("{resource_id}:{release}:{assembly}:{chromosome}"),
+                artifact_id: annocat_core::source_catalog::artifact_identity(
+                    resource_id,
+                    release,
+                    assembly,
+                    chromosome,
+                ),
                 content_identity: source_content_identity(
                     release,
                     expected_compressed_bytes,
@@ -196,17 +201,8 @@ pub fn write_atomic(path: &Path, manifest: &CacheContractManifest) -> Result<(),
 }
 
 fn adapter_contract(resource_id: &str) -> &'static str {
-    match resource_id {
-        "dbnsfp" => "annocat-dbnsfp-v1",
-        "clinvar" => "annocat-clinvar-v1",
-        "dbsnp" => "annocat-dbsnp-v1",
-        "gnomad" | "gnomad-genomes" => "annocat-gnomad-v1",
-        "cadd" => "annocat-cadd-v1",
-        "phylop" => "annocat-phylop-v1",
-        "spliceai" => "annocat-spliceai-v1",
-        "revel" => "annocat-revel-v1",
-        _ => "annocat-supplementary-v1",
-    }
+    annocat_core::source_catalog::adapter_contract(resource_id)
+        .unwrap_or("annocat-supplementary-v1")
 }
 
 fn source_content_identity(

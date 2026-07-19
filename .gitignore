@@ -29,6 +29,7 @@
 !/config/dbnsfp-4.9a-members.json
 !/config/dbnsfp-4.9a-curated-fields.json
 !/config/wgs-streams.json
+!/config/source-catalog.json
 *.vcf.gz
 *.tbi
 *.csi

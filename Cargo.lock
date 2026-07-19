@@ -76,6 +76,8 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "noodles",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,225 @@
+{
+  "schemaVersion": 1,
+  "resources": [
+    {
+      "id": "grch38-reference",
+      "assembly": "GRCh38",
+      "delivery": "core-download",
+      "adapterContract": null,
+      "manifestRef": null,
+      "release": {
+        "version": "GCA_000001405.15",
+        "policy": "pinned",
+        "artifactId": "ncbi-grch38-no-alt-analysis-set:GCA_000001405.15",
+        "primaryUrl": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz",
+        "filename": "GRCh38_no_alt_analysis_set.fna.gz",
+        "downloadBytes": 872949833,
+        "archiveFormat": "gzip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-15T02:15:09-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "ensembl-gff3",
+      "assembly": "GRCh38",
+      "delivery": "core-download",
+      "adapterContract": null,
+      "manifestRef": null,
+      "release": {
+        "version": "115",
+        "policy": "pinned",
+        "artifactId": "ensembl-homo-sapiens-grch38-gff3:115",
+        "primaryUrl": "https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz",
+        "filename": "Homo_sapiens.GRCh38.115.gff3.gz",
+        "downloadBytes": 83835106,
+        "archiveFormat": "gzip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-15T20:28:19-04:00",
+        "checksum": {"algorithm": "sha256", "value": "1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c"},
+        "resolver": null
+      }
+    },
+    {
+      "id": "dbnsfp",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-dbnsfp-v1",
+      "manifestRef": "config/dbnsfp-4.9a-members.json",
+      "release": {
+        "version": "4.9a",
+        "policy": "pinned",
+        "artifactId": "dbnsfp-official-variant-archive:4.9a",
+        "primaryUrl": "https://usf.box.com/shared/static/0tq7q3b8ucaxxkmfyvnb0ss7g58ptgcl",
+        "filename": "dbNSFP4.9a.zip",
+        "downloadBytes": 38969753349,
+        "archiveFormat": "zip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-14T23:31:59-04:00",
+        "checksum": {"algorithm": "md5", "value": "be89346ab3dc5c14a8a7b602f50c66fb"},
+        "resolver": null
+      }
+    },
+    {
+      "id": "clinvar",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-clinvar-v1",
+      "manifestRef": null,
+      "release": {
+        "version": "20260706",
+        "policy": "rolling",
+        "artifactId": "ncbi-clinvar-primary-grch38:20260706",
+        "primaryUrl": "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/archive_2.0/2026/clinvar_20260706.vcf.gz",
+        "filename": "clinvar_20260706.vcf.gz",
+        "downloadBytes": 192290992,
+        "archiveFormat": "bgzip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-15T20:28:20-04:00",
+        "checksum": {"algorithm": "md5", "value": "f78d25d49e17a070957a127e409f87b9"},
+        "resolver": "ncbi-clinvar-primary-grch38"
+      }
+    },
+    {
+      "id": "dbsnp",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-dbsnp-v1",
+      "manifestRef": null,
+      "release": {
+        "version": "b157-GRCh38.p14",
+        "policy": "rolling",
+        "artifactId": "ncbi-dbsnp-primary-grch38:GCF_000001405.40",
+        "primaryUrl": "https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz",
+        "filename": "GCF_000001405.40.gz",
+        "downloadBytes": 29552227779,
+        "archiveFormat": "bgzip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-16T00:00:00-04:00",
+        "checksum": {"algorithm": "md5", "value": "6a6f313e92a39c337571174dad12cfe1"},
+        "resolver": "ncbi-dbsnp-primary-grch38"
+      }
+    },
+    {
+      "id": "gnomad",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-gnomad-v1",
+      "manifestRef": "config/wgs-streams.json",
+      "release": {
+        "version": "4.1.1-exomes",
+        "policy": "pinned",
+        "artifactId": "gnomad-exomes-sites:4.1.1",
+        "primaryUrl": "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1.1/vcf/exomes/",
+        "filename": "gnomad-v4.1.1-exomes.chromosome-streams",
+        "downloadBytes": 199241266182,
+        "archiveFormat": "bgzip-shards",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-17T00:46:00-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "gnomad-genomes",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-gnomad-v1",
+      "manifestRef": "config/wgs-streams.json",
+      "release": {
+        "version": "4.1.1-genomes",
+        "policy": "pinned",
+        "artifactId": "gnomad-genomes-sites:4.1.1",
+        "primaryUrl": "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1.1/vcf/genomes/",
+        "filename": "gnomad-v4.1.1-genomes.chromosome-streams",
+        "downloadBytes": 565643483329,
+        "archiveFormat": "bgzip-shards",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-17T02:15:00-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "cadd",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-cadd-v1",
+      "manifestRef": null,
+      "release": {
+        "version": "1.7",
+        "policy": "pinned",
+        "artifactId": "cadd-whole-genome-grch38:1.7",
+        "primaryUrl": "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/",
+        "filename": "CADD-v1.7-GRCh38.chromosome-streams",
+        "downloadBytes": 88735216521,
+        "archiveFormat": "tabix-bgzip-ranges",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-16T15:30:00-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "phylop",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-phylop-v1",
+      "manifestRef": "config/wgs-streams.json",
+      "release": {
+        "version": "hg38-100way-2015-05-08",
+        "policy": "pinned",
+        "artifactId": "ucsc-hg38-phylop100way-wigfix:2015-05-08",
+        "primaryUrl": "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/phyloP100way/hg38.100way.phyloP100way/",
+        "filename": "hg38-phyloP100way.chromosome-streams",
+        "downloadBytes": 5452453066,
+        "archiveFormat": "gzip-shards",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-16T15:00:00-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "spliceai",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-spliceai-v1",
+      "manifestRef": null,
+      "release": {
+        "version": "ensembl-mane-v1.4-masked-snv",
+        "policy": "pinned",
+        "artifactId": "ensembl-spliceai-mane-v1.4-masked-snv:GRCh38",
+        "primaryUrl": "https://ftp.ensembl.org/pub/data_files/homo_sapiens/GRCh38/variation_plugins/spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.vcf.gz",
+        "filename": "spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.chromosome-streams",
+        "downloadBytes": 28643031420,
+        "archiveFormat": "tabix-bgzip-ranges",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-16T17:19:31-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    },
+    {
+      "id": "revel",
+      "assembly": "GRCh38",
+      "delivery": "stream-cache",
+      "adapterContract": "annocat-revel-v1",
+      "manifestRef": "config/revel-1.3-archives.json",
+      "release": {
+        "version": "1.3",
+        "policy": "pinned",
+        "artifactId": "zenodo:7072866:revel-v1.3-chromosome-archives",
+        "primaryUrl": "https://zenodo.org/records/7072866",
+        "filename": "revel-v1.3.chromosome-zip-streams",
+        "downloadBytes": 667188638,
+        "archiveFormat": "zip-member-streams",
+        "rangeResume": false,
+        "sizeCheckedAt": "2026-07-16T20:00:00-04:00",
+        "checksum": null,
+        "resolver": null
+      }
+    }
+  ]
+}
