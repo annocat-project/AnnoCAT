@@ -802,6 +802,52 @@ pub fn restart_decision(paths: &ShardPaths, identity: &PreparationIdentity) -> R
     }
 }
 
+fn restart_decision_with_legacy_upgrade(
+    fastvep_executable: &Path,
+    paths: &ShardPaths,
+    identity: &PreparationIdentity,
+) -> RestartDecision {
+    let decision = restart_decision(paths, identity);
+    if decision == RestartDecision::AlreadyVerified
+        && !paths.cache_contract().is_file()
+        && upgrade_legacy_cache_contract(fastvep_executable, paths, identity).is_err()
+    {
+        return RestartDecision::StaleIdentity;
+    }
+    decision
+}
+
+fn upgrade_legacy_cache_contract(
+    fastvep_executable: &Path,
+    paths: &ShardPaths,
+    expected: &PreparationIdentity,
+) -> Result<(), String> {
+    let checkpoint = read_checkpoint(&paths.verification())?;
+    if checkpoint.state != CheckpointState::Verified || checkpoint.identity != *expected {
+        return Err("legacy cache checkpoint does not match the expected source identity".into());
+    }
+    super::cache_contract::prove_legacy_source_contract(
+        &expected.resource_id,
+        &expected.release,
+        &expected.assembly,
+        &expected.selected_schema,
+        expected.osa_schema_version,
+    )?;
+    required_nonempty_file(&paths.final_osa())?;
+    required_nonempty_file(&paths.final_index())?;
+    let verification = verify_osa(fastvep_executable, &paths.final_osa(), expected)?;
+    if verification.record_count != checkpoint.parsed_records {
+        return Err("legacy cache record count differs from its verified checkpoint".into());
+    }
+    let mut manifest = cache_contract_manifest(expected);
+    manifest.builder_provenance = super::cache_contract::BuilderProvenance {
+        repository: "unknown-legacy".into(),
+        commit: "unknown-legacy".into(),
+        binary_sha256: "unknown-legacy".into(),
+    };
+    super::cache_contract::write_atomic(&paths.cache_contract(), &manifest)
+}
+
 pub fn initialize_partial(paths: &ShardPaths, identity: PreparationIdentity) -> Result<(), String> {
     if paths.final_directory.exists() {
         return Err(format!(
@@ -1924,11 +1970,19 @@ fn verify_partial_osa(
     paths: &ShardPaths,
     identity: &PreparationIdentity,
 ) -> Result<SaVerificationReport, String> {
+    verify_osa(fastvep_executable, &paths.partial_osa(), identity)
+}
+
+fn verify_osa(
+    fastvep_executable: &Path,
+    osa_path: &Path,
+    identity: &PreparationIdentity,
+) -> Result<SaVerificationReport, String> {
     let mut command = Command::new(fastvep_executable);
     command
         .arg("sa-verify")
         .arg("--input")
-        .arg(paths.partial_osa())
+        .arg(osa_path)
         .arg("--assembly")
         .arg(&identity.assembly)
         .stdin(Stdio::null())
@@ -4229,7 +4283,11 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &shard.chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -4642,7 +4700,11 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -4801,7 +4863,11 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -4933,7 +4999,11 @@ fn run_revel_live(
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &archive.chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -5069,7 +5139,11 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -5306,7 +5380,11 @@ fn run_dbnsfp_live(
                 osa_schema_version: 1,
             };
             let paths = ShardPaths::new(&request.resource_root, &member.chromosome)?;
-            match restart_decision(&paths, &identity) {
+            match restart_decision_with_legacy_upgrade(
+                &request.fastvep_executable,
+                &paths,
+                &identity,
+            ) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -5653,7 +5731,11 @@ fn write_osa_shard_manifest<'a>(
 fn run_live(request: LivePreparationRequest, selection: SupplementaryFieldSelection) {
     let result = (|| {
         let paths = ShardPaths::new(&request.resource_root, &request.identity.chromosome)?;
-        match restart_decision(&paths, &request.identity) {
+        match restart_decision_with_legacy_upgrade(
+            &request.fastvep_executable,
+            &paths,
+            &request.identity,
+        ) {
             RestartDecision::AlreadyVerified => {
                 if request.identity.resource_id == "clinvar" {
                     write_osa_shard_manifest(
@@ -6605,12 +6687,22 @@ partial dbSNP row",
         )
         .unwrap();
         assert_eq!(build.compressed_bytes_read, input.len() as u64);
+        let verification = verify_partial_osa(&fastvep, &paths, &identity).unwrap();
+        assert_eq!(verification.record_count, 2);
+        promote_verified(
+            &paths,
+            identity.clone(),
+            build.compressed_bytes_read,
+            verification.record_count,
+        )
+        .unwrap();
+        fs::remove_file(paths.cache_contract()).unwrap();
         assert_eq!(
-            verify_partial_osa(&fastvep, &paths, &identity)
-                .unwrap()
-                .record_count,
-            2
+            restart_decision_with_legacy_upgrade(&fastvep, &paths, &identity),
+            RestartDecision::AlreadyVerified
         );
+        let upgraded = crate::cache_contract::read(&paths.cache_contract()).unwrap();
+        assert_eq!(upgraded.builder_provenance.commit, "unknown-legacy");
         fs::remove_dir_all(root).unwrap();
     }
 

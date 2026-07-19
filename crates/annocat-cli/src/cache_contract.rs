@@ -70,6 +70,49 @@ pub fn classify_legacy_manifest(
     }
 }
 
+pub fn prove_legacy_source_contract(
+    resource_id: &str,
+    release: &str,
+    assembly: &str,
+    selected_schema: &str,
+    osa_schema_version: u16,
+) -> Result<(), String> {
+    if classify_legacy_manifest(resource_id, osa_schema_version)
+        != CacheCompatibilityDecision::VerifyAndUpgradeManifest
+    {
+        return Err("legacy cache uses an unsupported OSA or source contract".into());
+    }
+    let catalog = annocat_core::source_catalog::resource(resource_id)
+        .ok_or_else(|| format!("legacy cache source {resource_id} is not cataloged"))?;
+    if catalog.assembly != assembly {
+        return Err("legacy cache assembly differs from the source catalog".into());
+    }
+    if catalog.release.policy == "pinned" && catalog.release.version != release {
+        return Err("legacy cache release differs from the pinned source catalog".into());
+    }
+    if release.trim().is_empty() {
+        return Err("legacy cache release is empty".into());
+    }
+    let schema_prefix = match resource_id {
+        "dbnsfp" => "dbnsfp-4.9a-annocat-core-v1",
+        "clinvar" => "clinvar-",
+        "dbsnp" => "dbsnp-",
+        "gnomad" => "gnomad-v4.1.1-exomes-",
+        "gnomad-genomes" => "gnomad-v4.1.1-genomes-",
+        "cadd" => "cadd-v1.7-grch38",
+        "phylop" => "ucsc-hg38-phylop100way-per-base",
+        "spliceai" => "spliceai-ensembl-mane-v1.4-masked-snv",
+        "revel" => "revel-v1.3-transcript-matched",
+        _ => return Err("legacy cache source has no migration proof rule".into()),
+    };
+    if !selected_schema.starts_with(schema_prefix) {
+        return Err(format!(
+            "legacy {resource_id} cache has an unrecognized selected-field schema"
+        ));
+    }
+    Ok(())
+}
+
 impl CacheContractManifest {
     #[allow(clippy::too_many_arguments)]
     pub fn current(
@@ -294,6 +337,36 @@ mod tests {
         assert_eq!(
             classify_legacy_manifest("unknown-source", 1),
             CacheCompatibilityDecision::Unsupported
+        );
+    }
+
+    #[test]
+    fn legacy_migration_requires_a_source_specific_release_and_schema() {
+        assert!(
+            prove_legacy_source_contract(
+                "revel",
+                "1.3",
+                "GRCh38",
+                "revel-v1.3-transcript-matched",
+                1
+            )
+            .is_ok()
+        );
+        assert!(
+            prove_legacy_source_contract(
+                "revel",
+                "1.4",
+                "GRCh38",
+                "revel-v1.3-transcript-matched",
+                1
+            )
+            .unwrap_err()
+            .contains("release")
+        );
+        assert!(
+            prove_legacy_source_contract("revel", "1.3", "GRCh38", "generic-vcf", 1)
+                .unwrap_err()
+                .contains("schema")
         );
     }
 }
