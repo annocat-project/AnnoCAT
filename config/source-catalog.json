@@ -1,5 +1,178 @@
 {
   "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "fastvep",
+      "name": "fastVEP",
+      "purpose": "Gene, transcript, consequence, HGVS, and regulatory annotation",
+      "defaultEnabled": true,
+      "fastvepSource": null,
+      "delivery": "bundled-engine",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "dbnsfp",
+      "name": "dbNSFP 4.9a",
+      "purpose": "Missense/deleteriousness predictors, conservation, frequencies, and compiled functional fields",
+      "defaultEnabled": true,
+      "fastvepSource": "dbnsfp",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "clinvar",
+      "name": "ClinVar",
+      "purpose": "Clinical significance, review status, conditions, and accessions",
+      "defaultEnabled": true,
+      "fastvepSource": "clinvar",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "dbsnp",
+      "name": "dbSNP",
+      "purpose": "Reference SNP identifiers, merged-ID context, and per-allele frequency metadata",
+      "defaultEnabled": false,
+      "fastvepSource": "dbsnp",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "clingen",
+      "name": "ClinGen",
+      "purpose": "Dosage sensitivity and expert-curated gene/variant evidence",
+      "defaultEnabled": true,
+      "fastvepSource": null,
+      "delivery": "adapter-required",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "gencc",
+      "name": "GenCC",
+      "purpose": "Gene-disease validity and inheritance-mode evidence",
+      "defaultEnabled": true,
+      "fastvepSource": null,
+      "delivery": "adapter-required",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "gnomad",
+      "name": "gnomAD exomes",
+      "purpose": "Current exome population frequencies and ancestry-specific frequency context",
+      "defaultEnabled": false,
+      "fastvepSource": "gnomad",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "gnomad-genomes",
+      "name": "gnomAD genomes",
+      "purpose": "Full genome-wide population frequencies, including non-coding regions",
+      "defaultEnabled": false,
+      "fastvepSource": "gnomad",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "spliceai",
+      "name": "SpliceAI",
+      "purpose": "Ensembl MANE Select v1.4 masked splice-effect scores for GRCh38 SNVs",
+      "defaultEnabled": false,
+      "fastvepSource": "spliceai",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "cadd",
+      "name": "CADD",
+      "purpose": "Genome-wide raw and PHRED-scaled deleteriousness scores",
+      "defaultEnabled": false,
+      "fastvepSource": "cadd",
+      "delivery": "managed-public-noncommercial",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "phylop",
+      "name": "PhyloP",
+      "purpose": "Genome-wide base-level evolutionary conservation scores",
+      "defaultEnabled": false,
+      "fastvepSource": "phylop",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "gerp",
+      "name": "GERP",
+      "purpose": "Dedicated genome-wide evolutionary constraint scores",
+      "defaultEnabled": false,
+      "fastvepSource": "gerp",
+      "delivery": "catalog-pending",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "revel",
+      "name": "REVEL",
+      "purpose": "Missense pathogenicity scores from a dedicated pinned release",
+      "defaultEnabled": false,
+      "fastvepSource": "revel",
+      "delivery": "managed-public",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "primateai",
+      "name": "PrimateAI",
+      "purpose": "Dedicated primate-informed missense pathogenicity scores",
+      "defaultEnabled": false,
+      "fastvepSource": "primateai",
+      "delivery": "catalog-pending",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "dann",
+      "name": "DANN",
+      "purpose": "Dedicated genome-wide deleteriousness scores",
+      "defaultEnabled": false,
+      "fastvepSource": "dann",
+      "delivery": "catalog-pending",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "alphamissense",
+      "name": "AlphaMissense",
+      "purpose": "Protein missense pathogenicity prediction",
+      "defaultEnabled": false,
+      "fastvepSource": null,
+      "delivery": "adapter-required",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "gnomad-constraint",
+      "name": "gnomAD gene constraint",
+      "purpose": "Gene-level loss-of-function and missense constraint metrics",
+      "defaultEnabled": false,
+      "fastvepSource": "gnomad_genes",
+      "delivery": "catalog-pending",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "omim",
+      "name": "OMIM",
+      "purpose": "Licensed user-supplied gene-disease relationships",
+      "defaultEnabled": false,
+      "fastvepSource": "omim",
+      "delivery": "user-supplied-licensed",
+      "assembly": "GRCh38"
+    },
+    {
+      "id": "cosmic",
+      "name": "COSMIC",
+      "purpose": "Licensed user-supplied somatic variant evidence",
+      "defaultEnabled": false,
+      "fastvepSource": "cosmic",
+      "delivery": "user-supplied-licensed",
+      "assembly": "GRCh38"
+    }
+  ],
   "profiles": [
     {
       "id": "wgs",

@@ -777,7 +777,7 @@ pub fn practical_resource_plan_json() -> String {
     let rows = source_ids
         .iter()
         .map(|id| {
-            if let Some(release) = RESOURCE_RELEASES.iter().find(|release| release.resource_id == *id) {
+            if let Some(release) = source_catalog::download_release(id) {
                 let install_mode = if matches!(*id, "dbnsfp" | "clinvar" | "dbsnp" | "gnomad" | "gnomad-genomes" | "cadd" | "phylop" | "spliceai" | "revel") { "stream" } else { "download" };
                 format!("{{\"id\":\"{}\",\"version\":\"{}\",\"filename\":\"{}\",\"downloadBytes\":{},\"installedBytes\":null,\"rangeResume\":{},\"installMode\":\"{}\",\"state\":\"missing\",\"sizeCheckedAt\":\"{}\"}}", release.resource_id, release.version, release.filename, release.download_bytes.unwrap_or(0), release.range_resume, install_mode, release.size_checked_at)
             } else {
@@ -843,28 +843,7 @@ pub const DEMO_VARIANTS: &[DemoVariant] = &[
 ];
 
 pub fn sources_json() -> String {
-    let rows = SOURCES
-        .iter()
-        .map(|s| {
-            let implementation = source_implementation(s.id).expect("source implementation");
-            let fastvep_source = implementation
-                .fastvep_source
-                .map(|source| format!("\"{source}\""))
-                .unwrap_or_else(|| "null".into());
-            format!(
-                "{{\"id\":\"{}\",\"name\":\"{}\",\"purpose\":\"{}\",\"defaultEnabled\":{},\"fastvepSource\":{},\"delivery\":\"{}\",\"assembly\":\"{}\"}}",
-                s.id,
-                s.name,
-                s.purpose,
-                s.default_enabled,
-                fastvep_source,
-                implementation.delivery,
-                implementation.assembly
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{}]", rows)
+    source_catalog::sources_json()
 }
 
 pub fn profiles_json() -> String {

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
@@ -11,8 +11,21 @@ const CATALOG_JSON: &str = include_str!(concat!(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceCatalog {
     schema_version: u16,
+    pub sources: Vec<Source>,
     pub profiles: Vec<Profile>,
     pub resources: Vec<Resource>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Source {
+    pub id: String,
+    pub name: String,
+    pub purpose: String,
+    pub default_enabled: bool,
+    pub fastvep_source: Option<String>,
+    pub delivery: String,
+    pub assembly: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +87,14 @@ pub fn resource(id: &str) -> Option<&'static Resource> {
         .resources
         .iter()
         .find(|resource| resource.id == id)
+}
+
+pub fn source(id: &str) -> Option<&'static Source> {
+    catalog().sources.iter().find(|source| source.id == id)
+}
+
+pub fn sources_json() -> String {
+    serde_json::to_string(&catalog().sources).expect("validated sources must serialize")
 }
 
 pub fn profile(id: &str) -> Option<&'static Profile> {
@@ -156,6 +177,31 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             catalog.schema_version
         ));
     }
+    let mut catalog_source_ids = HashSet::new();
+    for source in &catalog.sources {
+        if !safe_id(&source.id) || !catalog_source_ids.insert(source.id.as_str()) {
+            return Err(format!("invalid or duplicate source id {}", source.id));
+        }
+        if source.name.trim().is_empty()
+            || source.purpose.trim().is_empty()
+            || source.assembly.trim().is_empty()
+            || !matches!(
+                source.delivery.as_str(),
+                "bundled-engine"
+                    | "managed-public"
+                    | "managed-public-noncommercial"
+                    | "adapter-required"
+                    | "catalog-pending"
+                    | "user-supplied-licensed"
+            )
+            || source
+                .fastvep_source
+                .as_deref()
+                .is_some_and(|id| !safe_id(id))
+        {
+            return Err(format!("source {} has invalid metadata", source.id));
+        }
+    }
     let mut ids = HashSet::new();
     let mut artifacts = HashSet::new();
     for resource in &catalog.resources {
@@ -232,6 +278,14 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 return Err(format!("resource {} has an invalid checksum", resource.id));
             }
         }
+        if !matches!(resource.id.as_str(), "grch38-reference" | "ensembl-gff3")
+            && !catalog_source_ids.contains(resource.id.as_str())
+        {
+            return Err(format!(
+                "resource {} has no matching annotation source",
+                resource.id
+            ));
+        }
     }
     let mut profile_ids = HashSet::new();
     for profile in &catalog.profiles {
@@ -243,9 +297,12 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
         {
             return Err(format!("invalid or duplicate profile {}", profile.id));
         }
-        let mut source_ids = HashSet::new();
+        let mut profile_source_ids = HashSet::new();
         for source_id in &profile.source_ids {
-            if !ids.contains(source_id.as_str()) || !source_ids.insert(source_id.as_str()) {
+            if !catalog_source_ids.contains(source_id.as_str())
+                || !ids.contains(source_id.as_str())
+                || !profile_source_ids.insert(source_id.as_str())
+            {
                 return Err(format!(
                     "profile {} references an unknown or duplicate source {}",
                     profile.id, source_id
@@ -276,6 +333,30 @@ fn safe_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_matches_every_legacy_source_and_implementation_policy() {
+        assert_eq!(catalog().sources.len(), crate::SOURCES.len());
+        assert_eq!(catalog().sources.len(), crate::SOURCE_IMPLEMENTATIONS.len());
+        for legacy in crate::SOURCES {
+            let current = source(legacy.id).expect("catalog source");
+            let implementation = crate::source_implementation(legacy.id)
+                .expect("legacy source implementation policy");
+            assert_eq!(current.name, legacy.name);
+            assert_eq!(current.purpose, legacy.purpose);
+            assert_eq!(current.default_enabled, legacy.default_enabled);
+            assert_eq!(
+                current.fastvep_source.as_deref(),
+                implementation.fastvep_source
+            );
+            assert_eq!(current.delivery, implementation.delivery);
+            assert_eq!(current.assembly, implementation.assembly);
+        }
+        let json: serde_json::Value = serde_json::from_str(&sources_json()).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), crate::SOURCES.len());
+        assert_eq!(json[0]["id"], "fastvep");
+        assert_eq!(json[0]["defaultEnabled"], true);
+    }
 
     #[test]
     fn catalog_matches_every_actionable_legacy_release() {

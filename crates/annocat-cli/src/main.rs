@@ -1,5 +1,5 @@
 use annocat_core::{
-    SOURCES, demo_variants_json, practical_resource_plan_json, profiles_json,
+    demo_variants_json, practical_resource_plan_json, profiles_json,
     resource_catalog_candidates_json, sources_json,
 };
 use serde::{Deserialize, Serialize};
@@ -842,7 +842,7 @@ fn doctor() {
 
 fn list_sources() {
     println!("{:<14} {:<8} PURPOSE", "ID", "DEFAULT");
-    for source in SOURCES {
+    for source in &annocat_core::source_catalog::catalog().sources {
         println!(
             "{:<14} {:<8} {}",
             source.id,
@@ -2731,17 +2731,10 @@ fn profile_queue_position(resource_id: &str) -> Option<usize> {
 }
 
 fn catalog_source_type(resource_id: &str) -> Option<&'static str> {
-    match resource_id {
-        "clinvar" => Some("clinvar"),
-        "dbsnp" => Some("dbsnp"),
-        "gnomad" => Some("gnomad"),
-        "gnomad-genomes" => Some("gnomad"),
-        "phylop" => Some("phylop"),
-        "cadd" => Some("cadd"),
-        "spliceai" => Some("spliceai"),
-        "revel" => Some("revel"),
-        _ => None,
-    }
+    annocat_core::source_catalog::resource(resource_id)?;
+    annocat_core::source_catalog::source(resource_id)?
+        .fastvep_source
+        .as_deref()
 }
 
 fn preparation_available(resource_id: &str) -> bool {
