@@ -292,6 +292,7 @@ mod cache_contract;
 mod csq;
 mod downloader;
 mod fastvep;
+mod install_queue;
 mod library_metadata;
 mod preparation;
 mod reference;
@@ -1249,9 +1250,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                         .map(|paths| downloader::cancel_resource(resource_id, &paths.downloads))
                         .unwrap_or(false);
                     let preparation_paused = preparation::cancel_live(resource_id);
-                    let queued_preparation_removed = remove_profile_queue_resource(resource_id);
+                    let queued_preparation_removed = install_queue::remove_waiting(resource_id);
                     if preparation_paused || queued_preparation_removed {
-                        hold_preparation_queue(resource_id);
+                        install_queue::hold(resource_id);
                     }
                     let paused =
                         download_paused || preparation_paused || queued_preparation_removed;
@@ -2501,7 +2502,7 @@ fn managed_preparation_status(
         &chromosomes,
     );
     if status.state == "idle"
-        && let Some(position) = profile_queue_position(resource_id)
+        && let Some(position) = install_queue::position(resource_id, preparation::running_count())
     {
         return preparation::LivePreparationState {
             resource_id: Some(resource_id.into()),
@@ -2541,68 +2542,14 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-static PROFILE_PREPARATION_ACTIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static PREPARATION_CONCURRENCY: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(1);
-static PROFILE_PREPARATION_QUEUE: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> =
-    std::sync::OnceLock::new();
-static PROFILE_PREPARATION_PAUSE_HOLD: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::OnceLock::new();
-
-fn profile_queue() -> &'static std::sync::Mutex<Vec<String>> {
-    PROFILE_PREPARATION_QUEUE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-
-fn preparation_pause_hold() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    PROFILE_PREPARATION_PAUSE_HOLD
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-fn hold_preparation_queue(resource_id: &str) {
-    if let Ok(mut hold) = preparation_pause_hold().lock() {
-        hold.insert(resource_id.to_owned());
-    }
-}
-
-fn release_preparation_queue(resource_id: &str) -> bool {
-    preparation_pause_hold()
-        .lock()
-        .is_ok_and(|mut hold| hold.remove(resource_id))
-}
-
-fn preparation_pause_count() -> usize {
-    preparation_pause_hold()
-        .lock()
-        .map(|hold| hold.len())
-        .unwrap_or(0)
-}
-
-fn preparation_slot_available(running: usize, paused: usize, concurrency: usize) -> bool {
-    running.saturating_add(paused) < concurrency.clamp(1, 4)
-}
-
-fn insert_preparation_queue(queue: &mut Vec<String>, resource_id: &str, resuming: bool) {
-    if resuming {
-        queue.insert(0, resource_id.to_owned());
-    } else {
-        queue.push(resource_id.to_owned());
-    }
-}
-
 fn set_preparation_concurrency(query: &str) -> Result<usize, String> {
     let Some(value) = query_parameter(query, "concurrency").transpose()? else {
-        return Ok(PREPARATION_CONCURRENCY.load(std::sync::atomic::Ordering::SeqCst));
+        return Ok(install_queue::concurrency());
     };
     let concurrency = value
         .parse::<usize>()
         .map_err(|_| "installation concurrency must be between 1 and 4".to_string())?;
-    if !(1..=4).contains(&concurrency) {
-        return Err("installation concurrency must be between 1 and 4".into());
-    }
-    PREPARATION_CONCURRENCY.store(concurrency, std::sync::atomic::Ordering::SeqCst);
-    Ok(concurrency)
+    install_queue::set_concurrency(concurrency)
 }
 
 fn set_source_input_mode(query: &str) -> Result<preparation::SourceInputMode, String> {
@@ -2623,57 +2570,27 @@ fn enqueue_preparation(resource_id: &str) -> Result<(), String> {
         return Ok(());
     }
     preparation::forget_live(resource_id);
-    let resuming = release_preparation_queue(resource_id);
-    {
-        let mut queue = profile_queue()
-            .lock()
-            .map_err(|_| "preparation queue lock failed")?;
-        let running_same = preparation::live_status(resource_id).state == "running";
-        if !running_same && !queue.iter().any(|queued| queued == resource_id) {
-            insert_preparation_queue(&mut queue, resource_id, resuming);
-        }
+    let resuming = install_queue::release_hold(resource_id);
+    if preparation::live_status(resource_id).state == "running" {
+        return Ok(());
     }
-    start_preparation_queue_worker();
+    let outcome = install_queue::enqueue(resource_id, resuming)?;
+    if outcome.start_worker {
+        start_preparation_queue_worker();
+    }
     Ok(())
 }
 
 fn start_preparation_queue_worker() {
-    if PROFILE_PREPARATION_ACTIVE
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        )
-        .is_err()
-    {
-        return;
-    }
     std::thread::spawn(|| {
         loop {
-            let concurrency = PREPARATION_CONCURRENCY
-                .load(std::sync::atomic::Ordering::SeqCst)
-                .clamp(1, 4);
-            if !preparation_slot_available(
-                preparation::running_count(),
-                preparation_pause_count(),
-                concurrency,
-            ) {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                continue;
-            }
-            let next = profile_queue()
-                .lock()
-                .ok()
-                .and_then(|mut queue| (!queue.is_empty()).then(|| queue.remove(0)));
-            let Some(resource_id) = next else {
-                PROFILE_PREPARATION_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-                // Close the small race where an item was appended after the empty
-                // check but before the active flag was released.
-                if profile_queue().lock().is_ok_and(|queue| !queue.is_empty()) {
-                    start_preparation_queue_worker();
+            let resource_id = match install_queue::next(preparation::running_count()) {
+                install_queue::NextWork::Start(resource_id) => resource_id,
+                install_queue::NextWork::Wait => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
                 }
-                return;
+                install_queue::NextWork::Idle => return,
             };
             let Ok(paths) = portable_paths() else {
                 continue;
@@ -2699,21 +2616,6 @@ fn start_preparation_queue_worker() {
             }
         }
     });
-}
-
-fn remove_profile_queue_resource(resource_id: &str) -> bool {
-    let Ok(mut queue) = profile_queue().lock() else {
-        return false;
-    };
-    let before = queue.len();
-    queue.retain(|queued| queued != resource_id);
-    queue.len() != before
-}
-
-fn profile_queue_position(resource_id: &str) -> Option<usize> {
-    let queue = profile_queue().lock().ok()?;
-    let waiting = queue.iter().position(|queued| queued == resource_id)? + 1;
-    Some(waiting + preparation::running_count())
 }
 
 fn catalog_source_type(resource_id: &str) -> Option<&'static str> {
@@ -2983,8 +2885,7 @@ fn cancel_and_delete_managed_resource(resource_id: &str) -> Result<(), String> {
     let managed_id = annocat_core::source_catalog::download_release(resource_id)
         .map(|release| release.resource_id)
         .ok_or_else(|| format!("resource '{resource_id}' is not managed yet"))?;
-    remove_profile_queue_resource(resource_id);
-    release_preparation_queue(resource_id);
+    install_queue::remove(resource_id);
     let paths = portable_paths()?;
     let active = managed_download_is_active(resource_id)
         || annotation::is_running()
@@ -4111,47 +4012,13 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn paused_preparation_holds_queue_until_that_resource_resumes() {
-        hold_preparation_queue("cadd");
-        assert_eq!(preparation_pause_count(), 1);
-        release_preparation_queue("gnomad");
-        assert_eq!(preparation_pause_count(), 1);
-        release_preparation_queue("cadd");
-        assert_eq!(preparation_pause_count(), 0);
-    }
-
-    #[test]
-    fn resumed_preparation_returns_to_the_front_of_the_queue() {
-        let mut queue = vec!["gnomad".to_owned(), "clinvar".to_owned()];
-        insert_preparation_queue(&mut queue, "cadd", true);
-        assert_eq!(queue, ["cadd", "gnomad", "clinvar"]);
-
-        insert_preparation_queue(&mut queue, "phylop", false);
-        assert_eq!(queue, ["cadd", "gnomad", "clinvar", "phylop"]);
-    }
-
-    #[test]
     fn installation_concurrency_accepts_only_supported_worker_counts() {
         assert_eq!(set_preparation_concurrency("concurrency=4").unwrap(), 4);
-        assert_eq!(
-            PREPARATION_CONCURRENCY.load(std::sync::atomic::Ordering::SeqCst),
-            4
-        );
+        assert_eq!(install_queue::concurrency(), 4);
         assert!(set_preparation_concurrency("concurrency=0").is_err());
         assert!(set_preparation_concurrency("concurrency=5").is_err());
         assert!(set_preparation_concurrency("concurrency=lots").is_err());
         set_preparation_concurrency("concurrency=1").unwrap();
-    }
-
-    #[test]
-    fn paused_sources_reserve_parallel_scheduler_slots() {
-        assert!(preparation_slot_available(0, 0, 1));
-        assert!(!preparation_slot_available(0, 1, 1));
-        assert!(preparation_slot_available(1, 0, 2));
-        assert!(!preparation_slot_available(1, 1, 2));
-        assert!(!preparation_slot_available(0, 2, 2));
-        assert!(preparation_slot_available(2, 1, 4));
-        assert!(!preparation_slot_available(3, 1, 4));
     }
 
     #[test]
