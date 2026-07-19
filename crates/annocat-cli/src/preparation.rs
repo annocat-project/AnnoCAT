@@ -50,7 +50,7 @@ pub use state::{
     LivePreparationState, cancel_live, forget_live, live_status, record_start_failure,
     running_count,
 };
-use state::{live_cancel, live_state, register_live_job, run_with_live_job};
+use state::{live_cancel, live_state, register_live_job, spawn_live_job};
 use tabix::{TabixReferenceOffset, parse_reference_offsets as parse_tabix_reference_offsets};
 
 pub const LEGACY_PREPARATION_IDENTITY_COMMIT: &str = "7038e7c17708e7d2226149e78e0bb297bcc6d1d6";
@@ -637,7 +637,7 @@ fn stream_revel_archive_to_partial_osa(
                     let mut decoder = flate2::read::DeflateDecoder::new(take);
                     let mut crc = crc32fast::Hasher::new();
                     let mut written = 0_u64;
-                    let mut buffer = [0_u8; 1024 * 1024];
+                    let mut buffer = vec![0_u8; 1024 * 1024];
                     loop {
                         if live_cancel().load(Ordering::SeqCst) {
                             return Err("cancelled".into());
@@ -907,7 +907,7 @@ fn copy_bounded_with_progress<R: Read, W: Write, F: FnMut(u64)>(
 ) -> Result<u64, String> {
     // This direct blocking copy is the backpressure boundary: when fastVEP's
     // stdin pipe is full, write_all blocks and no further HTTP bytes are read.
-    let mut buffer = [0_u8; STREAM_WRITER_BUFFER_BYTES as usize];
+    let mut buffer = vec![0_u8; STREAM_WRITER_BUFFER_BYTES as usize];
     let mut total = 0_u64;
     loop {
         if cancelled.load(Ordering::SeqCst) {
@@ -1687,8 +1687,7 @@ pub fn start_live(mut request: LivePreparationRequest) -> Result<(), String> {
         detail: "Starting direct HTTP-to-fastVEP stream".into(),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || run_with_live_job(job, || run_live(request, selection)));
-    Ok(())
+    spawn_live_job(job, move || run_live(request, selection))
 }
 
 pub struct DbnsfpLiveRequest {
@@ -1720,8 +1719,7 @@ pub fn start_dbsnp_live(request: DbsnpLiveRequest) -> Result<(), String> {
         detail: "Reading the official dbSNP tabix index".into(),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || run_with_live_job(job, || run_dbsnp_live(request, selection)));
-    Ok(())
+    spawn_live_job(job, move || run_dbsnp_live(request, selection))
 }
 
 pub fn start_dbnsfp_live(request: DbnsfpLiveRequest) -> Result<(), String> {
@@ -1750,10 +1748,7 @@ pub fn start_dbnsfp_live(request: DbnsfpLiveRequest) -> Result<(), String> {
         },
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || {
-        run_with_live_job(job, || run_dbnsfp_live(request, manifest, selection))
-    });
-    Ok(())
+    spawn_live_job(job, move || run_dbnsfp_live(request, manifest, selection))
 }
 
 pub struct ShardedLiveRequest {
@@ -1796,10 +1791,7 @@ pub fn start_revel_live(request: RevelLiveRequest) -> Result<(), String> {
         detail: "Starting official REVEL v1.3 chromosome ZIP streams".into(),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || {
-        run_with_live_job(job, || run_revel_live(request, manifest, selection))
-    });
-    Ok(())
+    spawn_live_job(job, move || run_revel_live(request, manifest, selection))
 }
 
 pub fn start_spliceai_live(request: SpliceAiLiveRequest) -> Result<(), String> {
@@ -1819,8 +1811,7 @@ pub fn start_spliceai_live(request: SpliceAiLiveRequest) -> Result<(), String> {
         detail: "Reading the public Ensembl SpliceAI tabix index".into(),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || run_with_live_job(job, || run_spliceai_live(request, selection)));
-    Ok(())
+    spawn_live_job(job, move || run_spliceai_live(request, selection))
 }
 
 pub fn start_cadd_live(request: CaddLiveRequest) -> Result<(), String> {
@@ -1840,8 +1831,7 @@ pub fn start_cadd_live(request: CaddLiveRequest) -> Result<(), String> {
         detail: "Reading the two small CADD tabix indexes".into(),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || run_with_live_job(job, || run_cadd_live(request, selection)));
-    Ok(())
+    spawn_live_job(job, move || run_cadd_live(request, selection))
 }
 
 type CaddHttpReader = CaddChromosomeReader<CountedReader<Box<dyn Read>>>;
@@ -2451,8 +2441,7 @@ pub fn start_sharded_live(mut request: ShardedLiveRequest) -> Result<(), String>
         ),
         ..LivePreparationState::default()
     })?;
-    std::thread::spawn(move || run_with_live_job(job, || run_sharded_live(request, selection)));
-    Ok(())
+    spawn_live_job(job, move || run_sharded_live(request, selection))
 }
 
 fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSelection) {
@@ -4105,6 +4094,7 @@ fn run_live(request: LivePreparationRequest, selection: SupplementaryFieldSelect
 
 #[cfg(test)]
 mod tests {
+    use super::state::run_with_live_job;
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;

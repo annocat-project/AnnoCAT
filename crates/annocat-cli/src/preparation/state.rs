@@ -147,6 +147,24 @@ pub(super) fn run_with_live_job(job: Arc<LivePreparationJob>, run: impl FnOnce()
     CURRENT_LIVE_JOB.with(|current| *current.borrow_mut() = None);
 }
 
+pub(super) fn spawn_live_job(
+    job: Arc<LivePreparationJob>,
+    run: impl FnOnce() + Send + 'static,
+) -> Result<(), String> {
+    let resource_id = job
+        .state
+        .lock()
+        .ok()
+        .and_then(|state| state.resource_id.clone())
+        .unwrap_or_else(|| "unknown".into());
+    std::thread::Builder::new()
+        .name(format!("annocat-prepare-{resource_id}"))
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || run_with_live_job(job, run))
+        .map(|_| ())
+        .map_err(|error| format!("cannot start {resource_id} preparation worker: {error}"))
+}
+
 pub fn running_count() -> usize {
     live_jobs()
         .lock()
