@@ -251,7 +251,18 @@ fn installed_resource_versions(resource_id: &str, resources: &std::path::Path) -
     versions
 }
 
-fn resource_update_status_json(resource_id: &str) -> Result<String, String> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceUpdateStatus {
+    resource_id: String,
+    policy: String,
+    current_version: String,
+    installed_versions: Vec<String>,
+    installed: bool,
+    update_available: bool,
+}
+
+fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, String> {
     let paths = portable_paths()?;
     let (current_version, policy) = if resource_id == "clinvar" {
         (resolve_clinvar_release()?.version, "rolling-snapshot")
@@ -276,15 +287,14 @@ fn resource_update_status_json(resource_id: &str) -> Result<String, String> {
         && !installed_versions
             .iter()
             .any(|version| version == &current_version);
-    serde_json::to_string(&serde_json::json!({
-        "resourceId": resource_id,
-        "policy": policy,
-        "currentVersion": current_version,
-        "installedVersions": installed_versions,
-        "installed": !installed_versions.is_empty(),
-        "updateAvailable": update_available
-    }))
-    .map_err(|error| error.to_string())
+    Ok(ResourceUpdateStatus {
+        resource_id: resource_id.to_string(),
+        policy: policy.to_string(),
+        current_version,
+        installed: !installed_versions.is_empty(),
+        installed_versions,
+        update_available,
+    })
 }
 
 mod annotation;
@@ -1128,8 +1138,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         && !resource_id.is_empty()
         && !resource_id.contains('/')
     {
-        let response = match resource_update_status_json(resource_id) {
-            Ok(body) => ("200 OK", body),
+        let response = match resource_update_status(resource_id) {
+            Ok(status) => ("200 OK", serialize_json(&status)),
             Err(error) => (
                 "409 Conflict",
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
@@ -1974,8 +1984,19 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "application/json",
             format!("{{\"cancelRequested\":{}}}", reference::cancel_background()),
         ),
-        "/api/paths" => ("200 OK", "application/json", portable_paths_json()),
-        "/api/about" => ("200 OK", "application/json", about_json()),
+        "/api/paths" => match portable_paths_status() {
+            Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
+            Err(error) => (
+                "200 OK",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
+        "/api/about" => (
+            "200 OK",
+            "application/json",
+            serialize_json(&about_status()),
+        ),
         "/api/fastvep/status" => (
             "200 OK",
             "application/json",
@@ -3113,33 +3134,56 @@ fn ensure_portable_layout() -> Result<(), String> {
     Ok(())
 }
 
-fn portable_paths_json() -> String {
-    match portable_paths() {
-        Ok(paths) => format!(
-            "{{\"mode\":\"portable\",\"home\":\"{}\",\"resourceDirectory\":\"{}\",\"resources\":\"{}\",\"downloads\":\"{}\",\"runs\":\"{}\",\"config\":\"{}\"}}",
-            json_escape(&paths.home.to_string_lossy()),
-            json_escape(&paths.resource_directory.to_string_lossy()),
-            json_escape(&paths.resources.to_string_lossy()),
-            json_escape(&paths.downloads.to_string_lossy()),
-            json_escape(&paths.runs.to_string_lossy()),
-            json_escape(&paths.config.to_string_lossy())
-        ),
-        Err(error) => format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-    }
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortablePathsStatus {
+    mode: &'static str,
+    home: std::path::PathBuf,
+    resource_directory: std::path::PathBuf,
+    resources: std::path::PathBuf,
+    downloads: std::path::PathBuf,
+    runs: std::path::PathBuf,
+    config: std::path::PathBuf,
 }
 
-fn about_json() -> String {
+fn portable_paths_status() -> Result<PortablePathsStatus, String> {
+    let paths = portable_paths()?;
+    Ok(PortablePathsStatus {
+        mode: "portable",
+        home: paths.home,
+        resource_directory: paths.resource_directory,
+        resources: paths.resources,
+        downloads: paths.downloads,
+        runs: paths.runs,
+        config: paths.config,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AboutStatus {
+    name: &'static str,
+    version: &'static str,
+    license: &'static str,
+    fastvep_repository: String,
+    fastvep_commit: String,
+    fastvep_version: String,
+}
+
+fn about_status() -> AboutStatus {
     let pin: serde_json::Value =
         serde_json::from_str(include_str!("../../../config/fastvep-pin.json")).unwrap_or_default();
-    serde_json::json!({
-        "name": "AnnoCAT",
-        "version": env!("CARGO_PKG_VERSION"),
-        "license": "Apache-2.0",
-        "fastvepRepository": pin["repository"],
-        "fastvepCommit": pin["commit"],
-        "fastvepVersion": pin["upstreamVersion"]
-    })
-    .to_string()
+    AboutStatus {
+        name: "AnnoCAT",
+        version: env!("CARGO_PKG_VERSION"),
+        license: "Apache-2.0",
+        fastvep_repository: pin["repository"].as_str().unwrap_or_default().to_string(),
+        fastvep_commit: pin["commit"].as_str().unwrap_or_default().to_string(),
+        fastvep_version: pin["upstreamVersion"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3958,7 +4002,7 @@ mod profile_status_tests {
     fn about_surface_and_metadata_use_the_project_apache_license() {
         let html = include_str!("../../../web/index.html");
         let manifest = include_str!("../../../Cargo.toml");
-        let about: serde_json::Value = serde_json::from_str(&about_json()).unwrap();
+        let about = serde_json::to_value(about_status()).unwrap();
         assert!(html.contains("id=\"about-button\""));
         assert!(html.contains("id=\"about-dialog\""));
         assert!(!html.contains("class=\"privacy\""));
