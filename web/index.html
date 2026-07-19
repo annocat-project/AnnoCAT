@@ -38,7 +38,7 @@
       <button class="nav-item" data-page="logs"><svg class="ui-icon"><use href="#icon-logs"/></svg> Tasks</button>
       <button class="nav-item" data-page="settings"><svg class="ui-icon"><use href="#icon-settings"/></svg> Settings</button>
     </nav>
-    <div class="privacy"><span></span><div><strong>Runs locally</strong><small>Your variant data stays on this computer.</small></div></div>
+    <button id="about-button" class="about-nav-button" type="button" aria-haspopup="dialog" aria-controls="about-dialog"><svg class="ui-icon"><use href="#icon-info"/></svg><span>About AnnoCAT</span></button>
   </aside>
   <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar-navigation" aria-expanded="true" aria-label="Hide navigation" title="Hide navigation"><span aria-hidden="true"></span></button>
 
@@ -96,6 +96,37 @@
   </main>
   <div id="first-run" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
     <div class="setup-modal"><div class="setup-wordmark" aria-label="AnnoCAT">Anno<span>CAT</span></div><p class="kicker">WELCOME TO ANNOCAT</p><h1 id="setup-title">What would you like to do?</h1><p>Browse existing results immediately, or set up local annotation on this computer.</p><div class="setup-actions"><button id="setup-annotation" class="setup-choice primary-choice"><svg class="ui-icon"><use href="#icon-plus"/></svg><strong>Set up local annotation</strong><small>Choose a profile and install required resources</small></button><button id="setup-open-results" class="setup-choice"><svg class="ui-icon"><use href="#icon-folder"/></svg><strong>Open existing results</strong><small>No annotation databases or downloads required</small></button></div><button id="setup-later" class="text-button">Not now — explore the app</button></div>
+  </div>
+  <div id="about-overlay" class="about-overlay hidden" role="presentation">
+    <section id="about-dialog" class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" tabindex="-1">
+      <button id="about-close" class="about-close" type="button" aria-label="Close About AnnoCAT"><svg class="ui-icon"><use href="#icon-close"/></svg></button>
+      <div class="about-scroll">
+        <div class="about-wordmark" aria-label="AnnoCAT">Anno<span>CAT</span></div>
+        <p class="kicker">ABOUT</p>
+        <h1 id="about-title">Annotation · Curation · Triage</h1>
+        <p class="about-version">Version <span id="about-version">0.1.0</span></p>
+        <p class="about-lead">AnnoCAT is a local-first application for annotating, reviewing, and sharing human variant results.</p>
+
+        <div class="about-sections">
+          <section class="about-section"><h2>Local processing</h2><p>Variant inputs and reports remain on this computer unless you explicitly export or share them. AnnoCAT uses the network to download reference and annotation sources.</p></section>
+          <section class="about-section"><h2>Intended use</h2><p>AnnoCAT supports variant annotation and professional review. It has not been independently validated or authorized to establish a clinical diagnosis. Results should be reviewed by qualified professionals and confirmed through an appropriately validated workflow before patient-care decisions are made.</p></section>
+          <section class="about-section"><h2>Data sources</h2><p>Annotation sources are provided by third parties and remain subject to their publishers’ licenses and permitted-use terms. Installing a source does not grant rights beyond those terms.</p><button id="about-data-sources" class="about-inline-button" type="button">View installed data sources</button></section>
+        </div>
+
+        <details class="about-licenses">
+          <summary><span>Licenses and acknowledgments</span><small>Expand to view</small></summary>
+          <div class="about-license-content">
+            <p><strong>AnnoCAT</strong><span>Licensed under the <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>.</span></p>
+            <p><strong>fastVEP</strong><span>Apache-2.0 software modified and maintained for AnnoCAT. <a href="https://github.com/annocat-project/fastVEP" target="_blank" rel="noopener noreferrer">View the fork</a>.</span></p>
+            <p><strong>Annotation data</strong><span>GRCh38, Ensembl, dbNSFP, ClinVar, dbSNP, gnomAD, CADD, PhyloP, SpliceAI, REVEL, and any other installed source retain their publishers’ separate terms and citation requirements.</span></p>
+          </div>
+        </details>
+
+        <div class="about-project-links" aria-label="Project links"><a href="https://github.com/annocat-project/AnnoCAT" target="_blank" rel="noopener noreferrer">GitHub</a><a href="https://github.com/annocat-project/AnnoCAT#readme" target="_blank" rel="noopener noreferrer">Documentation</a><a href="https://github.com/annocat-project/AnnoCAT/issues" target="_blank" rel="noopener noreferrer">Report an issue</a></div>
+        <div class="about-build"><span id="about-engine-version">fastVEP build information unavailable</span><button id="copy-about-version" type="button">Copy version information</button><small id="about-copy-status" aria-live="polite"></small></div>
+        <footer class="about-footer">Copyright © 2026 AnnoCAT contributors · Licensed under Apache License 2.0</footer>
+      </div>
+    </section>
   </div>
   <script src="/app.js"></script>
 </body>

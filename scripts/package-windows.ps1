@@ -52,6 +52,7 @@ Copy-Item -LiteralPath $reportWorkerExe -Destination (Join-Path $bundleRoot "ann
 Copy-Item -LiteralPath $fastVepExe -Destination (Join-Path $bundleRoot "tools\fastvep\fastvep.exe")
 Copy-Item -LiteralPath (Join-Path $projectRoot "launch-annocat.cmd") -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $bundleRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
 
 $fastVepHash = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "tools\fastvep\fastvep.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -84,6 +85,8 @@ $manifest = [ordered]@{
         "annocat.exe" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "annocat.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
         "annocat-report-worker.exe" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "annocat-report-worker.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
         "tools/fastvep/fastvep.exe" = $fastVepHash
+        "LICENSE.txt" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "LICENSE.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
+        "licenses/fastVEP-Apache-2.0.txt" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleRoot "bundle-manifest.json") -Encoding utf8

@@ -1993,6 +1993,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             format!("{{\"cancelRequested\":{}}}", reference::cancel_background()),
         ),
         "/api/paths" => ("200 OK", "application/json", portable_paths_json()),
+        "/api/about" => ("200 OK", "application/json", about_json()),
         "/api/fastvep/status" => ("200 OK", "application/json", fastvep::readiness_json()),
         "/api/setup/status" => match portable_paths() {
             Ok(paths) => {
@@ -3225,6 +3226,20 @@ fn portable_paths_json() -> String {
     }
 }
 
+fn about_json() -> String {
+    let pin: serde_json::Value =
+        serde_json::from_str(include_str!("../../../config/fastvep-pin.json")).unwrap_or_default();
+    serde_json::json!({
+        "name": "AnnoCAT",
+        "version": env!("CARGO_PKG_VERSION"),
+        "license": "Apache-2.0",
+        "fastvepRepository": pin["repository"],
+        "fastvepCommit": pin["commit"],
+        "fastvepVersion": pin["upstreamVersion"]
+    })
+    .to_string()
+}
+
 fn completed_runs_json(runs_directory: &std::path::Path) -> Result<String, String> {
     if !runs_directory.exists() {
         return Ok("{\"runs\":[]}".into());
@@ -3885,6 +3900,25 @@ mod profile_status_tests {
         assert!(app.contains("data-install-concurrency"));
         assert!(app.contains("profileReviewResources(profile,installable)"));
         assert!(!app.contains("$('#result-density')"));
+    }
+
+    #[test]
+    fn about_surface_and_metadata_use_the_project_apache_license() {
+        let html = include_str!("../../../web/index.html");
+        let manifest = include_str!("../../../Cargo.toml");
+        let about: serde_json::Value = serde_json::from_str(&about_json()).unwrap();
+        assert!(html.contains("id=\"about-button\""));
+        assert!(html.contains("id=\"about-dialog\""));
+        assert!(!html.contains("class=\"privacy\""));
+        assert!(html.contains("Licensed under Apache License 2.0"));
+        assert!(manifest.contains("license = \"Apache-2.0\""));
+        assert_eq!(about["license"], "Apache-2.0");
+        assert_eq!(about["version"], env!("CARGO_PKG_VERSION"));
+        assert!(
+            about["fastvepCommit"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
     }
 
     #[test]

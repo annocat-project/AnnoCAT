@@ -2350,6 +2350,12 @@ impl<R: Read> DbsnpReader<R> {
             if read == 0 {
                 return Ok(None);
             }
+            // Indexed BGZF ranges end on compressed block boundaries, not
+            // necessarily VCF record boundaries. The final decoded bytes may
+            // therefore be only the beginning of the next record.
+            if !line.ends_with('\n') {
+                return Ok(None);
+            }
             if line.starts_with('#') || line.trim().is_empty() {
                 continue;
             }
@@ -2382,6 +2388,9 @@ impl<R: Read> SpliceAiReader<R> {
                 .read_line(&mut line)
                 .map_err(|error| format!("cannot decode SpliceAI VCF: {error}"))?;
             if read == 0 {
+                return Ok(None);
+            }
+            if !line.ends_with('\n') {
                 return Ok(None);
             }
             if line.starts_with('#') || line.trim().is_empty() {
@@ -2454,6 +2463,9 @@ impl<R: Read> CaddChromosomeReader<R> {
                 .read_line(&mut line)
                 .map_err(|error| format!("cannot decode CADD BGZF range: {error}"))?;
             if read == 0 {
+                return Ok(None);
+            }
+            if !line.ends_with('\n') {
                 return Ok(None);
             }
             if line.starts_with('#') || line.trim().is_empty() {
@@ -6123,6 +6135,95 @@ NC_000002.12\t202\trs2\tC\tT\t.\tPASS\tRS=2\n",
             Some("1\t101\trs1\tA\tG\t.\tPASS\tRS=1\n")
         );
         assert_eq!(reader.next_record().unwrap(), None);
+    }
+
+    #[test]
+    fn indexed_bgzf_readers_ignore_only_unterminated_range_tails() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(
+                b"NC_000001.11\t101\trs1\tA\tG\t.\tPASS\tRS=1\n\
+partial dbSNP row",
+            )
+            .unwrap();
+        let mut dbsnp = DbsnpReader {
+            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
+                encoder.finish().unwrap(),
+            ))),
+            source_contig: "NC_000001.11".into(),
+            chromosome: "1".into(),
+        };
+        assert!(dbsnp.next_record().unwrap().is_some());
+        assert!(dbsnp.next_record().unwrap().is_none());
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(
+                b"1\t100\t.\tA\tG\t.\t.\tSpliceAI=G|GENE1|0.1|0.0|0.0|0.0|1|0|0|0\n\
+1\t101\t.\tA",
+            )
+            .unwrap();
+        let mut spliceai = SpliceAiReader {
+            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
+                encoder.finish().unwrap(),
+            ))),
+            chromosome: Some("1".into()),
+        };
+        assert!(spliceai.next_record().unwrap().is_some());
+        assert!(spliceai.next_record().unwrap().is_none());
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(b"1\t2\tA\tG\t0.1\t10\n1\t3\tC\tT\t0.2")
+            .unwrap();
+        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(encoder.finish().unwrap()));
+        let mut cadd = CaddChromosomeReader::new(decoder, 0, "1").unwrap();
+        assert!(cadd.next_record().unwrap().is_some());
+        assert!(cadd.next_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn indexed_bgzf_readers_still_reject_malformed_complete_rows() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"partial dbSNP row\n").unwrap();
+        let mut dbsnp = DbsnpReader {
+            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
+                encoder.finish().unwrap(),
+            ))),
+            source_contig: "NC_000001.11".into(),
+            chromosome: "1".into(),
+        };
+        assert!(
+            dbsnp
+                .next_record()
+                .unwrap_err()
+                .contains("no tab-delimited fields")
+        );
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"1\t101\t.\tA\n").unwrap();
+        let mut spliceai = SpliceAiReader {
+            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
+                encoder.finish().unwrap(),
+            ))),
+            chromosome: Some("1".into()),
+        };
+        assert!(
+            spliceai
+                .next_record()
+                .unwrap_err()
+                .contains("fewer than eight columns")
+        );
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"1\t3\tC\tT\t0.2\n").unwrap();
+        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(encoder.finish().unwrap()));
+        let mut cadd = CaddChromosomeReader::new(decoder, 0, "1").unwrap();
+        assert!(
+            cadd.next_record()
+                .unwrap_err()
+                .contains("5 columns instead of 6")
+        );
     }
 
     #[test]
