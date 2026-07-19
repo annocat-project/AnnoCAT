@@ -868,23 +868,7 @@ pub fn sources_json() -> String {
 }
 
 pub fn profiles_json() -> String {
-    let rows = ANNOTATION_PROFILES
-        .iter()
-        .map(|profile| {
-            let source_ids = profile
-                .source_ids
-                .iter()
-                .map(|source_id| format!("\"{source_id}\""))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "{{\"id\":\"{}\",\"name\":\"{}\",\"purpose\":\"{}\",\"sourceIds\":[{}],\"requiredEngineIds\":[\"fastvep\"],\"requiredResourceIds\":[\"grch38-reference\",\"transcript-cache\"]}}",
-                profile.id, profile.name, profile.purpose, source_ids
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{rows}]")
+    source_catalog::profiles_json()
 }
 
 pub fn demo_variants_json() -> String {

@@ -11,7 +11,17 @@ const CATALOG_JSON: &str = include_str!(concat!(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceCatalog {
     schema_version: u16,
+    pub profiles: Vec<Profile>,
     pub resources: Vec<Resource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub purpose: String,
+    pub source_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +74,30 @@ pub fn resource(id: &str) -> Option<&'static Resource> {
         .resources
         .iter()
         .find(|resource| resource.id == id)
+}
+
+pub fn profile(id: &str) -> Option<&'static Profile> {
+    catalog().profiles.iter().find(|profile| profile.id == id)
+}
+
+pub fn profiles_json() -> String {
+    serde_json::to_string(
+        &catalog()
+            .profiles
+            .iter()
+            .map(|profile| {
+                serde_json::json!({
+                    "id": profile.id,
+                    "name": profile.name,
+                    "purpose": profile.purpose,
+                    "sourceIds": profile.source_ids,
+                    "requiredEngineIds": ["fastvep"],
+                    "requiredResourceIds": ["grch38-reference", "transcript-cache"]
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .expect("validated source profiles must serialize")
 }
 
 pub fn adapter_contract(id: &str) -> Option<&'static str> {
@@ -199,6 +233,26 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             }
         }
     }
+    let mut profile_ids = HashSet::new();
+    for profile in &catalog.profiles {
+        if !safe_id(&profile.id)
+            || !profile_ids.insert(profile.id.as_str())
+            || profile.name.trim().is_empty()
+            || profile.purpose.trim().is_empty()
+            || profile.source_ids.is_empty()
+        {
+            return Err(format!("invalid or duplicate profile {}", profile.id));
+        }
+        let mut source_ids = HashSet::new();
+        for source_id in &profile.source_ids {
+            if !ids.contains(source_id.as_str()) || !source_ids.insert(source_id.as_str()) {
+                return Err(format!(
+                    "profile {} references an unknown or duplicate source {}",
+                    profile.id, source_id
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -280,6 +334,27 @@ mod tests {
         assert!(catalog().resources.iter().all(|resource| {
             resource.release.policy != "rolling" || resource.release.resolver.is_some()
         }));
+    }
+
+    #[test]
+    fn profiles_match_the_legacy_api_contract() {
+        assert_eq!(catalog().profiles.len(), crate::ANNOTATION_PROFILES.len());
+        for legacy in crate::ANNOTATION_PROFILES {
+            let current = profile(legacy.id).expect("catalog profile");
+            assert_eq!(current.name, legacy.name);
+            assert_eq!(current.purpose, legacy.purpose);
+            assert_eq!(
+                current
+                    .source_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                legacy.source_ids
+            );
+        }
+        let json: serde_json::Value = serde_json::from_str(&profiles_json()).unwrap();
+        assert_eq!(json[0]["id"], "wgs");
+        assert_eq!(json[1]["id"], "standard");
     }
 
     #[test]

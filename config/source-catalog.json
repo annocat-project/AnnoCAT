@@ -1,5 +1,19 @@
 {
   "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "wgs",
+      "name": "Comprehensive",
+      "purpose": "Broad clinical, population, prediction, conservation, and splicing annotation",
+      "sourceIds": ["dbnsfp", "clinvar", "dbsnp", "gnomad", "cadd", "phylop", "spliceai"]
+    },
+    {
+      "id": "standard",
+      "name": "Minimal",
+      "purpose": "A smaller clinical and population set with dbSNP, conservation, and standalone REVEL scores",
+      "sourceIds": ["clinvar", "dbsnp", "gnomad", "phylop", "revel"]
+    }
+  ],
   "resources": [
     {
       "id": "grch38-reference",

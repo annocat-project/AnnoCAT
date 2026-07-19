@@ -860,13 +860,11 @@ fn resource_command(args: &[String]) -> Result<(), String> {
                 && matches!(profile.as_str(), "comprehensive" | "practical-wgs") =>
         {
             println!("Comprehensive annotation resource plan (GRCh38)");
-            let profile = annocat_core::ANNOTATION_PROFILES
-                .iter()
-                .find(|profile| profile.id == "wgs")
+            let profile = annocat_core::source_catalog::profile("wgs")
                 .ok_or("the comprehensive profile is missing")?;
             for id in ["grch38-reference", "ensembl-gff3"]
                 .into_iter()
-                .chain(profile.source_ids.iter().copied())
+                .chain(profile.source_ids.iter().map(String::as_str))
             {
                 if let Ok(release) = resource_release(id) {
                     let size = release
@@ -1402,14 +1400,12 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 ),
             },
             "cancel" if method == "POST" => {
-                let cancelled = annocat_core::ANNOTATION_PROFILES
-                    .iter()
-                    .find(|profile| profile.id == profile_id)
+                let cancelled = annocat_core::source_catalog::profile(profile_id)
                     .map(|profile| {
                         profile
                             .source_ids
                             .iter()
-                            .filter(|id| preparation::cancel_live(id))
+                            .filter(|id| preparation::cancel_live(id.as_str()))
                             .count()
                             > 0
                     })
@@ -2357,15 +2353,13 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 fn profile_preparation_status(profile_id: &str) -> Result<String, String> {
-    let profile = annocat_core::ANNOTATION_PROFILES
-        .iter()
-        .find(|profile| profile.id == profile_id)
+    let profile = annocat_core::source_catalog::profile(profile_id)
         .ok_or_else(|| format!("unknown profile '{profile_id}'"))?;
     let resources = portable_paths()?.resources;
     let sources = profile
         .source_ids
         .iter()
-        .filter(|id| **id != "fastvep")
+        .filter(|id| id.as_str() != "fastvep")
         .map(|id| {
             let state = managed_preparation_status(id, &resources);
             let release = annocat_core::source_catalog::download_release(id);
@@ -2537,15 +2531,13 @@ fn managed_preparation_status(
 }
 
 fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
-    let profile = annocat_core::ANNOTATION_PROFILES
-        .iter()
-        .find(|profile| profile.id == profile_id)
+    let profile = annocat_core::source_catalog::profile(profile_id)
         .ok_or_else(|| format!("unknown profile '{profile_id}'"))?;
     let resources = portable_paths()?.resources;
     let actionable = profile
         .source_ids
         .iter()
-        .copied()
+        .map(String::as_str)
         .filter(|id| {
             preparation_available(id)
                 && annocat_core::source_catalog::download_release(id).is_some()
@@ -3999,22 +3991,19 @@ mod profile_status_tests {
 
     #[test]
     fn profiles_can_start_verified_sources_without_hiding_pending_sources() {
-        let profile = annocat_core::ANNOTATION_PROFILES
-            .iter()
-            .find(|profile| profile.id == "standard")
-            .unwrap();
+        let profile = annocat_core::source_catalog::profile("standard").unwrap();
         let actionable = profile
             .source_ids
             .iter()
             .filter(|id| preparation_available(id))
-            .copied()
+            .map(String::as_str)
             .collect::<Vec<_>>();
         assert_eq!(
             actionable,
             vec!["clinvar", "dbsnp", "gnomad", "phylop", "revel"]
         );
-        assert!(!profile.source_ids.contains(&"dbnsfp"));
-        assert!(profile.source_ids.contains(&"gnomad"));
+        assert!(!profile.source_ids.iter().any(|id| id == "dbnsfp"));
+        assert!(profile.source_ids.iter().any(|id| id == "gnomad"));
     }
 
     #[test]
