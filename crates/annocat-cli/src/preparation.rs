@@ -7,14 +7,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+mod checkpoint;
 mod state;
+use checkpoint::{CHECKPOINT_SCHEMA_VERSION, read_checkpoint, write_checkpoint};
+pub use checkpoint::{
+    CheckpointState, PreparationCheckpoint, PreparationIdentity, RestartDecision, ShardPaths,
+};
 pub use state::{
     LivePreparationState, cancel_live, forget_live, live_status, record_start_failure,
     running_count,
 };
 use state::{live_cancel, live_state, register_live_job, run_with_live_job};
 
-const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 pub const LEGACY_PREPARATION_IDENTITY_COMMIT: &str = "7038e7c17708e7d2226149e78e0bb297bcc6d1d6";
 pub const DBNSFP_CURATED_SCHEMA: &str = "dbnsfp-4.9a-annocat-core-v1";
 const DBNSFP_FIELD_SELECTION_SCHEMA_VERSION: u16 = 1;
@@ -106,52 +110,6 @@ pub fn preparation_disk_plan(
         required_free_bytes: remaining_prepared_bytes
             .map(|remaining| remaining.saturating_add(fixed)),
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PreparationIdentity {
-    pub resource_id: String,
-    pub release: String,
-    pub assembly: String,
-    pub chromosome: String,
-    pub source_url: String,
-    pub expected_compressed_bytes: u64,
-    pub source_etag: Option<String>,
-    pub source_last_modified: Option<String>,
-    pub selected_schema: String,
-    /// Legacy schema-v1 identity field. It is retained at its original value so
-    /// existing checkpoints and hybrid source parts remain resumable. Exact builder
-    /// provenance and compatibility live in cache-contract-v2.json.
-    pub fastvep_commit: String,
-    pub osa_schema_version: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PreparationCheckpoint {
-    pub schema_version: u16,
-    pub identity: PreparationIdentity,
-    pub state: CheckpointState,
-    pub compressed_bytes_read: u64,
-    pub parsed_records: u64,
-    pub prepared_bytes: u64,
-    pub prepared_index_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CheckpointState {
-    Preparing,
-    Verified,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestartDecision {
-    Start,
-    RestartCurrentChromosome,
-    AlreadyVerified,
-    StaleIdentity,
 }
 
 pub struct StreamingBuildRequest<'a> {
@@ -691,76 +649,6 @@ pub struct StreamingProgress {
     pub expected_compressed_bytes: u64,
     pub elapsed: Duration,
     pub bytes_per_second: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShardPaths {
-    pub partial_directory: PathBuf,
-    pub final_directory: PathBuf,
-    source_part: PathBuf,
-    source_part_identity: PathBuf,
-}
-
-impl ShardPaths {
-    pub fn new(resource_root: &Path, chromosome: &str) -> Result<Self, String> {
-        let chromosome = safe_chromosome_component(chromosome)?;
-        Ok(Self {
-            partial_directory: resource_root
-                .join("staging")
-                .join(format!("{chromosome}.partial")),
-            final_directory: resource_root.join("shards").join(&chromosome),
-            source_part: resource_root
-                .join("source-parts")
-                .join(format!("{chromosome}.part")),
-            source_part_identity: resource_root
-                .join("source-parts")
-                .join(format!("{chromosome}.identity.json")),
-        })
-    }
-
-    pub fn partial_osa(&self) -> PathBuf {
-        self.partial_directory.join("source.osa")
-    }
-    pub fn partial_index(&self) -> PathBuf {
-        self.partial_directory.join("source.osa.idx")
-    }
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn final_osa(&self) -> PathBuf {
-        self.final_directory.join("source.osa")
-    }
-    pub fn final_index(&self) -> PathBuf {
-        self.final_directory.join("source.osa.idx")
-    }
-    pub fn checkpoint(&self) -> PathBuf {
-        self.partial_directory.join("checkpoint.json")
-    }
-    pub fn verification(&self) -> PathBuf {
-        self.final_directory.join("verified.json")
-    }
-    pub fn cache_contract(&self) -> PathBuf {
-        self.final_directory.join("cache-contract-v2.json")
-    }
-    fn partial_cache_contract(&self) -> PathBuf {
-        self.partial_directory.join("cache-contract-v2.json")
-    }
-    fn source_part(&self) -> &Path {
-        &self.source_part
-    }
-    fn source_part_identity(&self) -> &Path {
-        &self.source_part_identity
-    }
-    fn source_part_variant(&self, tag: &str) -> Self {
-        let mut paths = self.clone();
-        let base = self
-            .source_part
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("source");
-        let parent = self.source_part.parent().unwrap_or(Path::new("."));
-        paths.source_part = parent.join(format!("{base}.{tag}.part"));
-        paths.source_part_identity = parent.join(format!("{base}.{tag}.identity.json"));
-        paths
-    }
 }
 
 pub fn restart_decision(paths: &ShardPaths, identity: &PreparationIdentity) -> RestartDecision {
@@ -3189,11 +3077,6 @@ fn dbnsfp_archive_shards_from_reader<R: Read + std::io::Seek>(
         .collect()
 }
 
-fn write_checkpoint(path: &Path, checkpoint: &PreparationCheckpoint) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(checkpoint).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))
-}
-
 fn cache_contract_manifest(
     identity: &PreparationIdentity,
 ) -> super::cache_contract::CacheContractManifest {
@@ -3210,16 +3093,6 @@ fn cache_contract_manifest(
         identity.osa_schema_version,
         Some(&identity.fastvep_commit),
     )
-}
-
-fn read_checkpoint(path: &Path) -> Result<PreparationCheckpoint, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let checkpoint: PreparationCheckpoint =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    if checkpoint.schema_version != CHECKPOINT_SCHEMA_VERSION {
-        return Err("unsupported preparation checkpoint schema".into());
-    }
-    Ok(checkpoint)
 }
 
 pub fn status_with_storage(
