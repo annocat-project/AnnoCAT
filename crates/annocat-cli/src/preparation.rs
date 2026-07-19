@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(test)]
 use std::io::Cursor;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -13,8 +13,10 @@ mod cache;
 mod checkpoint;
 mod fields;
 mod state;
+mod stream;
 mod tabix;
 mod transport;
+
 #[cfg(test)]
 use cache::restart_decision;
 pub use cache::{initialize_partial, promote_verified};
@@ -41,6 +43,7 @@ pub use state::{
     running_count,
 };
 use state::{live_cancel, live_state, register_live_job, run_with_live_job};
+use stream::next_complete_data_line;
 use tabix::{TabixReferenceOffset, parse_reference_offsets as parse_tabix_reference_offsets};
 
 pub const LEGACY_PREPARATION_IDENTITY_COMMIT: &str = "7038e7c17708e7d2226149e78e0bb297bcc6d1d6";
@@ -1407,47 +1410,6 @@ struct SpliceAiRecord {
     line: String,
 }
 
-struct DbsnpReader<R: Read> {
-    input: BufReader<flate2::read::MultiGzDecoder<R>>,
-    source_contig: String,
-    chromosome: String,
-}
-
-impl<R: Read> DbsnpReader<R> {
-    fn next_record(&mut self) -> Result<Option<String>, String> {
-        loop {
-            let mut line = String::new();
-            let read = self
-                .input
-                .read_line(&mut line)
-                .map_err(|error| format!("cannot decode dbSNP BGZF range: {error}"))?;
-            if read == 0 {
-                return Ok(None);
-            }
-            // Indexed BGZF ranges end on compressed block boundaries, not
-            // necessarily VCF record boundaries. The final decoded bytes may
-            // therefore be only the beginning of the next record.
-            if !line.ends_with('\n') {
-                return Ok(None);
-            }
-            if line.starts_with('#') || line.trim().is_empty() {
-                continue;
-            }
-            let trimmed = line.trim_end();
-            let (contig, remainder) = trimmed
-                .split_once('\t')
-                .ok_or("dbSNP VCF row has no tab-delimited fields")?;
-            if contig != self.source_contig {
-                continue;
-            }
-            if remainder.split('\t').count() < 7 {
-                return Err("dbSNP VCF row has fewer than eight columns".into());
-            }
-            return Ok(Some(format!("{}\t{remainder}\n", self.chromosome)));
-        }
-    }
-}
-
 struct SpliceAiReader<R: Read> {
     input: BufReader<flate2::read::MultiGzDecoder<R>>,
     chromosome: Option<String>,
@@ -1456,20 +1418,11 @@ struct SpliceAiReader<R: Read> {
 impl<R: Read> SpliceAiReader<R> {
     fn next_record(&mut self) -> Result<Option<SpliceAiRecord>, String> {
         loop {
-            let mut line = String::new();
-            let read = self
-                .input
-                .read_line(&mut line)
-                .map_err(|error| format!("cannot decode SpliceAI VCF: {error}"))?;
-            if read == 0 {
+            let Some(line) =
+                next_complete_data_line(&mut self.input, "cannot decode SpliceAI VCF")?
+            else {
                 return Ok(None);
-            }
-            if !line.ends_with('\n') {
-                return Ok(None);
-            }
-            if line.starts_with('#') || line.trim().is_empty() {
-                continue;
-            }
+            };
             let fields = line.trim_end().split('\t').collect::<Vec<_>>();
             if fields.len() < 8 {
                 return Err("SpliceAI VCF row has fewer than eight columns".into());
@@ -1508,6 +1461,35 @@ impl<R: Read> SpliceAiReader<R> {
     }
 }
 
+struct DbsnpReader<R: Read> {
+    input: BufReader<flate2::read::MultiGzDecoder<R>>,
+    source_contig: String,
+    chromosome: String,
+}
+
+impl<R: Read> DbsnpReader<R> {
+    fn next_record(&mut self) -> Result<Option<String>, String> {
+        loop {
+            let Some(line) =
+                next_complete_data_line(&mut self.input, "cannot decode dbSNP BGZF range")?
+            else {
+                return Ok(None);
+            };
+            let trimmed = line.trim_end();
+            let (contig, remainder) = trimmed
+                .split_once('\t')
+                .ok_or("dbSNP VCF row has no tab-delimited fields")?;
+            if contig != self.source_contig {
+                continue;
+            }
+            if remainder.split('\t').count() < 7 {
+                return Err("dbSNP VCF row has fewer than eight columns".into());
+            }
+            return Ok(Some(format!("{}\t{remainder}\n", self.chromosome)));
+        }
+    }
+}
+
 struct CaddChromosomeReader<R: Read> {
     input: BufReader<flate2::read::MultiGzDecoder<R>>,
     chromosome: String,
@@ -1531,20 +1513,11 @@ impl<R: Read> CaddChromosomeReader<R> {
 
     fn next_record(&mut self) -> Result<Option<CaddRecord>, String> {
         loop {
-            let mut line = String::new();
-            let read = self
-                .input
-                .read_line(&mut line)
-                .map_err(|error| format!("cannot decode CADD BGZF range: {error}"))?;
-            if read == 0 {
+            let Some(line) =
+                next_complete_data_line(&mut self.input, "cannot decode CADD BGZF range")?
+            else {
                 return Ok(None);
-            }
-            if !line.ends_with('\n') {
-                return Ok(None);
-            }
-            if line.starts_with('#') || line.trim().is_empty() {
-                continue;
-            }
+            };
             let fields = line.trim_end().split('\t').collect::<Vec<_>>();
             if fields.len() != 6 {
                 return Err(format!(
