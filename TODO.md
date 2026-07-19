@@ -523,7 +523,7 @@ rewrite it; the schema-preserving importer must be incremental from its first re
           after the machine-readable verifier reports nonzero blocks and records;
   - [x] retain already verified chromosome shards across cancellation, network failure,
         application restart, or reboot; delete/quarantine only the incomplete current shard;
-  - [x] add the optional hybrid source-part lifecycle, exact Range continuation, identity
+  - [x] add the optional resumable source-part lifecycle, exact Range continuation, identity
         validation, replay of the retained prefix into a fresh fastVEP process, and automatic
         deletion after verified promotion; keep direct pure streaming as the default;
   - [x] apply the lifecycle to generic chromosome objects, dbNSFP ZIP members, REVEL ZIPs,

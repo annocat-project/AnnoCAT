@@ -131,7 +131,7 @@ impl Read for ReconnectingRangeReader {
                 if let Err(error) = self.open_chunk() {
                     if attempts >= HTTP_RECONNECT_ATTEMPTS {
                         return Err(std::io::Error::other(format!(
-                            "hybrid range reconnect failed at source byte {}: {error}",
+                            "resumable range reconnect failed at source byte {}: {error}",
                             self.current
                         )));
                     }

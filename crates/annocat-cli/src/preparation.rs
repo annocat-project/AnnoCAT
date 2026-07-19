@@ -14,6 +14,7 @@ mod catalog;
 mod checkpoint;
 mod fields;
 mod indexed;
+mod resumable;
 mod state;
 mod tabix;
 mod transport;
@@ -72,28 +73,28 @@ fn format_decimal_bytes(bytes: u64) -> String {
     }
 }
 
-static HYBRID_SOURCE_PARTS: AtomicBool = AtomicBool::new(false);
+static RESUMABLE_SOURCE_PARTS: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceInputMode {
-    HybridResumable,
+    Resumable,
     PureStreaming,
 }
 
 pub fn set_source_input_mode(value: &str) -> Result<SourceInputMode, String> {
     let mode = match value {
-        "hybrid-resumable" => SourceInputMode::HybridResumable,
+        "resumable" | "hybrid-resumable" => SourceInputMode::Resumable,
         "pure-streaming" | "" => SourceInputMode::PureStreaming,
-        _ => return Err("source input mode must be hybrid-resumable or pure-streaming".into()),
+        _ => return Err("source input mode must be resumable or pure-streaming".into()),
     };
-    HYBRID_SOURCE_PARTS.store(mode == SourceInputMode::HybridResumable, Ordering::SeqCst);
+    RESUMABLE_SOURCE_PARTS.store(mode == SourceInputMode::Resumable, Ordering::SeqCst);
     Ok(mode)
 }
 
 pub fn source_input_mode() -> SourceInputMode {
-    if HYBRID_SOURCE_PARTS.load(Ordering::SeqCst) {
-        SourceInputMode::HybridResumable
+    if RESUMABLE_SOURCE_PARTS.load(Ordering::SeqCst) {
+        SourceInputMode::Resumable
     } else {
         SourceInputMode::PureStreaming
     }
@@ -186,135 +187,8 @@ pub struct StreamingProgress {
     pub bytes_per_second: f64,
 }
 
-struct AppendTeeReader<R, W> {
-    input: R,
-    output: W,
-}
-
-impl<R: Read, W: Write> Read for AppendTeeReader<R, W> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.input.read(buffer)?;
-        if read == 0 {
-            self.output.flush()?;
-        } else {
-            // Persist each chunk before exposing it to fastVEP. A crash can
-            // therefore never leave the cache ahead of its resumable prefix.
-            self.output.write_all(&buffer[..read])?;
-        }
-        Ok(read)
-    }
-}
-
-fn prepare_source_part(paths: &ShardPaths, identity: &PreparationIdentity) -> Result<u64, String> {
-    let identity_bytes = serde_json::to_vec_pretty(identity)
-        .map_err(|error| format!("cannot encode source-part identity: {error}"))?;
-    let matches =
-        fs::read(paths.source_part_identity()).is_ok_and(|existing| existing == identity_bytes);
-    let length = fs::metadata(paths.source_part())
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
-    if !matches || length > identity.expected_compressed_bytes {
-        let _ = fs::remove_file(paths.source_part());
-        let _ = fs::remove_file(paths.source_part_identity());
-    }
-    fs::create_dir_all(
-        paths
-            .source_part()
-            .parent()
-            .ok_or("source part has no parent directory")?,
-    )
-    .map_err(|error| format!("cannot create source-part directory: {error}"))?;
-    if !paths.source_part_identity().is_file() {
-        let temporary = paths.source_part_identity().with_extension("json.tmp");
-        fs::write(&temporary, &identity_bytes)
-            .map_err(|error| format!("cannot write source-part identity: {error}"))?;
-        fs::rename(&temporary, paths.source_part_identity())
-            .map_err(|error| format!("cannot publish source-part identity: {error}"))?;
-    }
-    Ok(fs::metadata(paths.source_part())
-        .map(|metadata| metadata.len())
-        .unwrap_or(0))
-}
-
-fn hybrid_http_reader(
-    request: &StreamingBuildRequest<'_>,
-) -> Result<(Box<dyn Read>, Arc<std::sync::atomic::AtomicU64>, u64), String> {
-    hybrid_range_reader(
-        request,
-        &request.identity.source_url,
-        0,
-        request.identity.expected_compressed_bytes,
-        request.identity.source_etag.as_deref(),
-        request.identity.source_last_modified.as_deref(),
-    )
-}
-
-fn hybrid_range_reader(
-    request: &StreamingBuildRequest<'_>,
-    source_url: &str,
-    range_start: u64,
-    object_bytes: u64,
-    expected_etag: Option<&str>,
-    expected_last_modified: Option<&str>,
-) -> Result<(Box<dyn Read>, Arc<std::sync::atomic::AtomicU64>, u64), String> {
-    let resumed = prepare_source_part(request.paths, request.identity)?;
-    let prefix = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(request.paths.source_part())
-        .map_err(|error| format!("cannot open resumable source prefix: {error}"))?;
-    if resumed == request.identity.expected_compressed_bytes {
-        return Ok((
-            Box::new(prefix.take(resumed)),
-            Arc::new(AtomicU64::new(0)),
-            resumed,
-        ));
-    }
-
-    let absolute_start = range_start
-        .checked_add(resumed)
-        .ok_or("resumable range start overflow")?;
-    let absolute_end = range_start
-        .checked_add(request.identity.expected_compressed_bytes)
-        .and_then(|exclusive| exclusive.checked_sub(1))
-        .ok_or("resumable range end overflow")?;
-    if absolute_end >= object_bytes {
-        return Err("resumable source range exceeds its source object".into());
-    }
-    let continuation_source = transport::ReconnectingRangeReader::new(
-        source_url,
-        &request.identity.resource_id,
-        &request.identity.chromosome,
-        absolute_start,
-        absolute_end,
-        object_bytes,
-        expected_etag,
-        expected_last_modified,
-    )?;
-    let append = fs::OpenOptions::new()
-        .append(true)
-        .open(request.paths.source_part())
-        .map_err(|error| format!("cannot append resumable source part: {error}"))?;
-    let network = Arc::new(AtomicU64::new(0));
-    let continuation = AppendTeeReader {
-        input: CountedReader {
-            inner: continuation_source,
-            count: network.clone(),
-        },
-        output: append,
-    };
-    Ok((
-        Box::new(prefix.take(resumed).chain(continuation)),
-        network,
-        resumed,
-    ))
-}
-
-/// Feed one remote chromosome into fastVEP. Hybrid mode persists every byte
-/// before forwarding it so the network prefix can resume; pure mode forwards
-/// directly. Validation and promotion remain separate operations.
+/// Feed one remote chromosome into fastVEP. Resumable mode completes a durable
+/// source part first; pure mode forwards the response directly.
 pub fn stream_http_to_partial_osa_with_progress<F>(
     request: &StreamingBuildRequest<'_>,
     cancelled: &AtomicBool,
@@ -323,7 +197,7 @@ pub fn stream_http_to_partial_osa_with_progress<F>(
 where
     F: FnMut(StreamingProgress),
 {
-    if source_input_mode() == SourceInputMode::HybridResumable {
+    if source_input_mode() == SourceInputMode::Resumable {
         return stream_http_via_resumable_part(request, cancelled, progress);
     }
     if !request.paths.partial_directory.is_dir() {
@@ -396,22 +270,39 @@ where
     if !request.paths.partial_directory.is_dir() {
         return Err("partial shard directory has not been initialized".into());
     }
-    let (reader, network, resumed) = hybrid_http_reader(request)?;
-    let started = Instant::now();
+    let part = resumable::acquire_range(
+        request.paths,
+        request.identity,
+        &request.identity.source_url,
+        0,
+        request.identity.expected_compressed_bytes,
+        request.identity.source_etag.as_deref(),
+        request.identity.source_last_modified.as_deref(),
+        cancelled,
+        |state| {
+            progress(StreamingProgress {
+                compressed_bytes_read: state.persisted_bytes,
+                consumed_bytes: 0,
+                retained_bytes: state.resumed_bytes,
+                expected_compressed_bytes: state.expected_bytes,
+                elapsed: state.elapsed,
+                bytes_per_second: state.bytes_per_second,
+            })
+        },
+    )?;
+    let resumed = part.resumed_bytes;
+    let downloaded = part.downloaded_bytes;
+    let mut reader = part.reader;
+    let build_started = Instant::now();
     let report = |progress: &mut F, consumed: u64| {
-        let downloaded = resumed.saturating_add(network.load(Ordering::Relaxed));
-        let elapsed = started.elapsed();
+        let elapsed = build_started.elapsed();
         progress(StreamingProgress {
-            compressed_bytes_read: downloaded,
+            compressed_bytes_read: request.identity.expected_compressed_bytes,
             consumed_bytes: consumed,
-            retained_bytes: resumed,
+            retained_bytes: request.identity.expected_compressed_bytes,
             expected_compressed_bytes: request.identity.expected_compressed_bytes,
             elapsed,
-            bytes_per_second: if elapsed.is_zero() {
-                0.0
-            } else {
-                network.load(Ordering::Relaxed) as f64 / elapsed.as_secs_f64()
-            },
+            bytes_per_second: 0.0,
         });
     };
     let result = if let Some(expected_md5) = identity_md5(request.identity) {
@@ -435,7 +326,6 @@ where
         }
         result
     } else {
-        let mut reader = reader;
         stream_reader_to_partial_osa_with_progress(request, &mut reader, cancelled, |state| {
             report(&mut progress, state.consumed_bytes)
         })?
@@ -451,7 +341,10 @@ where
         ));
     }
     report(&mut progress, request.identity.expected_compressed_bytes);
-    Ok(result)
+    Ok(StreamingBuildResult {
+        compressed_bytes_read: resumed.saturating_add(downloaded),
+        ..result
+    })
 }
 
 /// Feed a bounded local source stream into fastVEP. This is shared by HTTP
@@ -603,38 +496,65 @@ fn stream_revel_archive_to_partial_osa(
         "https://zenodo.org/api/records/7072866/files/{}/content",
         archive.filename
     );
-    let (source, hybrid_network, resumed): (Box<dyn Read>, Option<Arc<AtomicU64>>, u64) =
-        if source_input_mode() == SourceInputMode::HybridResumable {
-            let (reader, network, resumed) =
-                hybrid_range_reader(request, &url, 0, archive.bytes, None, None)?;
-            (reader, Some(network), resumed)
-        } else {
-            let response = reqwest::blocking::Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::limited(10))
-                .build()
-                .map_err(|error| format!("cannot create REVEL client: {error}"))?
-                .get(&url)
-                .header(
-                    reqwest::header::USER_AGENT,
-                    "AnnoCat/0.1 (local variant annotation)",
+    let resumable = source_input_mode() == SourceInputMode::Resumable;
+    let source: Box<dyn Read> = if resumable {
+        let part = resumable::acquire_range(
+            request.paths,
+            request.identity,
+            &url,
+            0,
+            archive.bytes,
+            None,
+            None,
+            live_cancel().as_ref(),
+            |state| {
+                update_revel_progress(
+                    &archive.chromosome,
+                    completed,
+                    base_network.saturating_add(state.persisted_bytes),
+                    total_network,
+                    prepared_bytes,
+                    state.bytes_per_second,
+                );
+                update_resumable_download_detail(
+                    "REVEL",
+                    &archive.chromosome,
+                    state.persisted_bytes,
+                    state.expected_bytes,
+                );
+            },
+        )?;
+        Box::new(part.reader)
+    } else {
+        let response = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .map_err(|error| format!("cannot create REVEL client: {error}"))?
+            .get(&url)
+            .header(
+                reqwest::header::USER_AGENT,
+                "AnnoCat/0.1 (local variant annotation)",
+            )
+            .send()
+            .map_err(|error| {
+                format!(
+                    "REVEL chromosome {} request failed: {error}",
+                    archive.chromosome
                 )
-                .send()
-                .map_err(|error| {
-                    format!(
-                        "REVEL chromosome {} request failed: {error}",
-                        archive.chromosome
-                    )
-                })?;
-            if !response.status().is_success() || response.content_length() != Some(archive.bytes) {
-                return Err(format!(
-                    "REVEL chromosome {} returned HTTP {} or an unexpected length",
-                    archive.chromosome,
-                    response.status()
-                ));
-            }
-            (Box::new(response), None, 0)
-        };
+            })?;
+        if !response.status().is_success() || response.content_length() != Some(archive.bytes) {
+            return Err(format!(
+                "REVEL chromosome {} returned HTTP {} or an unexpected length",
+                archive.chromosome,
+                response.status()
+            ));
+        }
+        Box::new(response)
+    };
+    if resumable {
+        update_local_build_detail("REVEL", &archive.chromosome);
+    }
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create REVEL preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
@@ -735,25 +655,19 @@ fn stream_revel_archive_to_partial_osa(
                             .map_err(|error| format!("cannot stream REVEL to fastVEP: {error}"))?;
                         let elapsed = started.elapsed().as_secs_f64();
                         let consumed = count.load(Ordering::Relaxed);
-                        let downloaded = hybrid_network
-                            .as_ref()
-                            .map(|network| network.load(Ordering::Relaxed))
-                            .unwrap_or(consumed);
+                        let downloaded = if resumable { archive.bytes } else { consumed };
                         update_revel_progress(
                             &archive.chromosome,
                             completed,
-                            base_network
-                                .saturating_add(resumed)
-                                .saturating_add(downloaded),
+                            base_network.saturating_add(downloaded),
                             total_network,
                             prepared_bytes,
-                            if elapsed == 0.0 {
+                            if resumable || elapsed == 0.0 {
                                 0.0
                             } else {
                                 downloaded as f64 / elapsed
                             },
                         );
-                        update_replay_detail("REVEL", &archive.chromosome, consumed, resumed);
                     }
                     let mut remaining = decoder.into_inner();
                     if remaining.limit() != 0 {
@@ -843,16 +757,28 @@ where
     if member.compression_method != 0 || member.compressed_bytes != member.source_bytes {
         return Err("pinned dbNSFP member is not a directly streamable stored entry".into());
     }
-    if source_input_mode() == SourceInputMode::HybridResumable {
-        let (reader, network, resumed) = hybrid_range_reader(
-            request,
+    if source_input_mode() == SourceInputMode::Resumable {
+        let part = resumable::acquire_range(
+            request.paths,
+            request.identity,
             archive_url,
             member.data_offset,
             archive_bytes,
             None,
             None,
+            cancelled,
+            |state| {
+                progress(StreamingProgress {
+                    compressed_bytes_read: state.persisted_bytes,
+                    consumed_bytes: 0,
+                    retained_bytes: state.resumed_bytes,
+                    expected_compressed_bytes: state.expected_bytes,
+                    elapsed: state.elapsed,
+                    bytes_per_second: state.bytes_per_second,
+                })
+            },
         )?;
-        let started = Instant::now();
+        let reader = part.reader;
         let mut checked = Crc32Reader {
             inner: reader,
             hasher: crc32fast::Hasher::new(),
@@ -862,19 +788,13 @@ where
             &mut checked,
             cancelled,
             |state| {
-                let downloaded = resumed.saturating_add(network.load(Ordering::Relaxed));
-                let elapsed = started.elapsed();
                 progress(StreamingProgress {
-                    compressed_bytes_read: downloaded,
+                    compressed_bytes_read: member.compressed_bytes,
                     consumed_bytes: state.consumed_bytes,
-                    retained_bytes: resumed,
+                    retained_bytes: member.compressed_bytes,
                     expected_compressed_bytes: member.compressed_bytes,
-                    elapsed,
-                    bytes_per_second: if elapsed.is_zero() {
-                        0.0
-                    } else {
-                        network.load(Ordering::Relaxed) as f64 / elapsed.as_secs_f64()
-                    },
+                    elapsed: state.elapsed,
+                    bytes_per_second: 0.0,
                 });
             },
         )?;
@@ -1926,83 +1846,81 @@ pub fn start_cadd_live(request: CaddLiveRequest) -> Result<(), String> {
 
 type CaddHttpReader = CaddChromosomeReader<CountedReader<Box<dyn Read>>>;
 
-fn open_cadd_range(
+fn open_cadd_range<F>(
     request: &StreamingBuildRequest<'_>,
     client: &reqwest::blocking::Client,
     plan: &CaddArtifactPlan,
     range: &CaddByteRange,
     part_tag: &str,
     count: Arc<std::sync::atomic::AtomicU64>,
-) -> Result<(CaddHttpReader, Option<Arc<AtomicU64>>, u64), String> {
-    let (source, hybrid_network, resumed): (Box<dyn Read>, Option<Arc<AtomicU64>>, u64) =
-        if source_input_mode() == SourceInputMode::HybridResumable {
-            let paths = request.paths.source_part_variant(part_tag);
-            let mut identity = request.identity.clone();
-            identity.source_url = format!("{}#{part_tag}", plan.artifact.data_url);
-            identity.expected_compressed_bytes = range.len();
-            identity.source_etag = Some(plan.artifact.data_etag.into());
-            identity.source_last_modified = Some(plan.artifact.data_last_modified.into());
-            let range_request = StreamingBuildRequest {
-                fastvep_executable: request.fastvep_executable,
-                source_type: request.source_type,
-                paths: &paths,
-                identity: &identity,
-                log_path: request.log_path,
-                dbnsfp_fields: request.dbnsfp_fields,
-                source_fields: request.source_fields,
-            };
-            let (reader, network, resumed) = hybrid_range_reader(
-                &range_request,
-                plan.artifact.data_url,
-                range.start,
-                plan.artifact.data_bytes,
-                Some(plan.artifact.data_etag),
-                Some(plan.artifact.data_last_modified),
-            )?;
-            (reader, Some(network), resumed)
-        } else {
-            let response = client
-                .get(plan.artifact.data_url)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={}-{}", range.start, range.end),
-                )
-                .send()
-                .map_err(|error| {
-                    format!(
-                        "CADD {} chromosome {} range request failed: {error}",
-                        plan.artifact.id, range.chromosome
-                    )
-                })?;
-            let expected_range = format!(
-                "bytes {}-{}/{}",
-                range.start, range.end, plan.artifact.data_bytes
-            );
-            let actual_range = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok());
-            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-                || response.content_length() != Some(range.len())
-                || actual_range != Some(expected_range.as_str())
-                || response
-                    .headers()
-                    .get(reqwest::header::ETAG)
-                    .and_then(|v| v.to_str().ok())
-                    != Some(plan.artifact.data_etag)
-                || response
-                    .headers()
-                    .get(reqwest::header::LAST_MODIFIED)
-                    .and_then(|v| v.to_str().ok())
-                    != Some(plan.artifact.data_last_modified)
-            {
-                return Err(format!(
-                    "CADD {} chromosome {} no longer matches its pinned byte range",
+    cancelled: &AtomicBool,
+    progress: F,
+) -> Result<CaddHttpReader, String>
+where
+    F: FnMut(resumable::PartProgress),
+{
+    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
+        let paths = request.paths.source_part_variant(part_tag);
+        let mut identity = request.identity.clone();
+        identity.source_url = format!("{}#{part_tag}", plan.artifact.data_url);
+        identity.expected_compressed_bytes = range.len();
+        identity.source_etag = Some(plan.artifact.data_etag.into());
+        identity.source_last_modified = Some(plan.artifact.data_last_modified.into());
+        let part = resumable::acquire_range(
+            &paths,
+            &identity,
+            plan.artifact.data_url,
+            range.start,
+            plan.artifact.data_bytes,
+            Some(plan.artifact.data_etag),
+            Some(plan.artifact.data_last_modified),
+            cancelled,
+            progress,
+        )?;
+        Box::new(part.reader)
+    } else {
+        let response = client
+            .get(plan.artifact.data_url)
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{}", range.start, range.end),
+            )
+            .send()
+            .map_err(|error| {
+                format!(
+                    "CADD {} chromosome {} range request failed: {error}",
                     plan.artifact.id, range.chromosome
-                ));
-            }
-            (Box::new(response), None, 0)
-        };
+                )
+            })?;
+        let expected_range = format!(
+            "bytes {}-{}/{}",
+            range.start, range.end, plan.artifact.data_bytes
+        );
+        let actual_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || response.content_length() != Some(range.len())
+            || actual_range != Some(expected_range.as_str())
+            || response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                != Some(plan.artifact.data_etag)
+            || response
+                .headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                != Some(plan.artifact.data_last_modified)
+        {
+            return Err(format!(
+                "CADD {} chromosome {} no longer matches its pinned byte range",
+                plan.artifact.id, range.chromosome
+            ));
+        }
+        Box::new(response)
+    };
     let reader = CaddChromosomeReader::new(
         flate2::read::MultiGzDecoder::new(CountedReader {
             inner: source,
@@ -2011,7 +1929,7 @@ fn open_cadd_range(
         range.uncompressed_skip,
         &range.chromosome,
     )?;
-    Ok((reader, hybrid_network, resumed))
+    Ok(reader)
 }
 
 fn cadd_record_before_or_equal(left: &CaddRecord, right: &CaddRecord) -> bool {
@@ -2038,22 +1956,63 @@ fn stream_cadd_ranges_to_partial_osa(
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
     let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (mut snv, snv_network, snv_resumed) = open_cadd_range(
+    let resumable = source_input_mode() == SourceInputMode::Resumable;
+    let snv_range = &plans[0].ranges[chromosome_index];
+    let indel_range = &plans[1].ranges[chromosome_index];
+    let mut snv = open_cadd_range(
         request,
         client,
         &plans[0],
-        &plans[0].ranges[chromosome_index],
+        snv_range,
         "snv",
         count.clone(),
+        live_cancel().as_ref(),
+        |state| {
+            update_cadd_progress(
+                &request.identity.chromosome,
+                completed,
+                base_network.saturating_add(state.persisted_bytes),
+                total_network,
+                prepared_bytes,
+                state.bytes_per_second,
+            );
+            update_resumable_download_detail(
+                "CADD",
+                &request.identity.chromosome,
+                state.persisted_bytes,
+                snv_range.len().saturating_add(indel_range.len()),
+            );
+        },
     )?;
-    let (mut indel, indel_network, indel_resumed) = open_cadd_range(
+    let mut indel = open_cadd_range(
         request,
         client,
         &plans[1],
-        &plans[1].ranges[chromosome_index],
+        indel_range,
         "indel",
         count.clone(),
+        live_cancel().as_ref(),
+        |state| {
+            let persisted = snv_range.len().saturating_add(state.persisted_bytes);
+            update_cadd_progress(
+                &request.identity.chromosome,
+                completed,
+                base_network.saturating_add(persisted),
+                total_network,
+                prepared_bytes,
+                state.bytes_per_second,
+            );
+            update_resumable_download_detail(
+                "CADD",
+                &request.identity.chromosome,
+                persisted,
+                snv_range.len().saturating_add(indel_range.len()),
+            );
+        },
     )?;
+    if resumable {
+        update_local_build_detail("CADD", &request.identity.chromosome);
+    }
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create CADD preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
@@ -2106,28 +2065,23 @@ fn stream_cadd_ranges_to_partial_osa(
             let current = count.load(Ordering::Relaxed);
             if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
                 let elapsed = started.elapsed().as_secs_f64();
-                let resumed = snv_resumed.saturating_add(indel_resumed);
-                let downloaded = match (&snv_network, &indel_network) {
-                    (Some(snv), Some(indel)) => snv
-                        .load(Ordering::Relaxed)
-                        .saturating_add(indel.load(Ordering::Relaxed)),
-                    _ => current,
+                let downloaded = if resumable {
+                    request.identity.expected_compressed_bytes
+                } else {
+                    current
                 };
                 update_cadd_progress(
                     &request.identity.chromosome,
                     completed,
-                    base_network
-                        .saturating_add(resumed)
-                        .saturating_add(downloaded),
+                    base_network.saturating_add(downloaded),
                     total_network,
                     prepared_bytes,
-                    if elapsed == 0.0 {
+                    if resumable || elapsed == 0.0 {
                         0.0
                     } else {
                         downloaded as f64 / elapsed
                     },
                 );
-                update_replay_detail("CADD", &request.identity.chromosome, current, resumed);
                 last_report = current;
             }
         }
@@ -2195,67 +2149,74 @@ fn update_cadd_progress(
 
 type SpliceAiHttpReader = SpliceAiReader<CountedReader<Box<dyn Read>>>;
 
-fn open_spliceai_range(
+fn open_spliceai_range<F>(
     request: &StreamingBuildRequest<'_>,
     client: &reqwest::blocking::Client,
     plan: &SpliceAiArtifactPlan,
     range: &CaddByteRange,
     count: Arc<std::sync::atomic::AtomicU64>,
-) -> Result<(SpliceAiHttpReader, Option<Arc<AtomicU64>>, u64), String> {
-    let (source, hybrid_network, resumed): (Box<dyn Read>, Option<Arc<AtomicU64>>, u64) =
-        if source_input_mode() == SourceInputMode::HybridResumable {
-            let (reader, network, resumed) = hybrid_range_reader(
-                request,
-                plan.artifact.data_url,
-                range.start,
-                plan.artifact.data_bytes,
-                Some(plan.artifact.data_etag),
-                Some(plan.artifact.data_last_modified),
-            )?;
-            (reader, Some(network), resumed)
-        } else {
-            let response = client
-                .get(plan.artifact.data_url)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={}-{}", range.start, range.end),
-                )
-                .send()
-                .map_err(|error| {
-                    format!(
-                        "SpliceAI chromosome {} range request failed: {error}",
-                        range.chromosome
-                    )
-                })?;
-            let expected_range = format!(
-                "bytes {}-{}/{}",
-                range.start, range.end, plan.artifact.data_bytes
-            );
-            let actual_range = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok());
-            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-                || response.content_length() != Some(range.len())
-                || actual_range != Some(expected_range.as_str())
-                || response
-                    .headers()
-                    .get(reqwest::header::ETAG)
-                    .and_then(|value| value.to_str().ok())
-                    != Some(plan.artifact.data_etag)
-                || response
-                    .headers()
-                    .get(reqwest::header::LAST_MODIFIED)
-                    .and_then(|value| value.to_str().ok())
-                    != Some(plan.artifact.data_last_modified)
-            {
-                return Err(format!(
-                    "SpliceAI chromosome {} no longer matches its pinned byte range",
+    cancelled: &AtomicBool,
+    progress: F,
+) -> Result<SpliceAiHttpReader, String>
+where
+    F: FnMut(resumable::PartProgress),
+{
+    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
+        let part = resumable::acquire_range(
+            request.paths,
+            request.identity,
+            plan.artifact.data_url,
+            range.start,
+            plan.artifact.data_bytes,
+            Some(plan.artifact.data_etag),
+            Some(plan.artifact.data_last_modified),
+            cancelled,
+            progress,
+        )?;
+        Box::new(part.reader)
+    } else {
+        let response = client
+            .get(plan.artifact.data_url)
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{}", range.start, range.end),
+            )
+            .send()
+            .map_err(|error| {
+                format!(
+                    "SpliceAI chromosome {} range request failed: {error}",
                     range.chromosome
-                ));
-            }
-            (Box::new(response), None, 0)
-        };
+                )
+            })?;
+        let expected_range = format!(
+            "bytes {}-{}/{}",
+            range.start, range.end, plan.artifact.data_bytes
+        );
+        let actual_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || response.content_length() != Some(range.len())
+            || actual_range != Some(expected_range.as_str())
+            || response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|value| value.to_str().ok())
+                != Some(plan.artifact.data_etag)
+            || response
+                .headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|value| value.to_str().ok())
+                != Some(plan.artifact.data_last_modified)
+        {
+            return Err(format!(
+                "SpliceAI chromosome {} no longer matches its pinned byte range",
+                range.chromosome
+            ));
+        }
+        Box::new(response)
+    };
     let mut decoder = flate2::read::MultiGzDecoder::new(CountedReader {
         inner: source,
         count,
@@ -2267,14 +2228,10 @@ fn open_spliceai_range(
         )
         .map_err(|error| format!("cannot seek to SpliceAI tabix virtual offset: {error}"))?;
     }
-    Ok((
-        SpliceAiReader {
-            input: BufReader::new(decoder),
-            chromosome: Some(range.chromosome.clone()),
-        },
-        hybrid_network,
-        resumed,
-    ))
+    Ok(SpliceAiReader {
+        input: BufReader::new(decoder),
+        chromosome: Some(range.chromosome.clone()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2289,8 +2246,34 @@ fn stream_spliceai_range_to_partial_osa(
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
     let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let (mut reader, hybrid_network, resumed) =
-        open_spliceai_range(request, client, plan, range, count.clone())?;
+    let resumable = source_input_mode() == SourceInputMode::Resumable;
+    let mut reader = open_spliceai_range(
+        request,
+        client,
+        plan,
+        range,
+        count.clone(),
+        live_cancel().as_ref(),
+        |state| {
+            update_spliceai_progress(
+                &range.chromosome,
+                completed,
+                base_network.saturating_add(state.persisted_bytes),
+                total_network,
+                prepared_bytes,
+                state.bytes_per_second,
+            );
+            update_resumable_download_detail(
+                "SpliceAI",
+                &range.chromosome,
+                state.persisted_bytes,
+                state.expected_bytes,
+            );
+        },
+    )?;
+    if resumable {
+        update_local_build_detail("SpliceAI", &range.chromosome);
+    }
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create SpliceAI preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
@@ -2327,25 +2310,23 @@ fn stream_spliceai_range_to_partial_osa(
             let current = count.load(Ordering::Relaxed);
             if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
                 let elapsed = started.elapsed().as_secs_f64();
-                let downloaded = hybrid_network
-                    .as_ref()
-                    .map(|network| network.load(Ordering::Relaxed))
-                    .unwrap_or(current);
+                let downloaded = if resumable {
+                    request.identity.expected_compressed_bytes
+                } else {
+                    current
+                };
                 update_spliceai_progress(
                     &range.chromosome,
                     completed,
-                    base_network
-                        .saturating_add(resumed)
-                        .saturating_add(downloaded),
+                    base_network.saturating_add(downloaded),
                     total_network,
                     prepared_bytes,
-                    if elapsed == 0.0 {
+                    if resumable || elapsed == 0.0 {
                         0.0
                     } else {
                         downloaded as f64 / elapsed
                     },
                 );
-                update_replay_detail("SpliceAI", &range.chromosome, current, resumed);
                 last_report = current;
             }
         }
@@ -2568,11 +2549,10 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                         prepared_bytes,
                         progress.bytes_per_second,
                     );
-                    update_replay_detail(
+                    update_resumable_progress_detail(
                         &request.source.resource_id,
                         &shard.chromosome,
-                        progress.consumed_bytes,
-                        progress.retained_bytes,
+                        progress,
                     )
                 },
             )?;
@@ -2639,73 +2619,71 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
 
 type DbsnpHttpReader = DbsnpReader<CountedReader<Box<dyn Read>>>;
 
-fn open_dbsnp_range(
+fn open_dbsnp_range<F>(
     request: &StreamingBuildRequest<'_>,
     client: &reqwest::blocking::Client,
     plan: &DbsnpArtifactPlan,
     range: &CaddByteRange,
     source_contig: &str,
     count: Arc<AtomicU64>,
-) -> Result<(DbsnpHttpReader, Arc<AtomicU64>, u64), String> {
-    let (source, network, resumed): (Box<dyn Read>, Arc<AtomicU64>, u64) =
-        if source_input_mode() == SourceInputMode::HybridResumable {
-            let (reader, network, resumed) = hybrid_range_reader(
-                request,
-                &plan.artifact.data_url,
-                range.start,
-                plan.artifact.data_bytes,
-                None,
-                plan.artifact.data_last_modified.as_deref(),
-            )?;
-            if resumed > 0 {
-                if let Ok(mut state) = live_state().lock() {
-                    state.detail = format!(
-                        "dbSNP chromosome {}: replaying {} retained hybrid part",
-                        range.chromosome,
-                        format_decimal_bytes(resumed)
-                    );
-                }
-            }
-            (reader, network, resumed)
-        } else {
-            let response = client
-                .get(&plan.artifact.data_url)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={}-{}", range.start, range.end),
-                )
-                .send()
-                .map_err(|error| {
-                    format!(
-                        "dbSNP chromosome {} range request failed: {error}",
-                        range.chromosome
-                    )
-                })?;
-            let expected_range = format!(
-                "bytes {}-{}/{}",
-                range.start, range.end, plan.artifact.data_bytes
-            );
-            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-                || response.content_length() != Some(range.len())
-                || response
-                    .headers()
-                    .get(reqwest::header::CONTENT_RANGE)
-                    .and_then(|value| value.to_str().ok())
-                    != Some(expected_range.as_str())
-            {
-                return Err(format!(
-                    "dbSNP chromosome {} returned incompatible range metadata",
+    cancelled: &AtomicBool,
+    progress: F,
+) -> Result<DbsnpHttpReader, String>
+where
+    F: FnMut(resumable::PartProgress),
+{
+    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
+        let part = resumable::acquire_range(
+            request.paths,
+            request.identity,
+            &plan.artifact.data_url,
+            range.start,
+            plan.artifact.data_bytes,
+            None,
+            plan.artifact.data_last_modified.as_deref(),
+            cancelled,
+            progress,
+        )?;
+        Box::new(part.reader)
+    } else {
+        let response = client
+            .get(&plan.artifact.data_url)
+            .header(
+                reqwest::header::RANGE,
+                format!("bytes={}-{}", range.start, range.end),
+            )
+            .send()
+            .map_err(|error| {
+                format!(
+                    "dbSNP chromosome {} range request failed: {error}",
                     range.chromosome
-                ));
-            }
-            validate_optional_header(
-                response.headers(),
-                reqwest::header::LAST_MODIFIED,
-                plan.artifact.data_last_modified.as_deref(),
-                "Last-Modified",
-            )?;
-            (Box::new(response), count.clone(), 0)
-        };
+                )
+            })?;
+        let expected_range = format!(
+            "bytes {}-{}/{}",
+            range.start, range.end, plan.artifact.data_bytes
+        );
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || response.content_length() != Some(range.len())
+            || response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                != Some(expected_range.as_str())
+        {
+            return Err(format!(
+                "dbSNP chromosome {} returned incompatible range metadata",
+                range.chromosome
+            ));
+        }
+        validate_optional_header(
+            response.headers(),
+            reqwest::header::LAST_MODIFIED,
+            plan.artifact.data_last_modified.as_deref(),
+            "Last-Modified",
+        )?;
+        Box::new(response)
+    };
     let mut decoder = flate2::read::MultiGzDecoder::new(CountedReader {
         inner: source,
         count,
@@ -2717,15 +2695,11 @@ fn open_dbsnp_range(
         )
         .map_err(|error| format!("cannot seek to dbSNP tabix virtual offset: {error}"))?;
     }
-    Ok((
-        DbsnpReader {
-            input: BufReader::new(decoder),
-            source_contig: source_contig.into(),
-            chromosome: range.chromosome.clone(),
-        },
-        network,
-        resumed,
-    ))
+    Ok(DbsnpReader {
+        input: BufReader::new(decoder),
+        source_contig: source_contig.into(),
+        chromosome: range.chromosome.clone(),
+    })
 }
 
 fn stream_dbsnp_range_to_partial_osa(
@@ -2740,8 +2714,37 @@ fn stream_dbsnp_range_to_partial_osa(
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
     let count = Arc::new(AtomicU64::new(0));
-    let (mut reader, network, resumed) =
-        open_dbsnp_range(request, client, plan, range, source_contig, count.clone())?;
+    let resumable = source_input_mode() == SourceInputMode::Resumable;
+    let mut reader = open_dbsnp_range(
+        request,
+        client,
+        plan,
+        range,
+        source_contig,
+        count.clone(),
+        live_cancel().as_ref(),
+        |state| {
+            update_indexed_progress(
+                "dbSNP",
+                &range.chromosome,
+                completed,
+                DBSNP_PRIMARY_CONTIGS.len() as u16,
+                base_network.saturating_add(state.persisted_bytes),
+                total_network,
+                prepared_bytes,
+                state.bytes_per_second,
+            );
+            update_resumable_download_detail(
+                "dbSNP",
+                &range.chromosome,
+                state.persisted_bytes,
+                state.expected_bytes,
+            );
+        },
+    )?;
+    if resumable {
+        update_local_build_detail("dbSNP", &range.chromosome);
+    }
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create dbSNP preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
@@ -2787,24 +2790,21 @@ fn stream_dbsnp_range_to_partial_osa(
             let current = count.load(Ordering::Relaxed);
             if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
                 let elapsed = started.elapsed().as_secs_f64();
-                let downloaded = network.load(Ordering::Relaxed);
+                let downloaded = if resumable { range.len() } else { current };
                 update_indexed_progress(
                     "dbSNP",
                     &range.chromosome,
                     completed,
                     DBSNP_PRIMARY_CONTIGS.len() as u16,
-                    base_network
-                        .saturating_add(resumed)
-                        .saturating_add(downloaded),
+                    base_network.saturating_add(downloaded),
                     total_network,
                     prepared_bytes,
-                    if elapsed == 0.0 {
+                    if resumable || elapsed == 0.0 {
                         0.0
                     } else {
                         downloaded as f64 / elapsed
                     },
                 );
-                update_replay_detail("dbSNP", &range.chromosome, current, resumed);
                 last_report = current;
             }
         }
@@ -2843,16 +2843,41 @@ fn stream_dbsnp_range_to_partial_osa(
     })
 }
 
-fn update_replay_detail(label: &str, chromosome: &str, consumed: u64, resumed: u64) {
-    if consumed >= resumed || resumed == 0 {
+fn update_resumable_progress_detail(label: &str, chromosome: &str, progress: StreamingProgress) {
+    if source_input_mode() != SourceInputMode::Resumable {
         return;
     }
-    if let Ok(mut state) = live_state().lock() {
-        state.detail = format!(
-            "{label} chromosome {chromosome}: replaying {} of {} retained hybrid part",
-            format_decimal_bytes(consumed),
-            format_decimal_bytes(resumed)
+    if progress.consumed_bytes == 0
+        && progress.compressed_bytes_read < progress.expected_compressed_bytes
+    {
+        update_resumable_download_detail(
+            label,
+            chromosome,
+            progress.compressed_bytes_read,
+            progress.expected_compressed_bytes,
         );
+    } else {
+        update_local_build_detail(label, chromosome);
+    }
+}
+
+fn update_resumable_download_detail(label: &str, chromosome: &str, persisted: u64, expected: u64) {
+    if let Ok(mut state) = live_state().lock() {
+        state.phase = "downloading-source-part".into();
+        state.detail = format!(
+            "{label} chromosome {chromosome}: saved {} of {} resumable source data",
+            format_decimal_bytes(persisted),
+            format_decimal_bytes(expected)
+        );
+    }
+}
+
+fn update_local_build_detail(label: &str, chromosome: &str) {
+    if let Ok(mut state) = live_state().lock() {
+        state.phase = "building-cache".into();
+        state.throughput_bytes_per_second = 0.0;
+        state.detail =
+            format!("{label} chromosome {chromosome}: building cache from completed source part");
     }
 }
 
@@ -3696,11 +3721,10 @@ fn run_dbnsfp_live(
                                     prepared_bytes,
                                     progress.bytes_per_second,
                                 );
-                                update_replay_detail(
+                                update_resumable_progress_detail(
                                     "dbNSFP",
                                     &member.chromosome,
-                                    progress.consumed_bytes,
-                                    progress.retained_bytes,
+                                    progress,
                                 )
                             },
                         )
@@ -4440,32 +4464,41 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_reader_replays_a_saved_prefix_and_appends_the_missing_range() {
+    fn resumable_part_finishes_saved_prefix_before_opening_local_reader() {
         let body: &'static [u8] = b"abcdefghij";
-        let root = root("hybrid-prefix-resume");
+        let root = root("resumable-prefix-resume");
         let paths = ShardPaths::new(&root, "1").unwrap();
         let mut expected = identity("1");
         expected.source_url = range_fixture(body, 1);
         expected.expected_compressed_bytes = body.len() as u64;
         expected.source_etag = Some("fixture".into());
-        prepare_source_part(&paths, &expected).unwrap();
+        fs::create_dir_all(paths.source_part().parent().unwrap()).unwrap();
+        fs::write(
+            paths.source_part_identity(),
+            serde_json::to_vec_pretty(&expected).unwrap(),
+        )
+        .unwrap();
         fs::write(paths.source_part(), &body[..5]).unwrap();
-
-        let request = StreamingBuildRequest {
-            fastvep_executable: Path::new("unused"),
-            source_type: "gnomad",
-            paths: &paths,
-            identity: &expected,
-            log_path: Path::new("unused"),
-            dbnsfp_fields: None,
-            source_fields: None,
-        };
-        let (mut reader, network, resumed) = hybrid_http_reader(&request).unwrap();
-        let mut replayed = Vec::new();
-        reader.read_to_end(&mut replayed).unwrap();
-        assert_eq!(resumed, 5);
-        assert_eq!(network.load(Ordering::Relaxed), 5);
-        assert_eq!(replayed, body);
+        let part = resumable::acquire_range(
+            &paths,
+            &expected,
+            &expected.source_url,
+            0,
+            body.len() as u64,
+            expected.source_etag.as_deref(),
+            None,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(part.resumed_bytes, 5);
+        assert_eq!(part.downloaded_bytes, 5);
+        let mut received = Vec::new();
+        part.reader
+            .take(body.len() as u64)
+            .read_to_end(&mut received)
+            .unwrap();
+        assert_eq!(received, body);
         assert_eq!(fs::read(paths.source_part()).unwrap(), body);
 
         initialize_partial(&paths, expected.clone()).unwrap();
@@ -4478,35 +4511,96 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_reader_reconnects_without_replaying_after_a_body_error() {
+    fn resumable_part_reconnects_before_opening_local_reader() {
         let body: &'static [u8] = b"abcdefghij";
         let (url, requests) = interrupted_range_fixture(body, 4);
-        let root = root("hybrid-inline-reconnect");
+        let root = root("resumable-inline-reconnect");
         let paths = ShardPaths::new(&root, "1").unwrap();
         let mut expected = identity("1");
         expected.source_url = url;
         expected.expected_compressed_bytes = body.len() as u64;
         expected.source_etag = Some("fixture".into());
-        let request = StreamingBuildRequest {
-            fastvep_executable: Path::new("unused"),
-            source_type: "gnomad",
-            paths: &paths,
-            identity: &expected,
-            log_path: Path::new("unused"),
-            dbnsfp_fields: None,
-            source_fields: None,
-        };
-        let (mut reader, network, resumed) = hybrid_http_reader(&request).unwrap();
+        let part = resumable::acquire_range(
+            &paths,
+            &expected,
+            &expected.source_url,
+            0,
+            body.len() as u64,
+            expected.source_etag.as_deref(),
+            None,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
         let mut received = Vec::new();
-        reader.read_to_end(&mut received).unwrap();
-        assert_eq!(resumed, 0);
-        assert_eq!(network.load(Ordering::Relaxed), body.len() as u64);
+        part.reader
+            .take(body.len() as u64)
+            .read_to_end(&mut received)
+            .unwrap();
+        assert_eq!(part.resumed_bytes, 0);
+        assert_eq!(part.downloaded_bytes, body.len() as u64);
         assert_eq!(received, body);
         assert_eq!(fs::read(paths.source_part()).unwrap(), body);
         let first = requests.recv_timeout(Duration::from_secs(1)).unwrap();
         let second = requests.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(first.to_ascii_lowercase().contains("range: bytes=0-9"));
         assert!(second.to_ascii_lowercase().contains("range: bytes=4-9"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_resumable_download_continues_without_exposing_partial_input() {
+        let body: &'static [u8] = Box::leak(vec![7_u8; 3 * 1024 * 1024].into_boxed_slice());
+        let root = root("resumable-process-restart");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let mut expected = identity("1");
+        expected.source_url = range_fixture(body, 2);
+        expected.expected_compressed_bytes = body.len() as u64;
+        expected.source_etag = Some("fixture".into());
+        let cancelled = AtomicBool::new(false);
+
+        let error = resumable::acquire_range(
+            &paths,
+            &expected,
+            &expected.source_url,
+            0,
+            body.len() as u64,
+            expected.source_etag.as_deref(),
+            None,
+            &cancelled,
+            |state| {
+                if state.persisted_bytes > 0 {
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "cancelled");
+        let retained = fs::metadata(paths.source_part()).unwrap().len();
+        assert!(retained > 0 && retained < body.len() as u64);
+
+        cancelled.store(false, Ordering::SeqCst);
+        let mut part = resumable::acquire_range(
+            &paths,
+            &expected,
+            &expected.source_url,
+            0,
+            body.len() as u64,
+            expected.source_etag.as_deref(),
+            None,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(part.resumed_bytes, retained);
+        assert_eq!(
+            part.downloaded_bytes,
+            body.len() as u64 - retained,
+            "only the missing suffix should be downloaded"
+        );
+        let mut received = Vec::new();
+        part.reader.read_to_end(&mut received).unwrap();
+        assert_eq!(received, body);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5535,7 +5629,7 @@ partial dbSNP row",
     }
 
     #[test]
-    fn hybrid_chromosome_stream_requests_an_exact_resumable_range() {
+    fn resumable_chromosome_download_requests_an_exact_range() {
         let fastvep = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")

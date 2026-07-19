@@ -454,15 +454,6 @@ fn terminal_task_activity(task: &tasks::TaskSnapshot) -> String {
         return format!("{:.1}% {rate}", task.percent);
     }
     if let Some((_, detail)) = task.detail.split_once(": ") {
-        if let Some(replay) = detail.strip_prefix("replaying ") {
-            return format!(
-                "replay {}",
-                replay
-                    .strip_suffix(" retained hybrid part")
-                    .unwrap_or(replay)
-                    .replace(" of ", "/")
-            );
-        }
         if detail.starts_with("reconnecting") || detail.starts_with("validating") {
             return detail.to_owned();
         }
@@ -3991,16 +3982,7 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn terminal_progress_compacts_replay_state_before_rendering() {
-        let state = preparation::LivePreparationState {
-            percent: 39.8,
-            detail: "gnomad chromosome 7: replaying 0.18 GB of 9.04 GB retained hybrid part".into(),
-            ..preparation::LivePreparationState::default()
-        };
-        assert_eq!(
-            terminal_task_activity(&tasks::from_preparation("dbsnp", "dbSNP", state)),
-            "replay 0.18 GB/9.04 GB"
-        );
+    fn terminal_storage_units_are_consistent() {
         assert_eq!(format_terminal_size(872_900_000), "872.9 MB");
         assert_eq!(format_terminal_size(39_000_000_000), "39.0 GB");
         assert_eq!(format_terminal_rate(12_300_000.0), "12.3 MB/s");

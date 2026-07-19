@@ -17,7 +17,7 @@ pub struct PreparationIdentity {
     pub source_last_modified: Option<String>,
     pub selected_schema: String,
     /// Legacy schema-v1 identity field. It is retained at its original value so
-    /// existing checkpoints and hybrid source parts remain resumable. Exact builder
+    /// existing checkpoints and source parts remain resumable. Exact builder
     /// provenance and compatibility live in cache-contract-v2.json.
     pub fastvep_commit: String,
     pub osa_schema_version: u16,
