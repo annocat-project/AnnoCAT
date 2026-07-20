@@ -15,6 +15,8 @@ pub struct TaskSnapshot {
     pub resource_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chromosome: Option<String>,
+    pub completed_chromosomes: u16,
+    pub total_chromosomes: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,11 +53,8 @@ pub fn from_download(
             .queue_position
             .map(|position| format!("Waiting in the download queue (position {position})"))
             .unwrap_or_else(|| "Waiting in the download queue".into()),
-        "downloaded" => "Download complete; installation is pending".into(),
-        "paused" | "cancelled" if status.downloaded_bytes > 0 => format!(
-            "{} of {} bytes retained",
-            status.downloaded_bytes, status.expected_bytes
-        ),
+        "downloaded" => "Download complete".into(),
+        "paused" | "cancelled" if status.downloaded_bytes > 0 => "Downloaded data retained".into(),
         _ => status.error.clone().unwrap_or_else(|| status.phase.clone()),
     };
     TaskSnapshot {
@@ -67,12 +66,14 @@ pub fn from_download(
         detail,
         resource_id: Some(resource_id.into()),
         chromosome: None,
+        completed_chromosomes: 0,
+        total_chromosomes: 0,
         run_id: None,
         updated_at: None,
         completed_bytes: status.downloaded_bytes,
         total_bytes: status.expected_bytes,
         percent: status.percent,
-        throughput_bytes_per_second: 0.0,
+        throughput_bytes_per_second: status.throughput_bytes_per_second,
         error: status.error,
         available_actions: resource_actions("download", &status.state),
     }
@@ -83,6 +84,9 @@ pub fn from_preparation(
     title: &str,
     status: preparation::LivePreparationState,
 ) -> TaskSnapshot {
+    let total_chromosomes = status
+        .completed_chromosomes
+        .saturating_add(status.remaining_chromosomes);
     TaskSnapshot {
         id: format!("install:{resource_id}"),
         kind: "installation",
@@ -92,6 +96,8 @@ pub fn from_preparation(
         detail: status.detail,
         resource_id: Some(resource_id.into()),
         chromosome: status.chromosome,
+        completed_chromosomes: status.completed_chromosomes,
+        total_chromosomes,
         run_id: None,
         updated_at: None,
         completed_bytes: status.network_bytes,
@@ -117,6 +123,8 @@ pub fn from_reference(
         detail: status.detail,
         resource_id: Some(resource_id.into()),
         chromosome: None,
+        completed_chromosomes: 0,
+        total_chromosomes: 0,
         run_id: None,
         updated_at: None,
         completed_bytes: status.completed_bytes,
@@ -142,6 +150,8 @@ pub fn from_transcript(
         detail: status.detail,
         resource_id: Some(resource_id.into()),
         chromosome: None,
+        completed_chromosomes: 0,
+        total_chromosomes: 0,
         run_id: None,
         updated_at: None,
         completed_bytes: 0,
@@ -168,6 +178,8 @@ pub fn from_annotation(status: annotation::State) -> TaskSnapshot {
         detail: status.detail,
         resource_id: None,
         chromosome: None,
+        completed_chromosomes: 0,
+        total_chromosomes: 0,
         run_id: status.run_id,
         updated_at: None,
         completed_bytes: status.output_bytes,
@@ -196,10 +208,12 @@ pub fn from_completed_run(
         kind: "annotation",
         title: title.into(),
         state: "completed".into(),
-        phase: "Completed".into(),
+        phase: "completed".into(),
         detail: format!("{assembly} · {variant_count} variants"),
         resource_id: None,
         chromosome: None,
+        completed_chromosomes: 0,
+        total_chromosomes: 0,
         run_id: Some(run_id.into()),
         updated_at: Some(completed_at.into()),
         completed_bytes: result_bytes,
@@ -251,6 +265,7 @@ mod tests {
                 downloaded_bytes: 20,
                 expected_bytes: 100,
                 percent: 20.0,
+                throughput_bytes_per_second: 0.0,
                 queue_position: None,
                 error: None,
             },
@@ -307,11 +322,34 @@ mod tests {
                 downloaded_bytes: 20,
                 expected_bytes: 100,
                 percent: 20.0,
+                throughput_bytes_per_second: 0.0,
                 queue_position: None,
                 error: Some("connection closed".into()),
             },
         );
         assert_eq!(task.error.as_deref(), Some("connection closed"));
         assert_eq!(task.available_actions, vec!["resume", "cancel"]);
+    }
+
+    #[test]
+    fn download_throughput_is_forwarded_without_browser_recalculation() {
+        let mut task = download("running");
+        assert_eq!(task.throughput_bytes_per_second, 0.0);
+        task = from_download(
+            "clinvar",
+            "ClinVar",
+            downloader::DownloadStatus {
+                state: "running".into(),
+                phase: "downloading".into(),
+                downloaded_bytes: 50,
+                expected_bytes: 100,
+                percent: 50.0,
+                throughput_bytes_per_second: 12.5,
+                queue_position: None,
+                error: None,
+            },
+        );
+        assert_eq!(task.throughput_bytes_per_second, 12.5);
+        assert_eq!(task.available_actions, vec!["pause", "cancel"]);
     }
 }

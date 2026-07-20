@@ -25,7 +25,7 @@ fn state() -> &'static Mutex<TranscriptStatus> {
 fn idle_state() -> TranscriptStatus {
     TranscriptStatus {
         state: "idle",
-        phase: "Waiting",
+        phase: "waiting",
         detail: "Matching Ensembl transcript cache is not installed".into(),
         error: None,
     }
@@ -113,7 +113,7 @@ pub fn status(resources: &Path) -> TranscriptStatus {
     if is_ready(resources) {
         return TranscriptStatus {
             state: "ready",
-            phase: "Ready",
+            phase: "ready",
             detail: "Ensembl 115 transcript cache ready".into(),
             error: None,
         };
@@ -125,7 +125,7 @@ pub fn status(resources: &Path) -> TranscriptStatus {
             .unwrap_or_else(|| "transcript cache validation failed".into());
         return TranscriptStatus {
             state: "failed",
-            phase: "Needs attention",
+            phase: "failed",
             detail: "The Ensembl transcript cache is incomplete or inconsistent".into(),
             error: Some(error),
         };
@@ -160,7 +160,7 @@ pub fn start_background(
         }
         *current = TranscriptStatus {
             state: "running",
-            phase: "Building",
+            phase: "building-cache",
             detail: "Building the Ensembl 115 binary transcript cache".into(),
             error: None,
         };
@@ -172,19 +172,19 @@ pub fn start_background(
             *current = match result {
                 Ok(()) => TranscriptStatus {
                     state: "ready",
-                    phase: "Ready",
+                    phase: "ready",
                     detail: "Ensembl 115 transcript cache ready".into(),
                     error: None,
                 },
                 Err(error) if error == "cancelled" => TranscriptStatus {
                     state: "cancelled",
-                    phase: "Cancelled",
+                    phase: "cancelled",
                     detail: "Transcript cache installation was cancelled".into(),
                     error: None,
                 },
                 Err(error) => TranscriptStatus {
                     state: "failed",
-                    phase: "Failed",
+                    phase: "failed",
                     detail: "Transcript cache preparation failed".into(),
                     error: Some(error),
                 },

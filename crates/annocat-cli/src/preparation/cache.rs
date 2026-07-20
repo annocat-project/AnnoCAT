@@ -224,7 +224,11 @@ pub(super) fn verify_partial_osa(
     paths: &ShardPaths,
     identity: &PreparationIdentity,
 ) -> Result<SaVerificationReport, String> {
-    verify_osa(fastvep_executable, &paths.partial_osa(), identity)
+    let result = verify_osa(fastvep_executable, &paths.partial_osa(), identity);
+    if result.is_err() {
+        super::remove_incomplete_outputs(paths);
+    }
+    result
 }
 
 fn verify_osa(

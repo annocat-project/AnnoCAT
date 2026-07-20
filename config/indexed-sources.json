@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "cadd": [
+    {
+      "id": "snv",
+      "dataUrl": "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz",
+      "dataBytes": 87473403655,
+      "dataEtag": "\"145dd23707-61014c1cb9940\"",
+      "dataLastModified": "Mon, 29 Jan 2024 12:26:37 GMT",
+      "dataMd5": "88577a55f1cd519d44e0f415ba248eb9",
+      "indexUrl": "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz.tbi",
+      "indexBytes": 2761840,
+      "indexEtag": "\"2a2470-610152972a200\"",
+      "indexLastModified": "Mon, 29 Jan 2024 12:55:36 GMT",
+      "indexMd5": "347df8fac17ea374c4598f4f44c7ce8b"
+    },
+    {
+      "id": "indel",
+      "dataUrl": "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/gnomad.genomes.r4.0.indel.tsv.gz",
+      "dataBytes": 1257151321,
+      "dataEtag": "\"4aee9b59-60eab276e4b00\"",
+      "dataLastModified": "Thu, 11 Jan 2024 13:02:04 GMT",
+      "dataMd5": "4b9c685c96d396af4d001c2f7dd9d8f9",
+      "indexUrl": "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/gnomad.genomes.r4.0.indel.tsv.gz.tbi",
+      "indexBytes": 1899705,
+      "indexEtag": "\"1cfcb9-60eab289f7800\"",
+      "indexLastModified": "Thu, 11 Jan 2024 13:02:24 GMT",
+      "indexMd5": "85f3d2daa9202c5915c0ce0f1c749a66"
+    }
+  ],
+  "spliceai": {
+    "dataUrl": "https://ftp.ensembl.org/pub/data_files/homo_sapiens/GRCh38/variation_plugins/spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.vcf.gz",
+    "dataBytes": 28643031420,
+    "dataEtag": "\"6ab41f97c-64146427056f6\"",
+    "dataLastModified": "Thu, 16 Oct 2025 13:04:38 GMT",
+    "indexUrl": "https://ftp.ensembl.org/pub/data_files/homo_sapiens/GRCh38/variation_plugins/spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.vcf.gz.tbi",
+    "indexBytes": 1266506,
+    "indexEtag": "\"13534a-64146427cfab1\"",
+    "indexLastModified": "Thu, 16 Oct 2025 13:04:39 GMT",
+    "indexMd5": "1501717babb5224fda0b63a977fe1fe6"
+  }
+}

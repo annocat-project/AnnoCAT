@@ -44,7 +44,7 @@ pub fn create_with_display_name(
     display_name: Option<&str>,
 ) -> Result<PackageSummary, String> {
     if destination.extension().and_then(|value| value.to_str()) != Some("zip") {
-        return Err("shared AnnoCat reports must use a .zip extension".into());
+        return Err("shared AnnoCAT reports must use a .zip extension".into());
     }
     if destination.exists() {
         return Err(format!(
@@ -88,7 +88,7 @@ pub fn create_with_display_name(
         "completedAt": manifest.completed_at,
         "assembly": manifest.assembly,
         "variantCount": manifest.variant_count,
-        "createdBy": {"application": "AnnoCat", "version": env!("CARGO_PKG_VERSION")},
+        "createdBy": {"application": "AnnoCAT", "version": env!("CARGO_PKG_VERSION")},
         "annotationEngine": {
             "name": "fastVEP",
             "version": manifest.fastvep_version,
@@ -172,7 +172,7 @@ fn read_run_manifest(run_directory: &Path) -> Result<RunManifest, String> {
         || manifest.canonical_schema_version != 1
         || manifest.state != "completed"
     {
-        return Err("run is not a supported completed AnnoCat result".into());
+        return Err("run is not a supported completed AnnoCAT result".into());
     }
     Ok(manifest)
 }

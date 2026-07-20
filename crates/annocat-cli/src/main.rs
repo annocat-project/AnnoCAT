@@ -1,10 +1,7 @@
-use annocat_core::{
-    demo_variants_json, practical_resource_plan_json, profiles_json,
-    resource_catalog_candidates_json, sources_json,
-};
+use annocat_core::{demo_variants_json, practical_resource_plan_json, profiles_json, sources_json};
 use serde::Serialize;
 use std::env;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 
@@ -21,10 +18,9 @@ struct ResolvedCatalogRelease {
     index_last_modified: Option<String>,
 }
 
-const ROLLING_RESOURCE_IDS: &[&str] = &["clinvar", "dbsnp"];
-
 fn is_rolling_resource(resource_id: &str) -> bool {
-    ROLLING_RESOURCE_IDS.contains(&resource_id)
+    annocat_core::source_catalog::resource(resource_id)
+        .is_some_and(|resource| resource.release.policy == "rolling")
 }
 
 fn http_content_length_header(
@@ -90,14 +86,14 @@ fn dbsnp_build(release_notes: &str) -> Option<String> {
 }
 
 fn resolve_dbsnp_release() -> Result<ResolvedCatalogRelease, String> {
-    const DIRECTORY: &str = "https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/";
-    const NOTES: &str = "https://ftp.ncbi.nlm.nih.gov/snp/latest_release/release_notes.txt";
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("AnnoCat/0.1 source resolver")
-        .build()
-        .map_err(|error| format!("cannot create dbSNP resolver: {error}"))?;
+    let directory = annocat_core::source_catalog::resolver_directory_url("dbsnp")
+        .ok_or("dbSNP resolver directory is missing from the source catalog")?;
+    let notes_url = annocat_core::source_catalog::resolver_notes_url("dbsnp")
+        .ok_or("dbSNP release-notes URL is missing from the source catalog")?;
+    let client =
+        http_client::source().map_err(|error| format!("cannot create dbSNP resolver: {error}"))?;
     let listing = client
-        .get(DIRECTORY)
+        .get(directory)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("cannot discover the current dbSNP files: {error}"))?
@@ -106,14 +102,14 @@ fn resolve_dbsnp_release() -> Result<ResolvedCatalogRelease, String> {
     let filename = latest_dbsnp_filename(&listing)
         .ok_or("the dbSNP directory did not contain a GRCh38 VCF")?;
     let notes = client
-        .get(NOTES)
+        .get(notes_url)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("cannot discover the current dbSNP build: {error}"))?
         .text()
         .map_err(|error| format!("cannot read the dbSNP release notes: {error}"))?;
     let build = dbsnp_build(&notes).ok_or("the dbSNP release notes omitted the build number")?;
-    let url = format!("{DIRECTORY}{filename}");
+    let url = format!("{directory}{filename}");
     let response = client
         .head(&url)
         .send()
@@ -176,13 +172,12 @@ fn resolve_dbsnp_release() -> Result<ResolvedCatalogRelease, String> {
 }
 
 fn resolve_clinvar_release() -> Result<ResolvedCatalogRelease, String> {
-    const DIRECTORY: &str = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/";
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("AnnoCat/0.1 source resolver")
-        .build()
+    let directory = annocat_core::source_catalog::resolver_directory_url("clinvar")
+        .ok_or("ClinVar resolver directory is missing from the source catalog")?;
+    let client = http_client::source()
         .map_err(|error| format!("cannot create ClinVar resolver: {error}"))?;
     let listing = client
-        .get(DIRECTORY)
+        .get(directory)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("cannot discover the current ClinVar release: {error}"))?
@@ -195,7 +190,7 @@ fn resolve_clinvar_release() -> Result<ResolvedCatalogRelease, String> {
         .and_then(|value| value.strip_suffix(".vcf.gz"))
         .ok_or("the discovered ClinVar filename is malformed")?
         .to_owned();
-    let url = format!("{DIRECTORY}{filename}");
+    let url = format!("{directory}{filename}");
     let response = client
         .head(&url)
         .send()
@@ -302,6 +297,7 @@ mod cache_contract;
 mod csq;
 mod downloader;
 mod fastvep;
+mod http_client;
 mod install_queue;
 mod library_metadata;
 mod preparation;
@@ -320,13 +316,10 @@ use settings::AppConfig;
 use settings::{config_file, load_config, save_config};
 
 pub(crate) fn terminal_log(component: &str, message: impl AsRef<str>) {
-    let mut width = terminal_line_width()
+    let mut rows = terminal_progress_rows()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if *width > 0 {
-        eprint!("\r{:width$}\r", "", width = *width);
-        *width = 0;
-    }
+    clear_terminal_progress(&mut rows);
     eprintln!(
         "{} [{component}] {}",
         terminal_timestamp(),
@@ -354,10 +347,10 @@ fn terminal_timestamp() -> String {
             value => value,
         };
         let period = if time.wHour < 12 { "AM" } else { "PM" };
-        return format!(
+        format!(
             "{month} {}, {} {hour}:{:02}:{:02} {period}",
             time.wDay, time.wYear, time.wMinute, time.wSecond
-        );
+        )
     }
     #[cfg(not(windows))]
     {
@@ -365,40 +358,91 @@ fn terminal_timestamp() -> String {
     }
 }
 
-static TERMINAL_LINE_WIDTH: std::sync::OnceLock<std::sync::Mutex<usize>> =
+static TERMINAL_PROGRESS_ROWS: std::sync::OnceLock<std::sync::Mutex<usize>> =
     std::sync::OnceLock::new();
 
-fn terminal_line_width() -> &'static std::sync::Mutex<usize> {
-    TERMINAL_LINE_WIDTH.get_or_init(|| std::sync::Mutex::new(0))
+fn terminal_progress_rows() -> &'static std::sync::Mutex<usize> {
+    TERMINAL_PROGRESS_ROWS.get_or_init(|| std::sync::Mutex::new(0))
 }
 
-fn terminal_progress(message: &str) {
-    let mut width = terminal_line_width()
+fn clear_terminal_progress(rows: &mut usize) {
+    if *rows == 0 {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            CONSOLE_SCREEN_BUFFER_INFO, COORD, FillConsoleOutputCharacterW,
+            GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE, SetConsoleCursorPosition,
+        };
+        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+        if !handle.is_null() && unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
+            let top = info
+                .dwCursorPosition
+                .Y
+                .saturating_sub((*rows).saturating_sub(1) as i16);
+            let width = u32::try_from(info.dwSize.X.max(1)).unwrap_or(1);
+            let mut written = 0;
+            for offset in 0..*rows {
+                unsafe {
+                    FillConsoleOutputCharacterW(
+                        handle,
+                        u16::from(b' '),
+                        width,
+                        COORD {
+                            X: 0,
+                            Y: top.saturating_add(offset as i16),
+                        },
+                        &mut written,
+                    );
+                }
+            }
+            if unsafe { SetConsoleCursorPosition(handle, COORD { X: 0, Y: top }) } != 0 {
+                *rows = 0;
+                return;
+            }
+        }
+    }
+    for row in 0..*rows {
+        eprint!("\r\x1b[2K");
+        if row + 1 < *rows {
+            eprint!("\x1b[1A");
+        }
+    }
+    *rows = 0;
+}
+
+fn terminal_progress(lines: &[String]) {
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    let mut rows = terminal_progress_rows()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if message.is_empty() {
-        if *width > 0 {
-            eprint!("\r{:width$}\r", "", width = *width);
-            let _ = io::stderr().flush();
-            *width = 0;
-        }
+    clear_terminal_progress(&mut rows);
+    if lines.is_empty() {
+        let _ = io::stderr().flush();
         return;
     }
     let available = terminal_viewport_width().saturating_sub(1).max(20);
-    let message = if message.chars().count() > available {
-        let mut compact = message
-            .chars()
-            .take(available.saturating_sub(1))
-            .collect::<String>();
-        compact.push('…');
-        compact
-    } else {
-        message.to_owned()
-    };
-    let display_width = (*width).max(message.chars().count()).min(available);
-    eprint!("\r{message:<display_width$}");
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            if line.chars().count() <= available {
+                return line.to_owned();
+            }
+            let mut compact = line
+                .chars()
+                .take(available.saturating_sub(3))
+                .collect::<String>();
+            compact.push_str("...");
+            compact
+        })
+        .collect::<Vec<_>>();
+    eprint!("{}", rendered.join("\r\n"));
     let _ = io::stderr().flush();
-    *width = display_width;
+    *rows = rendered.len();
 }
 
 fn terminal_viewport_width() -> usize {
@@ -448,48 +492,156 @@ fn format_terminal_size(bytes: u64) -> String {
     }
 }
 
-fn terminal_task_activity(task: &tasks::TaskSnapshot) -> String {
-    if let Some((_, detail)) = task.detail.split_once(": ") {
-        if detail.starts_with("reconnecting")
-            || detail.starts_with("validating")
-            || task.phase == "building-cache"
-        {
-            return detail.to_owned();
-        }
-    }
-    let rate = format_terminal_rate(task.throughput_bytes_per_second);
-    if !rate.is_empty() {
-        return format!("{:.1}% {rate}", task.percent);
-    }
-    if task.kind == "annotation" {
-        return task.phase.replace('-', " ");
-    }
-    format!("{:.1}% {}", task.percent, task.phase.replace('-', " "))
+fn format_terminal_size_pair(completed: u64, total: u64) -> String {
+    let (divisor, unit) = if total >= 1_000_000_000_000 {
+        (1_000_000_000_000.0, "TB")
+    } else if total >= 1_000_000_000 {
+        (1_000_000_000.0, "GB")
+    } else if total >= 1_000_000 {
+        (1_000_000.0, "MB")
+    } else if total >= 1000 {
+        (1000.0, "KB")
+    } else {
+        return format!("{completed} / {total} B");
+    };
+    format!(
+        "{:.1} / {:.1} {unit}",
+        completed as f64 / divisor,
+        total as f64 / divisor
+    )
 }
 
-fn terminal_active_summary() -> String {
+fn terminal_task_activity(task: &tasks::TaskSnapshot) -> (&'static str, &'static str) {
+    match task.state.as_str() {
+        "queued" => ("Queued", "Queue"),
+        "validating" => ("Verifying", "Verify"),
+        "cancelling" => ("Cancelling", "Cancel"),
+        "paused" | "cancelled" => ("Paused", "Paused"),
+        "failed" => ("Failed", "Failed"),
+        "downloaded" => ("Ready to install", "Ready"),
+        "running" => match task.phase.as_str() {
+            "reconnecting" | "retrying" => ("Reconnecting", "Reconnect"),
+            "replaying" => ("Replaying", "Replay"),
+            "building-cache" => ("Building cache", "Cache"),
+            "downloading-source-part" | "downloading" => ("Downloading", "Download"),
+            "streaming-to-fastvep" => ("Streaming", "Stream"),
+            "validating" => ("Verifying", "Verify"),
+            "reading-index" | "reading-indexes" => ("Reading index", "Index"),
+            "publishing" => ("Publishing", "Publish"),
+            _ if task.kind == "download" => ("Downloading", "Download"),
+            _ if task.kind == "installation" => ("Installing", "Install"),
+            _ => ("Annotating", "Annotate"),
+        },
+        _ => ("Working", "Work"),
+    }
+}
+
+fn terminal_task_chromosome(task: &tasks::TaskSnapshot, compact: bool) -> String {
+    match (&task.chromosome, task.total_chromosomes) {
+        (Some(chromosome), total) if total > 0 && compact => format!("chr{chromosome}/{total}"),
+        (Some(chromosome), total) if total > 0 => format!("{chromosome} / {total}"),
+        (Some(chromosome), _) if compact => format!("chr{chromosome}"),
+        (Some(chromosome), _) => chromosome.clone(),
+        (None, total) if total > 0 => format!("{} / {total}", task.completed_chromosomes),
+        _ => "-".into(),
+    }
+}
+
+fn terminal_task_table(active: &[tasks::TaskSnapshot], available: usize) -> Vec<String> {
+    if active.is_empty() {
+        return Vec::new();
+    }
+    let header = [
+        "Source",
+        "Activity",
+        "Chromosome",
+        "Downloaded",
+        "Complete",
+        "Speed",
+    ];
+    let rows = active
+        .iter()
+        .map(|task| {
+            let downloaded = if task.total_bytes > 0 {
+                format_terminal_size_pair(task.completed_bytes, task.total_bytes)
+            } else if task.completed_bytes > 0 {
+                format_terminal_size(task.completed_bytes)
+            } else {
+                "-".into()
+            };
+            let percent =
+                if task.percent.is_finite() && (task.total_bytes > 0 || task.percent > 0.0) {
+                    format!("{:.1}%", task.percent)
+                } else {
+                    "-".into()
+                };
+            let speed = format_terminal_rate(task.throughput_bytes_per_second);
+            [
+                task.title.clone(),
+                terminal_task_activity(task).0.into(),
+                terminal_task_chromosome(task, false),
+                downloaded,
+                percent,
+                if speed.is_empty() { "-".into() } else { speed },
+            ]
+        })
+        .collect::<Vec<_>>();
+    let widths = std::array::from_fn::<_, 6, _>(|column| {
+        rows.iter()
+            .map(|row| row[column].chars().count())
+            .chain(std::iter::once(header[column].len()))
+            .max()
+            .unwrap_or(0)
+    });
+    let table_width = widths.iter().sum::<usize>() + (widths.len() - 1) * 2;
+    let format_row = |columns: &[String; 6]| {
+        columns
+            .iter()
+            .zip(widths)
+            .map(|(value, width)| format!("{value:<width$}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    if table_width <= available {
+        let header = header.map(str::to_owned);
+        std::iter::once("Active tasks".into())
+            .chain(std::iter::once(format_row(&header)))
+            .chain(rows.iter().map(format_row))
+            .collect()
+    } else {
+        std::iter::once("Active tasks".into())
+            .chain(active.iter().map(|task| {
+                let (_, activity) = terminal_task_activity(task);
+                let chromosome = terminal_task_chromosome(task, true);
+                let percent = if task.percent.is_finite() {
+                    format!("{:.1}%", task.percent)
+                } else {
+                    "-".into()
+                };
+                let downloaded = if task.total_bytes > 0 {
+                    format_terminal_size_pair(task.completed_bytes, task.total_bytes)
+                } else {
+                    format_terminal_size(task.completed_bytes)
+                };
+                format!(
+                    "{}  {activity} {chromosome}  {percent}  {downloaded}",
+                    task.title
+                )
+            }))
+            .collect()
+    }
+}
+
+fn terminal_active_lines() -> Vec<String> {
     let active = portable_paths()
         .map(|paths| {
             task_snapshots(&paths)
                 .into_iter()
                 .filter(tasks::TaskSnapshot::is_active)
-                .map(|task| {
-                    let label = task.resource_id.as_deref().unwrap_or(task.kind).to_owned();
-                    let chromosome = task
-                        .chromosome
-                        .as_deref()
-                        .map(|value| format!(" chr{value}"))
-                        .unwrap_or_default();
-                    format!("{label}{chromosome} {}", terminal_task_activity(&task))
-                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if active.is_empty() {
-        String::new()
-    } else {
-        format!("[active] {}", active.join(" | "))
-    }
+    terminal_task_table(&active, terminal_viewport_width().saturating_sub(1))
 }
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
@@ -502,6 +654,14 @@ const DOWNLOADS_UI_CSS: &str = include_str!("../../../web/src/downloads-ui.css")
 const RESOURCE_LOCATION_CSS: &str = include_str!("../../../web/src/resource-location.css");
 const REPORT_SHARE_CSS: &str = include_str!("../../../web/src/report-share.css");
 const BRAND_THEME_CSS: &str = include_str!("../../../web/src/brand-theme.css");
+
+fn web_asset(relative_path: &str, embedded: &str) -> String {
+    std::env::var_os("ANNOCAT_WEB_ROOT")
+        .and_then(|root| {
+            std::fs::read_to_string(std::path::PathBuf::from(root).join(relative_path)).ok()
+        })
+        .unwrap_or_else(|| embedded.to_owned())
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -563,7 +723,7 @@ fn share_report_command(args: &[String]) -> Result<(), String> {
         return Err(format!("created report failed import validation: {error}"));
     }
     println!(
-        "Created AnnoCat report: {} ({} bytes)",
+        "Created AnnoCAT report: {} ({} bytes)",
         package.path.display(),
         package.bytes
     );
@@ -601,7 +761,7 @@ fn report_worker_command(args: &[String]) -> Result<(), String> {
         report_import::validate_archive(std::path::Path::new(path))?
     };
     println!(
-        "Valid AnnoCat report: {} (schema {}, {} files, {} bytes)",
+        "Valid AnnoCAT report: {} (schema {}, {} files, {} bytes)",
         report.run_id, report.schema_version, report.file_count, report.uncompressed_bytes
     );
     Ok(())
@@ -609,7 +769,7 @@ fn report_worker_command(args: &[String]) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "AnnoCat — local-first WGS variant annotation\n\nUSAGE:\n  annocat <COMMAND> [OPTIONS]\n\nCOMMANDS:\n  annotate INPUT [--name NAME] [--output DIRECTORY] [--annotated-vcf]\n                     Run pinned fastVEP and publish a validated result\n  share-report RUN_ID DESTINATION.zip\n                     Create a portable canonical AnnoCat report\n  validate-report REPORT.zip\n                     Validate a shared AnnoCat report without importing it\n  doctor [--json]    Check primary fastVEP backend readiness\n  fastvep status [--json]\n                     Check portable fastVEP readiness\n  sources            Show annotation sources\n  inspect-vcf FILE   Validate and summarize a VCF/VCF.GZ\n  inspect-fastvep FILE\n                     Validate and summarize dynamic CSQ output\n  check-normalization FILE [--chromosome NAME] [--limit N]\n  resources plan comprehensive\n                     Show the current comprehensive GRCh38 source plan\n  launch [--port N]  Start AnnoCat and open the browser (recommended)\n  serve [--port N]   Run the local service without opening a browser\n  interactive        Open a guided terminal menu\n  version            Print the version\n  help               Print this help"
+        "AnnoCAT — local-first WGS variant annotation\n\nUSAGE:\n  annocat <COMMAND> [OPTIONS]\n\nCOMMANDS:\n  annotate INPUT [--name NAME] [--output DIRECTORY] [--annotated-vcf]\n                     Run pinned fastVEP and publish a validated result\n  share-report RUN_ID DESTINATION.zip\n                     Create a portable canonical AnnoCAT report\n  validate-report REPORT.zip\n                     Validate a shared AnnoCAT report without importing it\n  doctor [--json]    Check primary fastVEP backend readiness\n  fastvep status [--json]\n                     Check portable fastVEP readiness\n  sources            Show annotation sources\n  inspect-vcf FILE   Validate and summarize a VCF/VCF.GZ\n  inspect-fastvep FILE\n                     Validate and summarize dynamic CSQ output\n  check-normalization FILE [--chromosome NAME] [--limit N]\n  resources plan comprehensive\n                     Show the current comprehensive GRCh38 source plan\n  launch [--port N]  Start AnnoCAT and open the browser (recommended)\n  serve [--port N]   Run the local service without opening a browser\n  interactive        Open a guided terminal menu\n  version            Print the version\n  help               Print this help"
     );
 }
 
@@ -722,7 +882,7 @@ fn check_normalization_command(args: &[String]) -> Result<(), String> {
     }
     let paths = portable_paths()?;
     if !reference::is_ready(&paths.resources) {
-        return Err("the required GRCh38 reference is not ready".into());
+        return Err("the required GRCh38 reference is not installed".into());
     }
     let summary = annocat_core::vcf::check_normalization(
         std::path::Path::new(input),
@@ -778,7 +938,7 @@ fn fastvep_command(args: &[String]) -> Result<(), String> {
 }
 
 fn print_fastvep_readiness(report: &fastvep::Readiness) {
-    println!("AnnoCat fastVEP backend readiness");
+    println!("AnnoCAT fastVEP backend readiness");
     println!("  State       : {}", report.state);
     println!(
         "  Executable  : {}",
@@ -805,7 +965,7 @@ fn print_fastvep_readiness(report: &fastvep::Readiness) {
 
 fn doctor() {
     let fastvep = fastvep::readiness();
-    println!("AnnoCat environment check");
+    println!("AnnoCAT environment check");
     println!("  Rust executable : OK");
     println!(
         "  Git             : {}",
@@ -918,7 +1078,7 @@ fn parse_port(args: &[String]) -> Result<u16, String> {
 fn interactive() -> Result<(), String> {
     loop {
         println!(
-            "\nAnnoCat\n  1. Check environment\n  2. List annotation sources\n  3. Start browser UI\n  4. Exit"
+            "\nAnnoCAT\n  1. Check environment\n  2. List annotation sources\n  3. Start browser UI\n  4. Exit"
         );
         print!("> ");
         io::stdout().flush().map_err(|e| e.to_string())?;
@@ -940,7 +1100,7 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
     let address = format!("127.0.0.1:{port}");
     let listener =
         TcpListener::bind(&address).map_err(|e| format!("cannot bind {address}: {e}"))?;
-    println!("AnnoCat is running at http://{address}");
+    println!("AnnoCAT is running at http://{address}");
     println!("Local annotation and results service. Press Ctrl+C to stop.");
     terminal_log(
         "server",
@@ -966,6 +1126,14 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
             ),
         );
         downloader::restore_queue(&paths.downloads);
+        match install_queue::restore(&paths.downloads) {
+            Ok(true) => start_preparation_queue_worker(),
+            Ok(false) => {}
+            Err(error) => terminal_log(
+                "resources",
+                format!("installation queue could not be restored: {error}"),
+            ),
+        }
         schedule_preparation(
             "grch38-reference",
             paths.downloads.clone(),
@@ -974,7 +1142,7 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
     }
     std::thread::spawn(|| {
         loop {
-            terminal_progress(&terminal_active_summary());
+            terminal_progress(&terminal_active_lines());
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
@@ -995,11 +1163,11 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
                 Ok(mut stream) => {
                     std::thread::spawn(move || {
                         if let Err(error) = respond(&mut stream) {
-                            eprintln!("request failed: {error}");
+                            terminal_log("http", format!("request failed: {error}"));
                         }
                     });
                 }
-                Err(error) => eprintln!("connection failed: {error}"),
+                Err(error) => terminal_log("server", format!("connection failed: {error}")),
             }
         }
     });
@@ -1308,6 +1476,40 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         return write_http_response(stream, response.0, "application/json", &response.1);
     }
     if let Some((resource_id, action)) = preparation_api_route(path) {
+        if resource_id == "grch38-reference" {
+            let response = match (action, portable_paths()) {
+                ("status", Ok(paths)) => (
+                    "200 OK",
+                    serialize_json(&reference::status(&paths.downloads, &paths.resources)),
+                ),
+                ("start", Ok(paths)) if method == "POST" => {
+                    match reference::start_background(paths.downloads, paths.resources) {
+                        Ok(()) => ("202 Accepted", "{\"accepted\":true}".into()),
+                        Err(error) => (
+                            "409 Conflict",
+                            format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+                        ),
+                    }
+                }
+                ("cancel", _) if method == "POST" => (
+                    "200 OK",
+                    format!("{{\"cancelRequested\":{}}}", reference::cancel_background()),
+                ),
+                (_, Err(error)) => (
+                    "500 Internal Server Error",
+                    format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+                ),
+                ("start" | "cancel", _) => (
+                    "405 Method Not Allowed",
+                    "{\"error\":\"POST required\"}".into(),
+                ),
+                _ => (
+                    "404 Not Found",
+                    "{\"error\":\"Unknown reference preparation action\"}".into(),
+                ),
+            };
+            return write_http_response(stream, response.0, "application/json", &response.1);
+        }
         if resource_id == "ensembl-gff3" {
             let response = match (action, portable_paths()) {
                 ("status", Ok(paths)) => (
@@ -1790,49 +1992,68 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         return write_http_response(stream, status, "application/json", &body);
     }
     let (status, content_type, body) = match path {
-        "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", INDEX_HTML.to_string()),
+        "/" | "/index.html" => (
+            "200 OK",
+            "text/html; charset=utf-8",
+            web_asset("index.html", INDEX_HTML),
+        ),
         "/app.js" => (
             "200 OK",
             "text/javascript; charset=utf-8",
-            APP_JS.to_string(),
+            web_asset("src/app.js", APP_JS),
         ),
-        "/style.css" => ("200 OK", "text/css; charset=utf-8", STYLE_CSS.to_string()),
-        "/wizard.css" => ("200 OK", "text/css; charset=utf-8", WIZARD_CSS.to_string()),
-        "/batch.css" => ("200 OK", "text/css; charset=utf-8", BATCH_CSS.to_string()),
+        "/style.css" => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            web_asset("src/style.css", STYLE_CSS),
+        ),
+        "/wizard.css" => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            web_asset("src/wizard.css", WIZARD_CSS),
+        ),
+        "/batch.css" => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            web_asset("src/batch.css", BATCH_CSS),
+        ),
         "/light-theme.css" => (
             "200 OK",
             "text/css; charset=utf-8",
-            LIGHT_THEME_CSS.to_string(),
+            web_asset("src/light-theme.css", LIGHT_THEME_CSS),
         ),
         "/downloads-ui.css" => (
             "200 OK",
             "text/css; charset=utf-8",
-            DOWNLOADS_UI_CSS.to_string(),
+            web_asset("src/downloads-ui.css", DOWNLOADS_UI_CSS),
         ),
         "/resource-location.css" => (
             "200 OK",
             "text/css; charset=utf-8",
-            RESOURCE_LOCATION_CSS.to_string(),
+            web_asset("src/resource-location.css", RESOURCE_LOCATION_CSS),
         ),
         "/report-share.css" => (
             "200 OK",
             "text/css; charset=utf-8",
-            REPORT_SHARE_CSS.to_string(),
+            web_asset("src/report-share.css", REPORT_SHARE_CSS),
         ),
         "/brand-theme.css" => (
             "200 OK",
             "text/css; charset=utf-8",
-            BRAND_THEME_CSS.to_string(),
+            web_asset("src/brand-theme.css", BRAND_THEME_CSS),
         ),
         "/api/sources" => ("200 OK", "application/json", sources_json()),
         "/api/profiles" => ("200 OK", "application/json", profiles_json()),
-        "/api/resources/catalog-candidates" => (
-            "200 OK",
-            "application/json",
-            resource_catalog_candidates_json(),
-        ),
         "/api/resources/plan" => ("200 OK", "application/json", practical_resource_plan_json()),
         "/api/resources/status" => match resources_status() {
+            Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
+            Err(error) => (
+                "500 Internal Server Error",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
+        "/api/status" => match app_status() {
             Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
             Err(error) => (
                 "500 Internal Server Error",
@@ -1848,141 +2069,6 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
             ),
         },
-        "/api/resources/dbnsfp/download/status" => {
-            let release = resource_release("dbnsfp").unwrap();
-            let root = portable_paths()
-                .map(|paths| paths.downloads)
-                .unwrap_or_default();
-            (
-                "200 OK",
-                "application/json",
-                serialize_json(&downloader::status(&release, &root)),
-            )
-        }
-        "/api/resources/dbnsfp/download/start" => {
-            let release = resource_release("dbnsfp").unwrap();
-            let paths = portable_paths();
-            let root = paths
-                .as_ref()
-                .map(|paths| paths.downloads.clone())
-                .unwrap_or_default();
-            let resources = paths
-                .as_ref()
-                .map(|paths| paths.resources.clone())
-                .unwrap_or_default();
-            let result = downloader::start_background(release, root.clone());
-            match result {
-                Ok(()) => {
-                    println!(
-                        "[resources] dbNSFP 4.9a download/resume started: {}",
-                        root.display()
-                    );
-                    schedule_preparation("dbnsfp", root, resources);
-                    (
-                        "202 Accepted",
-                        "application/json",
-                        "{\"accepted\":true}".into(),
-                    )
-                }
-                Err(error) => (
-                    "409 Conflict",
-                    "application/json",
-                    format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-                ),
-            }
-        }
-        "/api/resources/dbnsfp/download/cancel" => {
-            let cancelled = portable_paths()
-                .map(|paths| downloader::cancel_resource("dbnsfp", &paths.downloads))
-                .unwrap_or(false);
-            if cancelled {
-                println!("[resources] dbNSFP cancellation requested; preserving .partial file");
-            }
-            (
-                "200 OK",
-                "application/json",
-                format!("{{\"cancelRequested\":{cancelled}}}"),
-            )
-        }
-        "/api/resources/grch38-reference/download/status" => {
-            let release = resource_release("grch38-reference").unwrap();
-            let root = portable_paths().map(|p| p.downloads).unwrap_or_default();
-            (
-                "200 OK",
-                "application/json",
-                serialize_json(&downloader::status(&release, &root)),
-            )
-        }
-        "/api/resources/grch38-reference/download/start" => {
-            let release = resource_release("grch38-reference").unwrap();
-            match portable_paths() {
-                Ok(paths) => {
-                    let downloads = paths.downloads.clone();
-                    let resources = paths.resources.clone();
-                    match downloader::start_background(release, downloads.clone()) {
-                        Ok(()) => {
-                            schedule_preparation("grch38-reference", downloads, resources);
-                            (
-                                "202 Accepted",
-                                "application/json",
-                                "{\"accepted\":true}".into(),
-                            )
-                        }
-                        Err(error) => (
-                            "409 Conflict",
-                            "application/json",
-                            format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-                        ),
-                    }
-                }
-                Err(error) => (
-                    "500 Internal Server Error",
-                    "application/json",
-                    format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-                ),
-            }
-        }
-        "/api/resources/grch38-reference/download/cancel" => (
-            "200 OK",
-            "application/json",
-            format!(
-                "{{\"cancelRequested\":{}}}",
-                portable_paths()
-                    .map(|paths| downloader::cancel_resource("grch38-reference", &paths.downloads))
-                    .unwrap_or(false)
-            ),
-        ),
-        "/api/resources/grch38-reference/prepare/status" => match portable_paths() {
-            Ok(paths) => (
-                "200 OK",
-                "application/json",
-                serialize_json(&reference::status(&paths.downloads, &paths.resources)),
-            ),
-            Err(error) => (
-                "500 Internal Server Error",
-                "application/json",
-                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-            ),
-        },
-        "/api/resources/grch38-reference/prepare/start" => match portable_paths()
-            .and_then(|p| reference::start_background(p.downloads, p.resources))
-        {
-            Ok(()) => (
-                "202 Accepted",
-                "application/json",
-                "{\"accepted\":true}".into(),
-            ),
-            Err(error) => (
-                "409 Conflict",
-                "application/json",
-                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-            ),
-        },
-        "/api/resources/grch38-reference/prepare/cancel" => (
-            "200 OK",
-            "application/json",
-            format!("{{\"cancelRequested\":{}}}", reference::cancel_background()),
-        ),
         "/api/paths" => match portable_paths_status() {
             Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
             Err(error) => (
@@ -2128,7 +2214,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 Some(_) => (
                     "409 Conflict",
                     "application/json",
-                    "{\"error\":\"Import currently accepts AnnoCat report ZIPs\"}".into(),
+                    "{\"error\":\"Import currently accepts AnnoCAT report ZIPs\"}".into(),
                 ),
                 None => ("200 OK", "application/json", "{\"path\":null}".into()),
             },
@@ -2226,7 +2312,7 @@ fn download_api_route(path: &str) -> Option<(&str, &str)> {
 fn preparation_api_route(path: &str) -> Option<(&str, &str)> {
     let remainder = path.strip_prefix("/api/resources/")?;
     let (resource_id, action) = remainder.split_once("/prepare/")?;
-    if resource_id == "grch38-reference" || resource_id.is_empty() || action.contains('/') {
+    if resource_id.is_empty() || action.contains('/') {
         None
     } else {
         Some((resource_id, action))
@@ -2348,6 +2434,7 @@ fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
         evidence_columns,
         evidence_filters,
         filter_rules,
+        excluded_allele_ids: Vec::new(),
     })
 }
 
@@ -2677,9 +2764,11 @@ fn start_preparation_queue_worker() {
                 install_queue::NextWork::Idle => return,
             };
             let Ok(paths) = portable_paths() else {
+                install_queue::finish(&resource_id);
                 continue;
             };
             if managed_preparation_status(&resource_id, &paths.resources).state == "ready" {
+                install_queue::finish(&resource_id);
                 continue;
             }
             let started = if resource_id == "dbnsfp" {
@@ -2694,7 +2783,10 @@ fn start_preparation_queue_worker() {
                 preparation::record_start_failure(&resource_id, error.clone(), expected);
                 terminal_log(
                     "resources",
-                    format!("{resource_id} could not start: {error}"),
+                    format!(
+                        "{} could not start: {error}",
+                        resource_task_title(&resource_id)
+                    ),
                 );
                 continue;
             }
@@ -2894,9 +2986,9 @@ fn portable_home() -> Result<std::path::PathBuf, String> {
         Ok(std::path::PathBuf::from(home))
     } else {
         std::env::current_exe()
-            .map_err(|error| format!("cannot locate AnnoCat executable: {error}"))?
+            .map_err(|error| format!("cannot locate AnnoCAT executable: {error}"))?
             .parent()
-            .ok_or_else(|| "AnnoCat executable has no parent directory".to_string())
+            .ok_or_else(|| "AnnoCAT executable has no parent directory".to_string())
             .map(std::path::Path::to_path_buf)
     }
 }
@@ -2922,7 +3014,7 @@ fn delete_managed_resource(resource_id: &str) -> Result<(), String> {
         || (matches!(resource_id, "grch38-reference" | "ensembl-gff3") && transcript::is_running())
         || preparation::live_status(resource_id).state == "running"
     {
-        return Err("cancel active annotation and resource jobs before removing data".into());
+        return Err("cancel active annotation and resource tasks before removing data".into());
     }
     invalidate_core_preparation(resource_id);
     remove_managed_resource_files(resource_id)
@@ -2977,8 +3069,12 @@ fn cancel_and_delete_managed_resource(resource_id: &str) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         if let Err(error) = remove_managed_resource_files(resource_id) {
-            eprintln!(
-                "[resources] could not finish cancellation cleanup for {resource_id}: {error}"
+            terminal_log(
+                "resources",
+                format!(
+                    "{} cancellation cleanup failed: {error}",
+                    resource_task_title(resource_id)
+                ),
             );
         }
     });
@@ -3059,7 +3155,10 @@ fn remove_managed_resource_files(resource_id: &str) -> Result<(), String> {
     if matches!(resource_id, "grch38-reference" | "ensembl-gff3") {
         transcript::forget();
     }
-    println!("[resources] removed managed data for {resource_id}");
+    terminal_log(
+        "resources",
+        format!("{} removed", resource_task_title(resource_id)),
+    );
     Ok(())
 }
 
@@ -3390,7 +3489,7 @@ fn completed_run_file(
     Ok(file)
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
     ready: bool,
@@ -3399,7 +3498,7 @@ struct SetupStatus {
     transcript_cache_ready: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(untagged)]
 enum ResourcePreparationStatus {
     Reference(reference::ReferenceStatus),
@@ -3407,59 +3506,101 @@ enum ResourcePreparationStatus {
     Supplementary(preparation::LivePreparationState),
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ResourceStatus {
     download: downloader::DownloadStatus,
     prepare: ResourcePreparationStatus,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ResourcesStatus {
     resources: std::collections::BTreeMap<String, ResourceStatus>,
     setup: SetupStatus,
 }
 
-fn setup_status(paths: &PortablePaths) -> SetupStatus {
-    let reference_ready = reference::is_ready(&paths.resources);
-    let engine_ready = fastvep::readiness().ready;
-    let transcript_cache_ready = transcript::is_ready(&paths.resources);
-    SetupStatus {
-        ready: reference_ready && engine_ready && transcript_cache_ready,
-        reference_ready,
-        engine_ready,
-        transcript_cache_ready,
-    }
-}
-
 fn resources_status() -> Result<ResourcesStatus, String> {
     let paths = portable_paths()?;
+    Ok(resources_status_for(&paths))
+}
+
+fn resources_status_for(paths: &PortablePaths) -> ResourcesStatus {
+    current_status_snapshot(paths).resources
+}
+
+struct CurrentStatusSnapshot {
+    resources: ResourcesStatus,
+    tasks: Vec<tasks::TaskSnapshot>,
+    annotation: annotation::State,
+}
+
+fn current_status_snapshot(paths: &PortablePaths) -> CurrentStatusSnapshot {
     let mut statuses = std::collections::BTreeMap::new();
+    let mut snapshots = Vec::new();
+    let mut reference_ready = false;
+    let mut transcript_cache_ready = false;
     for release in annocat_core::source_catalog::download_releases() {
+        let title = resource_task_title(release.resource_id);
+        let download_status = downloader::status(&release, &paths.downloads);
         let prepare = match release.resource_id {
-            "grch38-reference" => ResourcePreparationStatus::Reference(reference::status(
-                &paths.downloads,
-                &paths.resources,
-            )),
+            "grch38-reference" => {
+                let status = reference::status(&paths.downloads, &paths.resources);
+                reference_ready = status.state == "ready";
+                ResourcePreparationStatus::Reference(status)
+            }
             "ensembl-gff3" => {
-                ResourcePreparationStatus::Transcript(transcript::status(&paths.resources))
+                let status = transcript::status(&paths.resources);
+                transcript_cache_ready = status.state == "ready";
+                ResourcePreparationStatus::Transcript(status)
             }
             id => ResourcePreparationStatus::Supplementary(managed_preparation_status(
                 id,
                 &paths.resources,
             )),
         };
+        let download_task =
+            tasks::from_download(release.resource_id, &title, download_status.clone());
+        let installation_task = match &prepare {
+            ResourcePreparationStatus::Reference(status) => {
+                tasks::from_reference(release.resource_id, &title, status.clone())
+            }
+            ResourcePreparationStatus::Transcript(status) => {
+                tasks::from_transcript(release.resource_id, &title, status.clone())
+            }
+            ResourcePreparationStatus::Supplementary(status) => {
+                tasks::from_preparation(release.resource_id, &title, status.clone())
+            }
+        };
+        if let Some(task) = tasks::choose_resource_task(download_task, installation_task) {
+            snapshots.push(task);
+        }
         statuses.insert(
             release.resource_id.into(),
             ResourceStatus {
-                download: downloader::status(&release, &paths.downloads),
+                download: download_status,
                 prepare,
             },
         );
     }
-    Ok(ResourcesStatus {
-        resources: statuses,
-        setup: setup_status(&paths),
-    })
+    let annotation = annotation::status();
+    let annotation_task = tasks::from_annotation(annotation.clone());
+    if annotation_task.is_meaningful() {
+        snapshots.push(annotation_task);
+    }
+    sort_tasks(&mut snapshots);
+    let engine_ready = fastvep::readiness().ready;
+    CurrentStatusSnapshot {
+        resources: ResourcesStatus {
+            resources: statuses,
+            setup: SetupStatus {
+                ready: reference_ready && engine_ready && transcript_cache_ready,
+                reference_ready,
+                engine_ready,
+                transcript_cache_ready,
+            },
+        },
+        tasks: snapshots,
+        annotation,
+    }
 }
 
 fn resource_task_title(resource_id: &str) -> String {
@@ -3473,56 +3614,31 @@ fn resource_task_title(resource_id: &str) -> String {
 }
 
 fn task_snapshots(paths: &PortablePaths) -> Vec<tasks::TaskSnapshot> {
-    let mut snapshots = annocat_core::source_catalog::download_releases()
-        .filter_map(|release| {
-            let title = resource_task_title(release.resource_id);
-            let download = tasks::from_download(
-                release.resource_id,
-                &title,
-                downloader::status(&release, &paths.downloads),
-            );
-            let installation = match release.resource_id {
-                "grch38-reference" => tasks::from_reference(
-                    release.resource_id,
-                    &title,
-                    reference::status(&paths.downloads, &paths.resources),
-                ),
-                "ensembl-gff3" => tasks::from_transcript(
-                    release.resource_id,
-                    &title,
-                    transcript::status(&paths.resources),
-                ),
-                id => tasks::from_preparation(
-                    id,
-                    &title,
-                    managed_preparation_status(id, &paths.resources),
-                ),
-            };
-            tasks::choose_resource_task(download, installation)
-        })
-        .collect::<Vec<_>>();
-    let annotation = tasks::from_annotation(annotation::status());
-    if annotation.is_meaningful() {
-        snapshots.push(annotation);
-    }
-    snapshots.sort_by(|left, right| {
-        task_sort_rank(left)
-            .cmp(&task_sort_rank(right))
-            .then_with(|| left.title.cmp(&right.title))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    snapshots
+    current_status_snapshot(paths).tasks
 }
 
 fn task_sort_rank(task: &tasks::TaskSnapshot) -> u8 {
     match task.state.as_str() {
-        "running" | "validating" | "cancelling" => 0,
-        "queued" => 1,
+        "queued" | "running" | "validating" | "cancelling" => 0,
+        "paused" | "cancelled" | "downloaded" => 1,
         "failed" => 2,
-        "paused" | "cancelled" | "downloaded" => 3,
-        "ready" | "completed" => 4,
-        _ => 5,
+        "ready" | "completed" => 3,
+        _ => 4,
     }
+}
+
+fn sort_tasks(tasks: &mut [tasks::TaskSnapshot]) {
+    tasks.sort_by(|left, right| {
+        task_sort_rank(left)
+            .cmp(&task_sort_rank(right))
+            .then_with(|| {
+                if task_sort_rank(left) == 3 {
+                    right.updated_at.cmp(&left.updated_at)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+    });
 }
 
 #[derive(Serialize)]
@@ -3532,12 +3648,22 @@ struct TaskStatus {
 
 fn task_status() -> Result<TaskStatus, String> {
     let paths = portable_paths()?;
+    task_status_for(&paths)
+}
+
+fn task_status_for(paths: &PortablePaths) -> Result<TaskStatus, String> {
+    task_status_from_current(paths, current_status_snapshot(paths).tasks)
+}
+
+fn task_status_from_current(
+    paths: &PortablePaths,
+    mut snapshots: Vec<tasks::TaskSnapshot>,
+) -> Result<TaskStatus, String> {
     let runs = completed_runs(&paths.runs)?;
     let completed_ids = runs
         .iter()
         .map(|run| run.id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    let mut snapshots = task_snapshots(&paths);
     snapshots.retain(|task| {
         task.state != "completed"
             || task
@@ -3555,23 +3681,38 @@ fn task_status() -> Result<TaskStatus, String> {
             run.canonical_result_bytes.unwrap_or(0),
         )
     }));
-    snapshots.sort_by(|left, right| {
-        task_sort_rank(left)
-            .cmp(&task_sort_rank(right))
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-            .then_with(|| left.title.cmp(&right.title))
-    });
+    sort_tasks(&mut snapshots);
     Ok(TaskStatus { tasks: snapshots })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppStatus {
+    resources: ResourcesStatus,
+    tasks: Vec<tasks::TaskSnapshot>,
+    annotation: annotation::State,
+}
+
+fn app_status() -> Result<AppStatus, String> {
+    let paths = portable_paths()?;
+    let current = current_status_snapshot(&paths);
+    let tasks = task_status_from_current(&paths, current.tasks)?.tasks;
+    Ok(AppStatus {
+        resources: current.resources,
+        tasks,
+        annotation: current.annotation,
+    })
+}
+
+fn pick_folder(title: &'static str) -> Result<Option<std::path::PathBuf>, String> {
+    run_native_dialog(move || rfd::FileDialog::new().set_title(title).pick_folder())
+}
+
 fn pick_output_folder() -> Result<Option<String>, String> {
-    let selection = run_native_dialog(|| {
-        rfd::FileDialog::new()
-            .set_title("Choose AnnoCat output folder")
-            .pick_folder()
-            .map(|path| path.to_string_lossy().into_owned())
-    })?;
-    Ok(selection)
+    Ok(
+        pick_folder("Choose AnnoCAT output folder")?
+            .map(|path| path.to_string_lossy().into_owned()),
+    )
 }
 
 fn share_completed_run_interactive(
@@ -3585,7 +3726,7 @@ fn share_completed_run_interactive(
             .map_err(|error| format!("cannot read completed run manifest: {error}"))?,
     )
     .map_err(|error| format!("invalid completed run manifest: {error}"))?;
-    let original_name = manifest["name"].as_str().unwrap_or("AnnoCat-report");
+    let original_name = manifest["name"].as_str().unwrap_or("AnnoCAT-report");
     let name = library_metadata::display_name(&paths.runs, run_id)
         .unwrap_or_else(|| original_name.to_owned());
     let completed = manifest["completedAt"]
@@ -3609,8 +3750,8 @@ fn share_completed_run_interactive(
     );
     let destination = run_native_dialog(move || {
         rfd::FileDialog::new()
-            .set_title("Share AnnoCat report")
-            .add_filter("AnnoCat report", &["zip"])
+            .set_title("Share AnnoCAT report")
+            .add_filter("AnnoCAT report", &["zip"])
             .set_file_name(filename)
             .save_file()
     })?;
@@ -3666,7 +3807,7 @@ fn export_filtered_results_interactive(
     )
     .ok();
     let name = library_metadata::display_name(&paths.runs, run_id)
-        .unwrap_or_else(|| "AnnoCat-report".to_owned());
+        .unwrap_or_else(|| "AnnoCAT-report".to_owned());
     let (title, extension, suffix) = match request.format.as_str() {
         "rowsCsv" => ("Export filtered variants", "csv", "filtered-variants"),
         "genesTxt" => ("Export filtered genes", "txt", "filtered-genes"),
@@ -3749,7 +3890,7 @@ fn report_safe_name(value: &str) -> String {
         .take(80)
         .collect::<String>();
     if result.is_empty() {
-        "AnnoCat-report".into()
+        "AnnoCAT-report".into()
     } else {
         result
     }
@@ -3762,15 +3903,14 @@ fn pick_resource_folder() -> Result<Option<String>, String> {
                 .into(),
         );
     }
-    let selection = run_native_dialog(|| {
-        rfd::FileDialog::new()
-            .set_title("Choose AnnoCat resource folder")
-            .pick_folder()
-    })?;
+    let selection = pick_folder("Choose AnnoCAT resource folder")?;
     if let Some(path) = selection {
         save_resource_directory(&path)?;
         ensure_portable_layout()?;
-        println!("[config] resource directory changed to {}", path.display());
+        terminal_log(
+            "config",
+            format!("resource directory changed to {}", path.display()),
+        );
         Ok(Some(path.to_string_lossy().into_owned()))
     } else {
         Ok(None)
@@ -3781,11 +3921,7 @@ fn pick_results_folder() -> Result<Option<String>, String> {
     if annotation::is_running() {
         return Err("cancel the active annotation before changing the results directory".into());
     }
-    let selection = run_native_dialog(|| {
-        rfd::FileDialog::new()
-            .set_title("Choose AnnoCat results folder")
-            .pick_folder()
-    })?;
+    let selection = pick_folder("Choose AnnoCAT results folder")?;
     if let Some(path) = selection {
         save_results_directory(&path)?;
         std::fs::create_dir_all(&path).map_err(|error| {
@@ -3910,8 +4046,8 @@ fn pick_vcf_files() -> Result<Vec<String>, String> {
 fn pick_result_file() -> Result<Option<String>, String> {
     let selection = run_native_dialog(|| {
         rfd::FileDialog::new()
-            .set_title("Open AnnoCat results")
-            .add_filter("AnnoCat report", &["zip"])
+            .set_title("Open AnnoCAT results")
+            .add_filter("AnnoCAT report", &["zip"])
             .pick_file()
     })?;
     Ok(selection.map(|path| path.to_string_lossy().into_owned()))
@@ -3962,6 +4098,10 @@ mod profile_status_tests {
         assert!(app.contains("data-install-source-mode"));
         assert!(app.contains("data-install-concurrency"));
         assert!(app.contains("profileReviewResources(profile,installable)"));
+        assert!(app.contains("setInterval(()=>refreshAppStatus()"));
+        assert!(!app.contains("setInterval(()=>refreshDownloadStatus()"));
+        assert!(!app.contains("setInterval(()=>refreshAnnotationStatus()"));
+        assert!(!app.contains("setInterval(()=>refreshTasks()"));
         assert!(!app.contains("$('#result-density')"));
     }
 
@@ -3973,7 +4113,8 @@ mod profile_status_tests {
         assert!(html.contains("id=\"about-button\""));
         assert!(html.contains("id=\"about-dialog\""));
         assert!(!html.contains("class=\"privacy\""));
-        assert!(html.contains("Licensed under Apache License 2.0"));
+        assert!(html.contains(">Apache-2.0</a>"));
+        assert!(html.contains("portable, local-first application"));
         assert!(manifest.contains("license = \"Apache-2.0\""));
         assert_eq!(about["license"], "Apache-2.0");
         assert_eq!(about["version"], env!("CARGO_PKG_VERSION"));
@@ -3989,6 +4130,83 @@ mod profile_status_tests {
         assert_eq!(format_terminal_size(872_900_000), "872.9 MB");
         assert_eq!(format_terminal_size(39_000_000_000), "39.0 GB");
         assert_eq!(format_terminal_rate(12_300_000.0), "12.3 MB/s");
+        let mut task = tasks::from_completed_run("cadd", "CADD", "", "GRCh38", 1, 1);
+        task.kind = "installation";
+        task.state = "running".into();
+        task.phase = "replaying".into();
+        task.chromosome = Some("1".into());
+        task.completed_chromosomes = 0;
+        task.total_chromosomes = 24;
+        task.completed_bytes = 500_000_000;
+        task.total_bytes = 1_000_000_000;
+        task.percent = 50.0;
+        task.throughput_bytes_per_second = 12_300_000.0;
+        let table = terminal_task_table(&[task.clone()], 120);
+        assert_eq!(table[0], "Active tasks");
+        assert!(table[2].contains("CADD"));
+        assert!(table[2].contains("Replaying"));
+        assert!(table[2].contains("1 / 24"));
+        assert!(table[2].contains("0.5 / 1.0 GB"));
+        assert!(table[2].contains("50.0%"));
+        assert!(table[2].contains("12.3 MB/s"));
+        let compact = terminal_task_table(&[task], 40);
+        assert!(compact[1].contains("Replay chr1/24"));
+        assert!(compact[1].contains("50.0%"));
+    }
+
+    #[test]
+    fn task_order_is_active_paused_failed_then_completed() {
+        let task = |id: &str, state: &str, updated: &str| {
+            let mut task = tasks::from_completed_run(id, id, updated, "GRCh38", 1, 1);
+            task.id = id.into();
+            task.state = state.into();
+            task.updated_at = (!updated.is_empty()).then(|| updated.into());
+            task
+        };
+        let mut tasks = vec![
+            task("failed", "failed", ""),
+            task("active-first", "running", ""),
+            task("paused", "paused", ""),
+            task("new", "completed", "2026-07-19T02:00:00Z"),
+            task("active-second", "queued", ""),
+            task("old", "completed", "2026-07-19T01:00:00Z"),
+        ];
+        sort_tasks(&mut tasks);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "active-first",
+                "active-second",
+                "paused",
+                "failed",
+                "new",
+                "old"
+            ]
+        );
+    }
+
+    #[test]
+    fn data_sources_use_one_download_list_and_the_shared_task_projection() {
+        let html = include_str!("../../../web/index.html");
+        let app = include_str!("../../../web/src/app.js");
+        let theme = include_str!("../../../web/src/brand-theme.css");
+        assert!(html.contains("id=\"download-section\""));
+        assert!(html.contains("id=\"download-jobs\""));
+        assert_eq!(app.matches("$('#source-list').innerHTML=").count(), 1);
+        assert!(app.contains("profile.sourceIds.map"));
+        assert!(app.contains("renderResourceTasks(lastTaskSnapshots)"));
+        assert!(!app.contains("data-source-tasks"));
+        assert!(app.contains("task.availableActions"));
+        assert!(app.contains("task.throughputBytesPerSecond"));
+        assert!(!app.contains("renderDownloadJobs"));
+        assert!(!app.contains("resourceJobView"));
+        assert!(!app.contains("jobTransferRates"));
+        assert!(!app.contains("pausedResourceCards"));
+        assert!(theme.contains("#results.active-page {\n  display: block;"));
+        assert!(theme.contains("clamp(320px, 30vw, 560px)"));
     }
 
     #[test]
@@ -4030,6 +4248,26 @@ mod profile_status_tests {
     }
 
     #[test]
+    #[ignore = "contacts the official NCBI release directories"]
+    fn official_rolling_source_resolvers_return_downloadable_artifacts() {
+        let clinvar = resolve_clinvar_release().expect("resolve current ClinVar release");
+        assert!(clinvar.version.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(clinvar.download_bytes > 0);
+        assert!(
+            clinvar
+                .etag
+                .as_deref()
+                .is_some_and(|value| value.starts_with("md5:"))
+        );
+
+        let dbsnp = resolve_dbsnp_release().expect("resolve current dbSNP release");
+        assert!(dbsnp.version.starts_with('b'));
+        assert!(dbsnp.download_bytes > 0);
+        assert!(dbsnp.index_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(dbsnp.index_md5.is_some());
+    }
+
+    #[test]
     fn rolling_resolvers_read_content_length_from_head_headers() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -4055,21 +4293,9 @@ mod profile_status_tests {
                 assert!(preparation_available(release.resource_id));
             }
         }
-        for candidate in annocat_core::RESOURCE_CATALOG_CANDIDATES {
-            let mutable_export = candidate.artifacts.iter().any(|artifact| {
-                artifact.url_template.contains("/latest")
-                    || artifact.url_template.contains("/download/action/")
-            });
-            if mutable_export {
-                assert!(
-                    is_rolling_resource(candidate.resource_id)
-                        || !preparation_available(candidate.resource_id),
-                    "{} became installable without rolling-release resolution",
-                    candidate.resource_id
-                );
-            }
-        }
-        assert_eq!(ROLLING_RESOURCE_IDS, &["clinvar", "dbsnp"]);
+        assert!(is_rolling_resource("clinvar"));
+        assert!(is_rolling_resource("dbsnp"));
+        assert!(!is_rolling_resource("cadd"));
     }
 
     #[test]
@@ -4121,6 +4347,10 @@ mod profile_status_tests {
         assert_eq!(
             download_api_route("/api/resources/dbnsfp/download/cancel"),
             Some(("dbnsfp", "cancel"))
+        );
+        assert_eq!(
+            preparation_api_route("/api/resources/grch38-reference/prepare/start"),
+            Some(("grch38-reference", "start"))
         );
     }
 

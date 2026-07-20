@@ -60,7 +60,7 @@ fn run() -> Result<(), String> {
     let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
     let report = report_import::validate_archive_file(file)?;
     println!(
-        "Valid AnnoCat report: {} (schema {}, {} files, {} bytes)",
+        "Valid AnnoCAT report: {} (schema {}, {} files, {} bytes)",
         report.run_id, report.schema_version, report.file_count, report.uncompressed_bytes
     );
     Ok(())

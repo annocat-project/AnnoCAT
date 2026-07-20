@@ -5,15 +5,6 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VariantAllele {
-    pub chromosome: String,
-    pub position: u64,
-    pub reference: String,
-    pub alternate: String,
-    pub alternate_index: usize,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VcfSummary {
     pub assembly: Option<String>,
@@ -35,78 +26,6 @@ pub struct NormalizationSummary {
     pub reference_mismatches: u64,
     pub unsupported: u64,
     pub examples: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalInputAllele {
-    pub source_order: usize,
-    pub record_number: u64,
-    pub alternate_index: usize,
-    pub original_chromosome: String,
-    pub original_position: u64,
-    pub original_reference: String,
-    pub original_alternate: String,
-    pub canonical: crate::normalization::CanonicalAllele,
-}
-
-pub fn canonical_alleles_for_chromosome(
-    path: &Path,
-    fasta: &Path,
-    chromosome: &str,
-) -> Result<Vec<CanonicalInputAllele>, String> {
-    let reader =
-        open_vcf(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    let mut vcf_reader = vcf::io::Reader::new(reader);
-    let _header = vcf_reader
-        .read_header()
-        .map_err(|error| format!("invalid VCF header: {error}"))?;
-    let mut reference = IndexedReference::open(fasta).map_err(|error| error.to_string())?;
-    let wanted = chromosome.strip_prefix("chr").unwrap_or(chromosome);
-    let mut alleles = Vec::new();
-    for (record_index, result) in vcf_reader.records().enumerate() {
-        let record = result.map_err(|error| format!("invalid VCF record: {error}"))?;
-        let record_number = record_index as u64 + 1;
-        let record_chromosome = record.reference_sequence_name();
-        let bare = record_chromosome
-            .strip_prefix("chr")
-            .unwrap_or(record_chromosome);
-        if bare != wanted {
-            continue;
-        }
-        let position = record
-            .variant_start()
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .ok_or("VCF record has no position")?
-            .get() as u64;
-        let reference_bases = record.reference_bases();
-        for (alternate_index, alternate) in record.alternate_bases().as_ref().split(',').enumerate()
-        {
-            let canonical = canonicalize(
-                &mut reference,
-                record_chromosome,
-                position,
-                reference_bases,
-                alternate,
-            )
-            .map_err(|error| {
-                format!(
-                    "normalization failed at {record_chromosome}:{position}:{reference_bases}>{alternate}: {error}"
-                )
-            })?;
-            alleles.push(CanonicalInputAllele {
-                source_order: alleles.len(),
-                record_number,
-                alternate_index: alternate_index + 1,
-                original_chromosome: record_chromosome.to_string(),
-                original_position: position,
-                original_reference: reference_bases.to_string(),
-                original_alternate: alternate.to_string(),
-                canonical,
-            });
-        }
-    }
-    Ok(alleles)
 }
 
 pub fn check_normalization(
@@ -262,50 +181,6 @@ fn read_declared_assembly(path: &Path) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-pub fn split_and_trim(
-    chromosome: &str,
-    position: u64,
-    reference: &str,
-    alternates: &str,
-) -> Vec<VariantAllele> {
-    alternates
-        .split(',')
-        .enumerate()
-        .map(|(index, alternate)| {
-            let (position, reference, alternate) = trim_alleles(position, reference, alternate);
-            VariantAllele {
-                chromosome: chromosome
-                    .strip_prefix("chr")
-                    .unwrap_or(chromosome)
-                    .to_string(),
-                position,
-                reference,
-                alternate,
-                alternate_index: index + 1,
-            }
-        })
-        .collect()
-}
-
-fn trim_alleles(mut position: u64, reference: &str, alternate: &str) -> (u64, String, String) {
-    let mut reference = reference.as_bytes();
-    let mut alternate = alternate.as_bytes();
-    while reference.len() > 1 && alternate.len() > 1 && reference.last() == alternate.last() {
-        reference = &reference[..reference.len() - 1];
-        alternate = &alternate[..alternate.len() - 1];
-    }
-    while reference.len() > 1 && alternate.len() > 1 && reference.first() == alternate.first() {
-        reference = &reference[1..];
-        alternate = &alternate[1..];
-        position += 1;
-    }
-    (
-        position,
-        String::from_utf8_lossy(reference).into_owned(),
-        String::from_utf8_lossy(alternate).into_owned(),
-    )
-}
-
 fn is_sequence(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -321,40 +196,5 @@ fn assembly_name(value: &str) -> Option<String> {
         Some("GRCh37".into())
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_multiallelic_and_removes_chr_prefix() {
-        let values = split_and_trim("chr22", 100, "A", "C,G");
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[1].chromosome, "22");
-        assert_eq!(values[1].alternate_index, 2);
-    }
-
-    #[test]
-    fn trims_shared_sequence_without_empty_alleles() {
-        let values = split_and_trim("1", 100, "AC", "AT");
-        assert_eq!(
-            (
-                values[0].position,
-                values[0].reference.as_str(),
-                values[0].alternate.as_str()
-            ),
-            (101, "C", "T")
-        );
-        let deletion = split_and_trim("1", 100, "AT", "A");
-        assert_eq!(
-            (
-                deletion[0].position,
-                deletion[0].reference.as_str(),
-                deletion[0].alternate.as_str()
-            ),
-            (100, "AT", "A")
-        );
     }
 }

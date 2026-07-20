@@ -28,11 +28,7 @@ impl ReconnectingRangeReader {
         expected_etag: Option<&str>,
         expected_last_modified: Option<&str>,
     ) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()
-            .map_err(|error| format!("cannot create resumable preparation client: {error}"))?;
+        let client = crate::http_client::source()?;
         Ok(Self {
             client,
             source_url: source_url.into(),
@@ -123,18 +119,18 @@ impl Read for ReconnectingRangeReader {
         }
         let mut attempts = 0_u32;
         loop {
-            if self.response.is_none() {
-                if let Err(error) = self.open_response() {
-                    if attempts >= HTTP_RECONNECT_ATTEMPTS {
-                        return Err(std::io::Error::other(format!(
-                            "resumable range reconnect failed at source byte {}: {error}",
-                            self.current
-                        )));
-                    }
-                    self.reconnect(attempts);
-                    attempts += 1;
-                    continue;
+            if self.response.is_none()
+                && let Err(error) = self.open_response()
+            {
+                if attempts >= HTTP_RECONNECT_ATTEMPTS {
+                    return Err(std::io::Error::other(format!(
+                        "resumable range reconnect failed at source byte {}: {error}",
+                        self.current
+                    )));
                 }
+                self.reconnect(attempts);
+                attempts += 1;
+                continue;
             }
             let remaining = self.absolute_end - self.current + 1;
             let bounded = output.len().min(remaining as usize);

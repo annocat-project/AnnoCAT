@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "6e5ee0ca848d85bb16a6d5a1a6cb8ecb09c4541d",
-  "branch": "annocat/v0.1",
+  "commit": "ce3567e0336f306e2262117bc0b8302283186d2c",
+  "branch": "annocat/cache-build-performance",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
   "upstreamVersion": "0.2.0",
@@ -56,16 +56,32 @@
     {
       "commit": "6e5ee0ca848d85bb16a6d5a1a6cb8ecb09c4541d",
       "purpose": "Validate and retain configurable field subsets for ClinVar, dbSNP, gnomAD, phyloP, CADD, SpliceAI, and REVEL caches"
+    },
+    {
+      "commit": "a01b1b6f7a20dea84134b5bc887911423f8c5bc2",
+      "purpose": "Own raw indexed-source framing and multi-artifact merging in fastVEP while removing redundant cache-writer cloning and sorting"
+    },
+    {
+      "commit": "7237a47ddac5d57bfee46dce31506b134ede458f",
+      "purpose": "Ignore an incomplete trailing text row at BGZF range boundaries while preserving complete full-file inputs"
+    },
+    {
+      "commit": "0e328370765e24d909764e254b15fcedde482eaa",
+      "purpose": "Build all configurable supplementary caches with reusable input buffers, direct selected-field serialization, and overlapped ordered OSA compression"
+    },
+    {
+      "commit": "ce3567e0336f306e2262117bc0b8302283186d2c",
+      "purpose": "Parse stateless supplementary source rows in bounded ordered batches with a configurable one-to-four worker budget"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 6232576,
-    "sha256": "4a363e00891a31ea64db0734a973f1f0189b8cea8bf4af20ff7695420d94454f",
+    "sizeBytes": 6567424,
+    "sha256": "375bcc04173d648fe420b5b37152fd68031271bf99c24dbea6bbf8135c3a3385",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-07-18",
+  "reviewedOn": "2026-07-19",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested annocat/v0.1 fork commit. The release artifact supports bounded stdin streaming for dbNSFP, gnomAD, PhyloP, CADD, and REVEL, configurable validated supplementary field subsets, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
+  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
 }

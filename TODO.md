@@ -430,8 +430,8 @@ rewrite it; the schema-preserving importer must be incremental from its first re
       candidate AnnoCat catalog entries; do not promote them until availability, license,
       assembly, publisher checksum, byte size, schema, index requirements, and redistribution
       terms have been independently verified:
-  - [x] represent unverified single-file and chromosome-template resources through a
-        non-downloadable Rust candidate catalog and `/api/resources/catalog-candidates`;
+  - [x] keep unverified source URLs out of the runtime catalog; record them only in this
+        review list until their installer and release contracts are verified;
   - [ ] ClinVar GRCh38 VCF:
         `https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_bgzip/grch38/clinvar.vcf.gz`
         and index `https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_bgzip/grch38/clinvar.vcf.gz.tbi`;

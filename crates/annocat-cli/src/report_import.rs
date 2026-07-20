@@ -157,11 +157,11 @@ fn validate_manifest(
     entries: &BTreeMap<String, ArchiveEntry>,
 ) -> Result<(), String> {
     if manifest.package_format != "annocat-report" || manifest.package_version != 1 {
-        return Err("unsupported AnnoCat report package format".into());
+        return Err("unsupported AnnoCAT report package format".into());
     }
     if manifest.schema_version != 1 {
         return Err(format!(
-            "unsupported AnnoCat result schema version {}",
+            "unsupported AnnoCAT result schema version {}",
             manifest.schema_version
         ));
     }

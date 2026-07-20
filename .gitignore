@@ -31,6 +31,8 @@
 !/config/wgs-streams.json
 !/config/source-catalog.json
 !/config/source-overrides.example.json
+!/config/indexed-sources.json
+!/config/supplementary-source-fields.json
 *.vcf.gz
 *.tbi
 *.csi

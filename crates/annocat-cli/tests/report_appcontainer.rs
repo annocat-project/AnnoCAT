@@ -79,7 +79,7 @@ fn packaged_report_worker_validates_inside_appcontainer() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("Valid AnnoCat report: appcontainer-fixture (schema 1, 5 files")
+            .contains("Valid AnnoCAT report: appcontainer-fixture (schema 1, 5 files")
     );
     std::fs::remove_dir_all(root).unwrap();
 }

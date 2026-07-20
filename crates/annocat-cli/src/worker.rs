@@ -4,7 +4,7 @@ use std::path::Path;
 pub fn validate_report(path: &Path) -> Result<String, String> {
     use std::process::{Command, Stdio};
     let executable = std::env::current_exe()
-        .map_err(|error| format!("cannot locate AnnoCat executable: {error}"))?;
+        .map_err(|error| format!("cannot locate AnnoCAT executable: {error}"))?;
     let output = Command::new(executable)
         .arg("report-worker")
         .arg("validate")
@@ -90,14 +90,14 @@ mod appcontainer {
 
     pub fn validate_report(path: &Path) -> Result<String, String> {
         let application = std::env::current_exe()
-            .map_err(|error| format!("cannot locate AnnoCat executable: {error}"))?;
+            .map_err(|error| format!("cannot locate AnnoCAT executable: {error}"))?;
         let trusted_executable = application
             .parent()
-            .ok_or("cannot locate AnnoCat application directory")?
+            .ok_or("cannot locate AnnoCAT application directory")?
             .join("annocat-report-worker.exe");
         if !trusted_executable.is_file() {
             return Err(format!(
-                "AnnoCat report worker is missing: {}",
+                "AnnoCAT report worker is missing: {}",
                 trusted_executable.display()
             ));
         }
@@ -265,9 +265,9 @@ mod appcontainer {
         fn open_or_create() -> Result<Self, String> {
             let name = wide(std::ffi::OsStr::new(PROFILE_NAME));
             let mut sid = null_mut();
-            let display = wide(std::ffi::OsStr::new("AnnoCat report validator"));
+            let display = wide(std::ffi::OsStr::new("AnnoCAT report validator"));
             let description = wide(std::ffi::OsStr::new(
-                "Networkless sandbox for validating untrusted AnnoCat reports",
+                "Networkless sandbox for validating untrusted AnnoCAT reports",
             ));
             let created = unsafe {
                 CreateAppContainerProfile(
@@ -284,7 +284,7 @@ mod appcontainer {
                     unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
                 if retry < 0 {
                     return Err(format!(
-                        "cannot create the AnnoCat report AppContainer profile (HRESULT 0x{:08x})",
+                        "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
                         created as u32
                     ));
                 }

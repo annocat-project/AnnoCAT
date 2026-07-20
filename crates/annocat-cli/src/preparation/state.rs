@@ -117,7 +117,8 @@ pub(super) fn run_with_live_job(job: Arc<LivePreparationJob>, run: impl FnOnce()
         .ok()
         .and_then(|state| state.resource_id.clone())
         .unwrap_or_else(|| "unknown".into());
-    crate::terminal_log("prepare", format!("{resource_id} started"));
+    let title = crate::resource_task_title(&resource_id);
+    crate::terminal_log("resources", format!("{title} installation started"));
     CURRENT_LIVE_JOB.with(|current| *current.borrow_mut() = Some(job));
     run();
     let outcome = CURRENT_LIVE_JOB.with(|current| {
@@ -126,15 +127,22 @@ pub(super) fn run_with_live_job(job: Arc<LivePreparationJob>, run: impl FnOnce()
             .as_ref()
             .and_then(|job| job.state.lock().ok())
             .map(|state| {
-                let mut message = format!(
-                    "{resource_id} {} (phase={}, chromosomes={}/{})",
-                    state.state,
-                    state.phase,
-                    state.completed_chromosomes,
-                    state
-                        .completed_chromosomes
-                        .saturating_add(state.remaining_chromosomes)
-                );
+                let total = state
+                    .completed_chromosomes
+                    .saturating_add(state.remaining_chromosomes);
+                let progress = (total > 0).then(|| {
+                    format!(
+                        " after {}/{} chromosomes",
+                        state.completed_chromosomes, total
+                    )
+                });
+                let mut message = match state.state.as_str() {
+                    "ready" => format!("{title} installation completed"),
+                    "failed" => format!("{title} installation failed"),
+                    "cancelled" => format!("{title} installation cancelled"),
+                    state => format!("{title} installation {state}"),
+                };
+                message.push_str(progress.as_deref().unwrap_or_default());
                 if let Some(error) = &state.error {
                     message.push_str(&format!(": {error}"));
                 }
@@ -142,8 +150,9 @@ pub(super) fn run_with_live_job(job: Arc<LivePreparationJob>, run: impl FnOnce()
             })
     });
     if let Some(outcome) = outcome {
-        crate::terminal_log("prepare", outcome);
+        crate::terminal_log("resources", outcome);
     }
+    crate::install_queue::finish(&resource_id);
     CURRENT_LIVE_JOB.with(|current| *current.borrow_mut() = None);
 }
 
@@ -193,6 +202,7 @@ pub fn record_start_failure(
     error: impl Into<String>,
     expected_network_bytes: u64,
 ) {
+    crate::install_queue::finish(resource_id);
     let error = error.into();
     let job = Arc::new(LivePreparationJob {
         state: Arc::new(Mutex::new(LivePreparationState {

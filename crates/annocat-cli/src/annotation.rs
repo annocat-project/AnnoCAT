@@ -85,7 +85,7 @@ fn state() -> &'static Mutex<State> {
 fn idle_state() -> State {
     State {
         state: "idle",
-        phase: "Waiting",
+        phase: "waiting",
         detail: "No annotation run is active".into(),
         run_id: None,
         name: None,
@@ -184,7 +184,7 @@ pub fn start_batch_background(
                 Err(error) => {
                     if let Ok(mut current) = state().lock() {
                         current.state = "failed";
-                        current.phase = "Failed";
+                        current.phase = "failed";
                         current.detail = format!(
                             "Sequential batch stopped before file {} of {total}",
                             index + 1
@@ -253,7 +253,7 @@ fn start_background_inner(
         }
         *current = State {
             state: "running",
-            phase: "Queued",
+            phase: "queued",
             detail: "Validating the input VCF".into(),
             run_id: Some(run_id.clone()),
             name: Some(name.clone()),
@@ -303,7 +303,7 @@ fn start_background_inner(
                         format!("{run_id} completed: {records} variants, {bytes} bytes"),
                     );
                     current.state = "completed";
-                    current.phase = "Completed";
+                    current.phase = "completed";
                     current.detail = format!("Published {records} canonical variants");
                     current.records = Some(records);
                     current.output_bytes = bytes;
@@ -313,7 +313,7 @@ fn start_background_inner(
                 Err(error) if error == "cancelled" => {
                     crate::terminal_log("annotation", format!("{run_id} cancelled"));
                     current.state = "cancelled";
-                    current.phase = "Cancelled";
+                    current.phase = "cancelled";
                     current.detail = "Annotation cancelled; partial result discarded".into();
                     current.cancel_requested = false;
                     current.error = None;
@@ -321,7 +321,7 @@ fn start_background_inner(
                 Err(error) => {
                     crate::terminal_log("annotation", format!("{run_id} failed: {error}"));
                     current.state = "failed";
-                    current.phase = "Failed";
+                    current.phase = "failed";
                     current.detail = "Annotation did not produce a publishable result".into();
                     current.cancel_requested = false;
                     current.error = Some(error);
@@ -390,7 +390,7 @@ fn execute(
     final_directory: &Path,
 ) -> Result<(u64, u64), String> {
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
-    set_phase("Validating", "Validating the complete input VCF");
+    set_phase("validating", "Validating the complete input VCF");
     let input_summary = annocat_core::vcf::inspect(&request.input)?;
     if input_summary.records == 0 {
         return fail_staging(staging, "input VCF contains no variant records".into());
@@ -403,7 +403,7 @@ fn execute(
         return fail_staging(
             staging,
             format!(
-                "input declares {0}; AnnoCat currently requires GRCh38",
+                "input declares {0}; AnnoCAT currently requires GRCh38",
                 input_summary.assembly.unwrap()
             ),
         );
@@ -427,7 +427,7 @@ fn execute(
         File::create(staging.join("fastvep.stderr.log")).map_err(|error| error.to_string())?;
     let (provider_directory, source_bindings) =
         compose_provider_set(resources, run_id, &request.source_ids)?;
-    set_phase("Annotating", "fastVEP is annotating variants");
+    set_phase("annotating", "fastVEP is annotating variants");
     let mut command = Command::new(executable);
     command
         .arg("annotate")
@@ -498,7 +498,7 @@ fn execute(
         );
     }
     set_phase(
-        "Verifying",
+        "verifying",
         "Checking record counts and the dynamic CSQ schema",
     );
     let output_summary = super::csq::inspect(&output)
@@ -521,7 +521,7 @@ fn execute(
             ),
         );
     }
-    set_phase("Indexing", "Building the typed, paged Parquet result");
+    set_phase("indexing", "Building the typed, paged Parquet result");
     let parquet = staging.join("variants.parquet");
     let temporary_database = staging.join("result-build.duckdb");
     let canonical =

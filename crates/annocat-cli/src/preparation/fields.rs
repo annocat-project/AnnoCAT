@@ -259,9 +259,11 @@ fn supplementary_field_contract(resource_id: &str) -> Result<serde_json::Value, 
         .ok_or_else(|| format!("resource '{resource_id}' has no configurable field contract"))
 }
 
+type SupplementaryContractFields = (Vec<String>, Vec<String>, Vec<String>);
+
 fn supplementary_contract_fields(
     contract: &serde_json::Value,
-) -> Result<(Vec<String>, Vec<String>, Vec<String>), String> {
+) -> Result<SupplementaryContractFields, String> {
     let mut allowed = Vec::new();
     let mut defaults = Vec::new();
     let mut required = Vec::new();

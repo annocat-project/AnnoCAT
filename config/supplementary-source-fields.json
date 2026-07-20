@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "resourceId": "clinvar",
+      "contractId": "clinvar-fastvep-fields-v1",
+      "groups": [
+        {
+          "id": "current",
+          "label": "Current AnnoCat fields",
+          "default": true,
+          "fields": [
+            "significance", "reviewStatus", "phenotypes", "variantClass", "soAccession",
+            "afExac", "afTgp", "afEsp"
+          ]
+        },
+        {
+          "id": "additional",
+          "label": "Additional ClinVar fields",
+          "default": false,
+          "fields": [
+            "geneInfo", "diseaseDatabases", "molecularConsequences", "origin",
+            "conflictingSignificance"
+          ]
+        }
+      ]
+    },
+    {
+      "resourceId": "dbsnp",
+      "contractId": "dbsnp-fastvep-fields-v1",
+      "groups": [
+        { "id": "current", "label": "Current AnnoCat fields", "default": true, "fields": ["id", "globalMaf"] },
+        { "id": "additional", "label": "Additional dbSNP fields", "default": false, "fields": ["variantType", "common"] }
+      ]
+    },
+    {
+      "resourceId": "gnomad",
+      "contractId": "gnomad-fastvep-fields-v1",
+      "groups": [
+        {
+          "id": "current",
+          "label": "Current frequency fields",
+          "default": true,
+          "fields": [
+            "allAf", "allAn", "allAc", "allHc", "afrAf", "amrAf", "asjAf", "easAf",
+            "finAf", "midAf", "nfeAf", "othAf", "remainingAf", "sasAf"
+          ]
+        },
+        {
+          "id": "additional",
+          "label": "Additional filtering fields",
+          "default": false,
+          "fields": ["filters", "faf95", "faf99", "grpmaxAf", "grpmaxPopulation"]
+        }
+      ]
+    },
+    {
+      "resourceId": "gnomad-genomes",
+      "contractId": "gnomad-genomes-fastvep-fields-v1",
+      "groups": [
+        {
+          "id": "current",
+          "label": "Current frequency fields",
+          "default": true,
+          "fields": [
+            "allAf", "allAn", "allAc", "allHc", "afrAf", "amrAf", "asjAf", "easAf",
+            "finAf", "midAf", "nfeAf", "othAf", "remainingAf", "sasAf"
+          ]
+        },
+        {
+          "id": "additional",
+          "label": "Additional filtering fields",
+          "default": false,
+          "fields": ["filters", "faf95", "faf99", "grpmaxAf", "grpmaxPopulation"]
+        }
+      ]
+    },
+    {
+      "resourceId": "phylop",
+      "contractId": "phylop-fastvep-fields-v1",
+      "groups": [
+        { "id": "score", "label": "Conservation score", "default": true, "required": true, "fields": ["score"] }
+      ]
+    },
+    {
+      "resourceId": "cadd",
+      "contractId": "cadd-fastvep-fields-v1",
+      "groups": [
+        { "id": "scores", "label": "CADD scores", "default": true, "fields": ["raw", "phred"] }
+      ]
+    },
+    {
+      "resourceId": "spliceai",
+      "contractId": "spliceai-fastvep-fields-v1",
+      "groups": [
+        {
+          "id": "predictions",
+          "label": "SpliceAI predictions",
+          "default": true,
+          "fields": ["gene", "dsAg", "dsAl", "dsDg", "dsDl", "dpAg", "dpAl", "dpDg", "dpDl"]
+        }
+      ]
+    },
+    {
+      "resourceId": "revel",
+      "contractId": "revel-fastvep-fields-v1",
+      "groups": [
+        { "id": "current", "label": "Current AnnoCat fields", "default": true, "fields": ["score", "transcriptId"] },
+        { "id": "additional", "label": "Additional amino-acid fields", "default": false, "fields": ["aaRef", "aaAlt"] }
+      ]
+    }
+  ]
+}

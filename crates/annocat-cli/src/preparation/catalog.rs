@@ -74,6 +74,15 @@ pub struct RevelArchiveManifest {
     pub archives: Vec<RevelArchive>,
 }
 
+impl RevelArchiveManifest {
+    pub fn archive_url(&self, filename: &str) -> String {
+        format!(
+            "{}/files/{filename}/content",
+            self.record_url.replace("/records/", "/api/records/")
+        )
+    }
+}
+
 pub fn pinned_revel_manifest() -> Result<RevelArchiveManifest, String> {
     let manifest: RevelArchiveManifest =
         serde_json::from_str(include_str!("../../../../config/revel-1.3-archives.json"))
@@ -83,7 +92,7 @@ pub fn pinned_revel_manifest() -> Result<RevelArchiveManifest, String> {
         || manifest.resource_id != "revel"
         || manifest.release != "1.3"
         || manifest.assembly != "GRCh38"
-        || manifest.record_url != "https://zenodo.org/records/7072866"
+        || !manifest.record_url.starts_with("https://")
         || manifest.archives.len() != expected.len()
         || manifest
             .archives
@@ -138,50 +147,9 @@ pub fn pinned_sharded_source(resource_id: &str) -> Result<PinnedShardedSource, S
             "pinned {resource_id} chromosome stream metadata is invalid"
         ));
     }
-    match resource_id {
-        "gnomad"
-            if source.release == "4.1.1-exomes"
-                && source.source_type == "gnomad"
-                && source
-                    .shards
-                    .iter()
-                    .map(|shard| shard.compressed_bytes)
-                    .sum::<u64>()
-                    == 199_241_266_182
-                && source.shards.iter().all(|shard| {
-                    shard.url.starts_with(
-                    "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1.1/vcf/exomes/",
-                )
-                }) => {}
-        "gnomad-genomes"
-            if source.release == "4.1.1-genomes"
-                && source.source_type == "gnomad"
-                && source
-                    .shards
-                    .iter()
-                    .map(|shard| shard.compressed_bytes)
-                    .sum::<u64>()
-                    == 565_643_483_329
-                && source.shards.iter().all(|shard| {
-                    shard.url.starts_with(
-                    "https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1.1/vcf/genomes/",
-                )
-                }) => {}
-        "phylop"
-            if source.release == "hg38-100way-2015-05-08"
-                && source.source_type == "phylop"
-                && source
-                    .shards
-                    .iter()
-                    .map(|shard| shard.compressed_bytes)
-                    .sum::<u64>()
-                    == 5_452_453_066
-                && source.shards.iter().all(|shard| {
-                    shard.url.starts_with(
-                        "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/phyloP100way/",
-                    )
-                }) => {}
-        _ => return Err(format!("pinned {resource_id} stream identity is invalid")),
+    match (resource_id, source.source_type.as_str()) {
+        ("gnomad" | "gnomad-genomes", "gnomad") | ("phylop", "phylop") => {}
+        _ => return Err(format!("pinned {resource_id} stream type is invalid")),
     }
     Ok(source)
 }
@@ -193,8 +161,7 @@ pub fn pinned_dbnsfp_manifest() -> Result<DbnsfpPinnedManifest, String> {
     if manifest.schema_version != 1
         || manifest.resource_id != "dbnsfp"
         || manifest.release != "4.9a"
-        || manifest.archive_url
-            != "https://usf.box.com/shared/static/0tq7q3b8ucaxxkmfyvnb0ss7g58ptgcl"
+        || !manifest.archive_url.starts_with("https://")
         || manifest.archive_bytes != 38_969_753_349
         || !manifest
             .archive_md5

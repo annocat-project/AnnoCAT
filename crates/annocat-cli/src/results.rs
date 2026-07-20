@@ -1,6 +1,6 @@
 use duckdb::types::Value as SqlValue;
 use duckdb::{Connection, params, params_from_iter};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -9,6 +9,31 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 pub const SCHEMA_VERSION: i32 = 1;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResultPage {
+    schema_version: i32,
+    offset: u64,
+    limit: u64,
+    total: i64,
+    search: String,
+    sort: String,
+    direction: String,
+    rows: Vec<Value>,
+}
+
+#[derive(Clone, Copy)]
+struct PageQuery<'a> {
+    variants: &'a Path,
+    consequences: Option<&'a Path>,
+    evidence: Option<&'a Path>,
+    catalog: Option<&'a Path>,
+    offset: u64,
+    limit: u64,
+    request: &'a PageRequest,
+    candidate_ids: Option<&'a [String]>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalSummary {
@@ -67,6 +92,8 @@ pub struct PageRequest {
     pub evidence_filters: Vec<EvidenceFilterRequest>,
     #[serde(default)]
     pub filter_rules: Vec<CoreFilterRuleRequest>,
+    #[serde(default)]
+    pub excluded_allele_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -859,6 +886,34 @@ fn core_filter_rules_sql(request: &PageRequest) -> Result<(String, Vec<SqlValue>
     Ok((sql, parameters))
 }
 
+fn excluded_alleles_sql(request: &PageRequest) -> Result<(String, Vec<SqlValue>), String> {
+    if request.excluded_allele_ids.len() > 10_000 {
+        return Err("at most 10,000 individually deselected variants are supported".into());
+    }
+    if request.excluded_allele_ids.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    let mut seen = HashSet::new();
+    let mut parameters = Vec::with_capacity(request.excluded_allele_ids.len());
+    for allele_id in &request.excluded_allele_ids {
+        let allele_id = bounded_page_text(allele_id, "excluded allele ID", 200)?;
+        if allele_id.is_empty() {
+            return Err("excluded allele IDs cannot be empty".into());
+        }
+        if seen.insert(allele_id) {
+            parameters.push(allele_id.to_owned().into());
+        }
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(parameters.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok((
+        format!(" AND v.allele_id NOT IN ({placeholders})"),
+        parameters,
+    ))
+}
+
 const CORE_PAGE_WHERE_SQL: &str =
     "(? = '' OR contains(lower(concat_ws(' ', chromosome, position::VARCHAR,
              reference, alternate, coalesce(variant_id, ''), coalesce(gene_symbol, ''),
@@ -1021,11 +1076,38 @@ fn page_json_internal(
     request: &PageRequest,
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let query = PageQuery {
+        variants: parquet,
+        consequences: None,
+        evidence,
+        catalog,
+        offset,
+        limit,
+        request,
+        candidate_ids,
+    };
+    serde_json::to_string(&page_result_internal(&connection, &query)?)
+        .map_err(|error| error.to_string())
+}
+
+fn page_result_internal(
+    connection: &Connection,
+    query: &PageQuery<'_>,
+) -> Result<ResultPage, String> {
+    let parquet = query.variants;
+    let evidence = query.evidence;
+    let catalog = query.catalog;
+    let offset = query.offset;
+    let limit = query.limit;
+    let request = query.request;
+    let candidate_ids = query.candidate_ids;
     let limit = limit.clamp(1, 500);
     let core_filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, catalog, request)?;
+    let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
     let (sort_key, sort_expression, sort_params) = page_sort_sql(evidence, catalog, request)?;
     let direction = match request.direction.trim().to_ascii_lowercase().as_str() {
         "" | "asc" => "ASC",
@@ -1035,38 +1117,36 @@ fn page_json_internal(
     let candidate_sql = candidate_ids
         .map(|_| " AND v.allele_id IN (SELECT allele_id FROM candidate_alleles)")
         .unwrap_or_default();
-    let where_sql =
-        format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{candidate_sql}");
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let where_sql = format!(
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}{candidate_sql}"
+    );
     if let Some(candidate_ids) = candidate_ids {
         connection
             .execute_batch("CREATE TEMP TABLE candidate_alleles(allele_id VARCHAR PRIMARY KEY)")
             .map_err(|error| format!("cannot create candidate query table: {error}"))?;
-        let mut insert = connection
-            .prepare("INSERT OR IGNORE INTO candidate_alleles VALUES (?)")
-            .map_err(|error| format!("cannot prepare candidate query: {error}"))?;
-        for allele_id in candidate_ids {
-            insert
-                .execute(params![allele_id])
-                .map_err(|error| format!("cannot bind candidate query: {error}"))?;
+        if !candidate_ids.is_empty() {
+            let placeholders = std::iter::repeat_n("(?)", candidate_ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let values = candidate_ids
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<SqlValue>>();
+            connection
+                .execute(
+                    &format!("INSERT OR IGNORE INTO candidate_alleles VALUES {placeholders}"),
+                    params_from_iter(values.iter()),
+                )
+                .map_err(|error| format!("cannot populate candidate query: {error}"))?;
         }
     }
     let path = parquet.to_string_lossy();
-    let mut count_params = core_page_params(path.as_ref(), request, &core_filters);
-    count_params.extend(core_rule_params.iter().cloned());
-    count_params.extend(evidence_rule_params.iter().cloned());
-    let total: i64 = connection
-        .query_row(
-            &format!("SELECT count(*) FROM read_parquet(?) v WHERE {where_sql}"),
-            params_from_iter(count_params.iter()),
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("cannot count result rows: {error}"))?;
     let mut statement = connection
         .prepare(&format!(
             "SELECT allele_id, chromosome, position, reference, alternate, variant_id,
                     quality, filter, gene_symbol, gene_id, transcript_id, consequence,
-                    impact, canonical, mane_select
+                    impact, canonical, mane_select, count(*) OVER()
              FROM read_parquet(?) v
              WHERE {where_sql}
              ORDER BY {sort_expression} {direction} NULLS LAST, record_number ASC, alt_index ASC
@@ -1076,44 +1156,49 @@ fn page_json_internal(
     let mut select_params = core_page_params(path.as_ref(), request, &core_filters);
     select_params.extend(core_rule_params);
     select_params.extend(evidence_rule_params);
+    select_params.extend(excluded_params);
     select_params.extend(sort_params);
     select_params.push((limit as i64).into());
     select_params.push((offset as i64).into());
     let mapped = statement
         .query_map(params_from_iter(select_params.iter()), |row| {
-            Ok(json!({
-                "alleleId": row.get::<_, String>(0)?,
-                "chromosome": row.get::<_, String>(1)?,
-                "position": row.get::<_, i64>(2)?,
-                "reference": row.get::<_, String>(3)?,
-                "alternate": row.get::<_, String>(4)?,
-                "variantId": row.get::<_, Option<String>>(5)?,
-                "quality": row.get::<_, Option<f64>>(6)?,
-                "filter": row.get::<_, String>(7)?,
-                "geneSymbol": row.get::<_, Option<String>>(8)?,
-                "geneId": row.get::<_, Option<String>>(9)?,
-                "transcriptId": row.get::<_, Option<String>>(10)?,
-                "consequence": row.get::<_, Option<String>>(11)?,
-                "impact": row.get::<_, Option<String>>(12)?,
-                "canonical": row.get::<_, bool>(13)?,
-                "maneSelect": row.get::<_, Option<String>>(14)?,
-            }))
+            Ok((
+                json!({
+                    "alleleId": row.get::<_, String>(0)?,
+                    "chromosome": row.get::<_, String>(1)?,
+                    "position": row.get::<_, i64>(2)?,
+                    "reference": row.get::<_, String>(3)?,
+                    "alternate": row.get::<_, String>(4)?,
+                    "variantId": row.get::<_, Option<String>>(5)?,
+                    "quality": row.get::<_, Option<f64>>(6)?,
+                    "filter": row.get::<_, String>(7)?,
+                    "geneSymbol": row.get::<_, Option<String>>(8)?,
+                    "geneId": row.get::<_, Option<String>>(9)?,
+                    "transcriptId": row.get::<_, Option<String>>(10)?,
+                    "consequence": row.get::<_, Option<String>>(11)?,
+                    "impact": row.get::<_, Option<String>>(12)?,
+                    "canonical": row.get::<_, bool>(13)?,
+                    "maneSelect": row.get::<_, Option<String>>(14)?,
+                }),
+                row.get::<_, i64>(15)?,
+            ))
         })
         .map_err(|error| format!("cannot read result page: {error}"))?;
     let rows = mapped
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    serde_json::to_string(&json!({
-        "schemaVersion": SCHEMA_VERSION,
-        "offset": offset,
-        "limit": limit,
-        "total": total,
-        "search": core_filters.search,
-        "sort": sort_key,
-        "direction": direction.to_ascii_lowercase(),
-        "rows": rows
-    }))
-    .map_err(|error| error.to_string())
+    let total = rows.first().map(|row| row.1).unwrap_or(0);
+    let rows = rows.into_iter().map(|row| row.0).collect();
+    Ok(ResultPage {
+        schema_version: SCHEMA_VERSION,
+        offset,
+        limit,
+        total,
+        search: core_filters.search,
+        sort: sort_key,
+        direction: direction.to_ascii_lowercase(),
+        rows,
+    })
 }
 
 #[derive(Clone)]
@@ -1266,37 +1351,44 @@ fn page_json_with_evidence_internal(
     request: &PageRequest,
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let query = PageQuery {
+        variants,
+        consequences: None,
+        evidence,
+        catalog,
+        offset,
+        limit,
+        request,
+        candidate_ids,
+    };
+    serde_json::to_string(&page_with_evidence_result(&connection, &query)?)
+        .map_err(|error| error.to_string())
+}
+
+fn page_with_evidence_result(
+    connection: &Connection,
+    query: &PageQuery<'_>,
+) -> Result<ResultPage, String> {
+    let evidence = query.evidence;
+    let catalog = query.catalog;
+    let request = query.request;
     if request.evidence_columns.is_empty() {
-        return page_json_internal(
-            variants,
-            evidence,
-            catalog,
-            offset,
-            limit,
-            request,
-            candidate_ids,
-        );
+        return page_result_internal(connection, query);
     }
     let evidence = evidence.ok_or("this report has no evidence table")?;
     let catalog = catalog.ok_or("this report has no field catalog")?;
     let selected = selected_evidence_columns(catalog, &request.evidence_columns)?;
     let mut core_request = request.clone();
     core_request.evidence_columns.clear();
-    let mut page: Value = serde_json::from_str(&page_json_internal(
-        variants,
-        Some(evidence),
-        Some(catalog),
-        offset,
-        limit,
-        &core_request,
-        candidate_ids,
-    )?)
-    .map_err(|error| error.to_string())?;
-    let rows = page["rows"]
-        .as_array_mut()
-        .ok_or("result page rows are not an array")?;
+    let core_query = PageQuery {
+        request: &core_request,
+        ..*query
+    };
+    let mut page = page_result_internal(connection, &core_query)?;
+    let rows = &mut page.rows;
     if rows.is_empty() {
-        return serde_json::to_string(&page).map_err(|error| error.to_string());
+        return Ok(page);
     }
     let allele_ids = rows
         .iter()
@@ -1350,7 +1442,6 @@ fn page_json_with_evidence_internal(
             )
         })
         .collect::<HashMap<_, _>>();
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| format!("cannot prepare evidence columns: {error}"))?;
@@ -1424,7 +1515,8 @@ fn page_json_with_evidence_internal(
         }
         row["evidence"] = Value::Object(object);
     }
-    serde_json::to_string(&page).map_err(|error| error.to_string())
+    drop(statement);
+    Ok(page)
 }
 
 pub fn page_json_with_details(
@@ -1436,7 +1528,7 @@ pub fn page_json_with_details(
     limit: u64,
     request: &PageRequest,
 ) -> Result<String, String> {
-    page_json_with_details_internal(
+    page_json_with_details_query(PageQuery {
         variants,
         consequences,
         evidence,
@@ -1444,10 +1536,11 @@ pub fn page_json_with_details(
         offset,
         limit,
         request,
-        None,
-    )
+        candidate_ids: None,
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn page_json_with_details_for_candidates(
     variants: &Path,
     consequences: Option<&Path>,
@@ -1458,7 +1551,7 @@ pub fn page_json_with_details_for_candidates(
     request: &PageRequest,
     candidate_ids: &[String],
 ) -> Result<String, String> {
-    page_json_with_details_internal(
+    page_json_with_details_query(PageQuery {
         variants,
         consequences,
         evidence,
@@ -1466,36 +1559,17 @@ pub fn page_json_with_details_for_candidates(
         offset,
         limit,
         request,
-        Some(candidate_ids),
-    )
+        candidate_ids: Some(candidate_ids),
+    })
 }
 
-fn page_json_with_details_internal(
-    variants: &Path,
-    consequences: Option<&Path>,
-    evidence: Option<&Path>,
-    catalog: Option<&Path>,
-    offset: u64,
-    limit: u64,
-    request: &PageRequest,
-    candidate_ids: Option<&[String]>,
-) -> Result<String, String> {
-    let mut page: Value = serde_json::from_str(&page_json_with_evidence_internal(
-        variants,
-        evidence,
-        catalog,
-        offset,
-        limit,
-        request,
-        candidate_ids,
-    )?)
-    .map_err(|error| error.to_string())?;
-    let Some(consequences) = consequences else {
+fn page_json_with_details_query(query: PageQuery<'_>) -> Result<String, String> {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let mut page = page_with_evidence_result(&connection, &query)?;
+    let Some(consequences) = query.consequences else {
         return serde_json::to_string(&page).map_err(|error| error.to_string());
     };
-    let rows = page["rows"]
-        .as_array_mut()
-        .ok_or("result page rows are not an array")?;
+    let rows = &mut page.rows;
     if rows.is_empty() {
         return serde_json::to_string(&page).map_err(|error| error.to_string());
     }
@@ -1519,7 +1593,6 @@ fn page_json_with_details_internal(
     let mut parameters = Vec::<SqlValue>::new();
     parameters.push(consequences.to_string_lossy().into_owned().into());
     parameters.extend(wanted.keys().cloned().map(Into::into));
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| format!("cannot prepare selected transcript columns: {error}"))?;
@@ -1644,7 +1717,9 @@ pub fn export_filtered_rows_with_details(
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, catalog, request)?;
-    let where_sql = format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}");
+    let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
+    let where_sql =
+        format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}");
     let requested = export_columns(columns)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let path = parquet.to_string_lossy();
@@ -1659,6 +1734,7 @@ pub fn export_filtered_rows_with_details(
     let mut params = core_page_params(path.as_ref(), request, &filters);
     params.extend(core_rule_params);
     params.extend(evidence_rule_params);
+    params.extend(excluded_params);
     let mut rows = statement
         .query(params_from_iter(params.iter()))
         .map_err(|error| format!("cannot read filtered rows: {error}"))?;
@@ -1727,7 +1803,9 @@ pub fn export_filtered_genes_with_details(
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, catalog, request)?;
-    let where_sql = format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}");
+    let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
+    let where_sql =
+        format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}");
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let path = parquet.to_string_lossy();
     let mut statement = connection
@@ -1741,6 +1819,7 @@ pub fn export_filtered_genes_with_details(
     let mut params = core_page_params(path.as_ref(), request, &filters);
     params.extend(core_rule_params);
     params.extend(evidence_rule_params);
+    params.extend(excluded_params);
     let mut rows = statement
         .query(params_from_iter(params.iter()))
         .map_err(|error| format!("cannot read filtered genes: {error}"))?;
@@ -2654,6 +2733,32 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(genes).unwrap(), "GENE_G\n");
         let allele = page["rows"][1]["alleleId"].as_str().unwrap();
+        let excluded_request = PageRequest {
+            impact: "HIGH".into(),
+            excluded_allele_ids: vec![allele.into()],
+            ..PageRequest::default()
+        };
+        let excluded_csv = root.join("excluded.csv");
+        assert_eq!(
+            export_filtered_rows(
+                &parquet,
+                &excluded_csv,
+                &excluded_request,
+                &["chromosome".into(), "alternate".into(), "gene".into()],
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            fs::read_to_string(excluded_csv).unwrap(),
+            "\u{feff}\"Chr\",\"Alt\",\"Gene\"\r\n"
+        );
+        let excluded_genes = root.join("excluded-genes.txt");
+        assert_eq!(
+            export_filtered_genes(&parquet, &excluded_genes, &excluded_request).unwrap(),
+            0
+        );
+        assert_eq!(fs::read_to_string(excluded_genes).unwrap(), "\n");
         let detail: Value =
             serde_json::from_str(&complete_detail_json(&parquet, None, None, allele).unwrap())
                 .unwrap();

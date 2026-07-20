@@ -119,7 +119,7 @@ pub fn start_background(downloads: PathBuf, resources: PathBuf) -> Result<(), St
                     s.state = "ready";
                     s.completed = s.total;
                     s.detail = "Indexed GRCh38 reference ready".into();
-                    println!("[reference] GRCh38 preparation complete");
+                    crate::terminal_log("resources", "GRCh38 reference installed");
                 }
                 Err(e) if e == "cancelled" => {
                     s.state = "cancelled";
@@ -128,7 +128,7 @@ pub fn start_background(downloads: PathBuf, resources: PathBuf) -> Result<(), St
                 Err(e) => {
                     s.state = "failed";
                     s.error = Some(e.clone());
-                    eprintln!("[reference] preparation failed: {e}");
+                    crate::terminal_log("resources", format!("GRCh38 installation failed: {e}"));
                 }
             }
         }
@@ -163,7 +163,7 @@ pub fn status(downloads: &Path, resources: &Path) -> ReferenceStatus {
     if is_ready(resources) {
         return ReferenceStatus {
             state: "ready".into(),
-            phase: "Ready".into(),
+            phase: "ready".into(),
             completed_bytes: 1,
             total_bytes: 1,
             percent: 100.0,
@@ -191,7 +191,7 @@ pub fn status(downloads: &Path, resources: &Path) -> ReferenceStatus {
     };
     ReferenceStatus {
         state: effective.into(),
-        phase: "Preparing reference".into(),
+        phase: "preparing-reference".into(),
         completed_bytes: s.completed,
         total_bytes: s.total,
         percent,

@@ -62,8 +62,11 @@ pub struct Readiness {
 }
 
 pub fn readiness() -> Readiness {
-    let home = super::portable_home().ok();
-    readiness_with(home.as_deref(), std::env::var_os("ANNOCAT_FASTVEP"))
+    static READINESS: LazyLock<Readiness> = LazyLock::new(|| {
+        let home = super::portable_home().ok();
+        readiness_with(home.as_deref(), std::env::var_os("ANNOCAT_FASTVEP"))
+    });
+    READINESS.clone()
 }
 
 fn readiness_with(home: Option<&Path>, configured: Option<std::ffi::OsString>) -> Readiness {
@@ -162,7 +165,7 @@ fn readiness_with(home: Option<&Path>, configured: Option<std::ffi::OsString>) -
         sha256: None,
         expected_sha256,
         managed: true,
-        next_action: "Install a pinned fastVEP Windows binary into AnnoCat's tools directory",
+        next_action: "Install a pinned fastVEP Windows binary into AnnoCAT's tools directory",
     }
 }
 

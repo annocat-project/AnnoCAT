@@ -292,7 +292,8 @@
         "rangeResume": true,
         "sizeCheckedAt": "2026-07-15T20:28:20-04:00",
         "checksum": {"algorithm": "md5", "value": "f78d25d49e17a070957a127e409f87b9"},
-        "resolver": "ncbi-clinvar-primary-grch38"
+        "resolver": "ncbi-clinvar-primary-grch38",
+        "resolverDirectoryUrl": "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/"
       }
     },
     {
@@ -316,7 +317,9 @@
         "rangeResume": true,
         "sizeCheckedAt": "2026-07-16T00:00:00-04:00",
         "checksum": {"algorithm": "md5", "value": "6a6f313e92a39c337571174dad12cfe1"},
-        "resolver": "ncbi-dbsnp-primary-grch38"
+        "resolver": "ncbi-dbsnp-primary-grch38",
+        "resolverDirectoryUrl": "https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/",
+        "resolverNotesUrl": "https://ftp.ncbi.nlm.nih.gov/snp/latest_release/release_notes.txt"
       }
     },
     {

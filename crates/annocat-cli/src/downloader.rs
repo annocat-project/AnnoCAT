@@ -20,6 +20,8 @@ struct JobState {
     state: &'static str,
     phase: &'static str,
     downloaded: u64,
+    started_at: Instant,
+    started_bytes: u64,
     error: Option<String>,
 }
 
@@ -116,7 +118,10 @@ pub fn start_background(release: ResourceRelease, root: PathBuf) -> Result<(), S
         }
         drop(pending);
         persist_queue(&root)?;
-        println!("[resources] {} queued", release.resource_id);
+        crate::terminal_log(
+            "resources",
+            format!("{} queued", crate::resource_task_title(release.resource_id)),
+        );
         return Ok(());
     }
     begin_job(&release, &root)?;
@@ -151,6 +156,8 @@ fn begin_job(release: &ResourceRelease, root: &Path) -> Result<(), String> {
                     "downloading"
                 },
                 downloaded: if validating { 0 } else { partial_bytes },
+                started_at: Instant::now(),
+                started_bytes: if validating { 0 } else { partial_bytes },
                 error: None,
             },
         );
@@ -165,15 +172,16 @@ fn begin_job(release: &ResourceRelease, root: &Path) -> Result<(), String> {
 
 fn spawn_job(release: ResourceRelease, root: PathBuf) {
     std::thread::spawn(move || {
+        let title = crate::resource_task_title(release.resource_id);
         let result = download_release_controlled(&release, &root, true);
         if let Ok(mut states) = jobs().lock()
             && let Some(state) = states.get_mut(release.resource_id)
         {
             match result {
                 Ok(()) => {
-                    println!(
-                        "[resources] {} download completed and validated",
-                        release.resource_id
+                    crate::terminal_log(
+                        "resources",
+                        format!("{title} download completed and verified"),
                     );
                     state.state = "complete";
                     state.phase = "complete";
@@ -187,27 +195,24 @@ fn spawn_job(release: ResourceRelease, root: PathBuf) {
                             holds.remove(release.resource_id);
                         }
                         remove_download_files(&root, &release);
-                        println!(
-                            "[resources] {} download cancelled and removed",
-                            release.resource_id
+                        crate::terminal_log(
+                            "resources",
+                            format!("{title} download cancelled and local parts removed"),
                         );
                         state.state = "cancelled";
                         state.phase = "cancelled";
                         state.downloaded = 0;
                     } else {
-                        println!(
-                            "[resources] {} download paused; partial file preserved",
-                            release.resource_id
+                        crate::terminal_log(
+                            "resources",
+                            format!("{title} download paused; partial data retained"),
                         );
                         state.state = "paused";
                         state.phase = "paused";
                     }
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[resources] {} download failed: {error}",
-                        release.resource_id
-                    );
+                    crate::terminal_log("resources", format!("{title} download failed: {error}"));
                     state.state = "failed";
                     state.phase = "failed";
                     state.error = Some(error);
@@ -231,9 +236,7 @@ pub fn cancel_resource(resource_id: &str, root: &Path) -> bool {
         })
         .unwrap_or(false);
     if active {
-        if let Some(id) = annocat_core::RESOURCE_RELEASES
-            .iter()
-            .find(|release| release.resource_id == resource_id)
+        if let Some(id) = annocat_core::source_catalog::download_release(resource_id)
             .map(|release| release.resource_id)
             && let Ok(mut requests) = cancelled().lock()
         {
@@ -269,9 +272,7 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
         })
         .unwrap_or(false);
     if active {
-        if let Some(id) = annocat_core::RESOURCE_RELEASES
-            .iter()
-            .find(|release| release.resource_id == resource_id)
+        if let Some(id) = annocat_core::source_catalog::download_release(resource_id)
             .map(|release| release.resource_id)
         {
             if let Ok(mut holds) = paused_holds().lock() {
@@ -290,12 +291,7 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
         states
             .get(resource_id)
             .is_some_and(|state| state.state == "paused")
-            .then(|| {
-                annocat_core::RESOURCE_RELEASES
-                    .iter()
-                    .find(|release| release.resource_id == resource_id)
-                    .copied()
-            })
+            .then(|| annocat_core::source_catalog::download_release(resource_id))
             .flatten()
     });
     if let Some(release) = paused_release {
@@ -307,6 +303,8 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
                     state: "cancelled",
                     phase: "cancelled",
                     downloaded: 0,
+                    started_at: Instant::now(),
+                    started_bytes: 0,
                     error: None,
                 },
             );
@@ -335,6 +333,8 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
                     state: "cancelled",
                     phase: "cancelled",
                     downloaded: 0,
+                    started_at: Instant::now(),
+                    started_bytes: 0,
                     error: None,
                 },
             );
@@ -382,6 +382,7 @@ pub struct DownloadStatus {
     pub downloaded_bytes: u64,
     pub expected_bytes: u64,
     pub percent: f64,
+    pub throughput_bytes_per_second: f64,
     pub queue_position: Option<usize>,
     pub error: Option<String>,
 }
@@ -406,6 +407,8 @@ pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
         state: "idle",
         phase: "idle",
         downloaded: partial_bytes,
+        started_at: Instant::now(),
+        started_bytes: partial_bytes,
         error: None,
     });
     let active_downloads = active_count();
@@ -454,12 +457,23 @@ pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
     } else {
         0.0
     };
+    let throughput_bytes_per_second = if state.state == "running" {
+        let elapsed = state.started_at.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            downloaded.saturating_sub(state.started_bytes) as f64 / elapsed
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
     DownloadStatus {
         state: effective_state.into(),
         phase: state.phase.into(),
         downloaded_bytes: downloaded,
         expected_bytes: expected,
         percent,
+        throughput_bytes_per_second,
         queue_position,
         error: belongs_to_resource.then_some(state.error).flatten(),
     }
@@ -513,12 +527,10 @@ pub fn restore_queue(root: &Path) {
     };
     let _ = fs::write(root.join("download-queue.json"), b"[]");
     for id in ids {
-        if let Some(release) = annocat_core::RESOURCE_RELEASES
-            .iter()
-            .find(|release| release.resource_id == id)
-            && !final_path(root, release).exists()
+        if let Some(release) = annocat_core::source_catalog::download_release(&id)
+            && !final_path(root, &release).exists()
         {
-            let _ = start_background(*release, root.to_path_buf());
+            let _ = start_background(release, root.to_path_buf());
         }
     }
 }
@@ -597,7 +609,7 @@ fn download_release_controlled(
         .cookie_store(true)
         .connect_timeout(Duration::from_secs(30))
         .http1_only()
-        .user_agent("AnnoCat/0.1 local resource downloader")
+        .user_agent("AnnoCAT/0.1 local resource downloader")
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|error| format!("cannot create HTTPS client: {error}"))?;
@@ -656,7 +668,6 @@ fn download_release_controlled(
         }
     }
     let mut buffer = vec![0_u8; 1024 * 1024];
-    let mut last_report = Instant::now();
     loop {
         if controlled
             && cancelled()
@@ -691,15 +702,6 @@ fn download_release_controlled(
         if downloaded > expected {
             return Err("server sent more bytes than the catalog object length".into());
         }
-        if last_report.elapsed() >= Duration::from_secs(2) {
-            eprintln!(
-                "  {:>6.2}%  {}/{}",
-                downloaded as f64 * 100.0 / expected as f64,
-                format_decimal_size(downloaded),
-                format_decimal_size(expected)
-            );
-            last_report = Instant::now();
-        }
     }
     output
         .sync_all()
@@ -730,10 +732,6 @@ fn download_release_controlled(
     fs::rename(&partial, &final_file)
         .map_err(|error| format!("cannot atomically promote archive: {error}"))?;
     write_verification(&final_file, release, &local_sha256)?;
-    println!("Downloaded and validated: {}", final_file.display());
-    println!(
-        "Archive is downloaded, not installed; preparation and checksum manifest are still required."
-    );
     Ok(())
 }
 
@@ -1099,7 +1097,7 @@ mod tests {
 
     #[test]
     fn paths_never_confuse_partial_with_downloaded() {
-        let release = &annocat_core::RESOURCE_RELEASES[0];
+        let release = &annocat_core::source_catalog::download_release("dbnsfp").unwrap();
         assert!(
             partial_path(Path::new("data"), release)
                 .to_string_lossy()
@@ -1120,7 +1118,6 @@ mod tests {
             filename: "test.zip",
             url: "https://example.invalid/test.zip",
             download_bytes: Some(4),
-            installed_bytes: None,
             range_resume: true,
             size_checked_at: "test",
             archive_format: "zip",
@@ -1160,7 +1157,6 @@ mod tests {
             filename: "test-cleanup.gz",
             url: "https://example.invalid/test-cleanup.gz",
             download_bytes: Some(4),
-            installed_bytes: None,
             range_resume: true,
             size_checked_at: "test",
             archive_format: "gzip",
@@ -1223,7 +1219,6 @@ mod tests {
             filename: "restart-resume-fixture.gz",
             url,
             download_bytes: Some(BODY.len() as u64),
-            installed_bytes: None,
             range_resume: true,
             size_checked_at: "test",
             archive_format: "gzip",

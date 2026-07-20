@@ -2,18 +2,21 @@ use serde::Serialize;
 use std::fs;
 #[cfg(test)]
 use std::io::Cursor;
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+mod builder;
 mod cache;
 mod catalog;
 mod checkpoint;
 mod fields;
-mod indexed;
+mod indexed_catalog;
+mod progress;
+mod range_plan;
 mod resumable;
 mod state;
 mod tabix;
@@ -25,7 +28,7 @@ pub use cache::{initialize_partial, promote_verified};
 use cache::{required_nonempty_file, restart_decision_with_legacy_upgrade, verify_partial_osa};
 use catalog::canonical_chromosomes;
 pub use catalog::{
-    DbnsfpArchiveShard, DbnsfpPinnedManifest, PinnedShardedSource, PinnedStreamShard, RevelArchive,
+    DbnsfpArchiveShard, DbnsfpPinnedManifest, PinnedShardedSource, RevelArchive,
     RevelArchiveManifest, pinned_dbnsfp_manifest, pinned_revel_manifest, pinned_sharded_source,
 };
 use checkpoint::{CHECKPOINT_SCHEMA_VERSION, read_checkpoint, write_checkpoint};
@@ -45,7 +48,13 @@ use fields::{
     default_dbnsfp_field_selection, default_supplementary_field_selection,
     full_dbnsfp_field_selection,
 };
-use indexed::{CaddChromosomeReader, CaddRecord, DbsnpReader, SpliceAiReader};
+use indexed_catalog::{CaddArtifact, SpliceAiArtifact};
+use progress::{
+    update_indexed_progress, update_local_build_detail, update_local_build_progress_detail,
+    update_resumable_download_detail, update_resumable_progress_detail, update_revel_progress,
+    update_sharded_progress,
+};
+use range_plan::IndexedByteRange;
 pub use state::{
     LivePreparationState, cancel_live, forget_live, live_status, record_start_failure,
     running_count,
@@ -57,6 +66,18 @@ pub const LEGACY_PREPARATION_IDENTITY_COMMIT: &str = "7038e7c17708e7d2226149e78e
 pub const STREAM_WRITER_BUFFER_BYTES: u64 = 1024 * 1024;
 const PREPARATION_METADATA_ALLOWANCE_BYTES: u64 = 4 * 1024 * 1024;
 const PREPARATION_SAFETY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const FASTVEP_PARSER_WORKER_BUDGET: usize = 4;
+
+fn fastvep_parser_workers_for_concurrency(concurrency: usize) -> usize {
+    (FASTVEP_PARSER_WORKER_BUDGET / concurrency.clamp(1, 4)).max(1)
+}
+
+fn configure_fastvep_parser_workers(command: &mut Command) {
+    command.env(
+        "FASTVEP_SA_PARSE_THREADS",
+        fastvep_parser_workers_for_concurrency(crate::install_queue::concurrency()).to_string(),
+    );
+}
 
 fn format_decimal_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -203,11 +224,7 @@ where
     if !request.paths.partial_directory.is_dir() {
         return Err("partial shard directory has not been initialized".into());
     }
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|error| format!("cannot create preparation HTTP client: {error}"))?;
+    let client = crate::http_client::source()?;
     let response = client
         .get(&request.identity.source_url)
         .send()
@@ -385,6 +402,7 @@ where
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
+    configure_fastvep_parser_workers(&mut command);
     if let Some(fields) = request.dbnsfp_fields {
         command.env(
             "ANNOCAT_DBNSFP_FIELDS",
@@ -496,16 +514,13 @@ fn stream_revel_archive_to_partial_osa(
     completed: u16,
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
-    let url = format!(
-        "https://zenodo.org/api/records/7072866/files/{}/content",
-        archive.filename
-    );
+    let url = &request.identity.source_url;
     let resumable = source_input_mode() == SourceInputMode::Resumable;
     let source: Box<dyn Read> = if resumable {
         let part = resumable::acquire_range(
             request.paths,
             request.identity,
-            &url,
+            url,
             0,
             archive.bytes,
             None,
@@ -530,15 +545,11 @@ fn stream_revel_archive_to_partial_osa(
         )?;
         Box::new(part.reader)
     } else {
-        let response = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()
-            .map_err(|error| format!("cannot create REVEL client: {error}"))?
-            .get(&url)
+        let response = crate::http_client::source()?
+            .get(url)
             .header(
                 reqwest::header::USER_AGENT,
-                "AnnoCat/0.1 (local variant annotation)",
+                "AnnoCAT/0.1 (local variant annotation)",
             )
             .send()
             .map_err(|error| {
@@ -562,7 +573,8 @@ fn stream_revel_archive_to_partial_osa(
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create REVEL preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
-    let mut child = Command::new(request.fastvep_executable)
+    let mut command = Command::new(request.fastvep_executable);
+    command
         .arg("sa-build")
         .arg("--source")
         .arg("revel")
@@ -575,7 +587,9 @@ fn stream_revel_archive_to_partial_osa(
         .arg("--no-progress")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
+        .stderr(Stdio::from(log));
+    configure_fastvep_parser_workers(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("cannot start fastVEP REVEL preparation: {error}"))?;
     let result = (|| {
@@ -833,11 +847,7 @@ where
         .checked_add(member.compressed_bytes)
         .and_then(|exclusive| exclusive.checked_sub(1))
         .ok_or("invalid dbNSFP member byte range")?;
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|error| format!("cannot create dbNSFP range client: {error}"))?;
+    let client = crate::http_client::source()?;
     let response = client
         .get(archive_url)
         .header(
@@ -988,21 +998,6 @@ fn safe_chromosome_component(chromosome: &str) -> Result<String, String> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CaddArtifact {
-    id: &'static str,
-    data_url: &'static str,
-    data_bytes: u64,
-    data_etag: &'static str,
-    data_last_modified: &'static str,
-    data_md5: &'static str,
-    index_url: &'static str,
-    index_bytes: u64,
-    index_etag: &'static str,
-    index_last_modified: &'static str,
-    index_md5: &'static str,
-}
-
 #[derive(Debug, Clone)]
 pub struct DbsnpArtifact {
     pub release: String,
@@ -1019,7 +1014,7 @@ pub struct DbsnpArtifact {
 #[derive(Debug, Clone)]
 struct DbsnpArtifactPlan {
     artifact: DbsnpArtifact,
-    ranges: Vec<CaddByteRange>,
+    ranges: Vec<IndexedByteRange>,
 }
 
 const DBSNP_PRIMARY_CONTIGS: [(&str, &str); 25] = [
@@ -1050,106 +1045,16 @@ const DBSNP_PRIMARY_CONTIGS: [(&str, &str); 25] = [
     ("M", "NC_012920.1"),
 ];
 
-const CADD_ARTIFACTS: [CaddArtifact; 2] = [
-    CaddArtifact {
-        id: "snv",
-        data_url: "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz",
-        data_bytes: 87_473_403_655,
-        data_etag: "\"145dd23707-61014c1cb9940\"",
-        data_last_modified: "Mon, 29 Jan 2024 12:26:37 GMT",
-        data_md5: "88577a55f1cd519d44e0f415ba248eb9",
-        index_url: "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz.tbi",
-        index_bytes: 2_761_840,
-        index_etag: "\"2a2470-610152972a200\"",
-        index_last_modified: "Mon, 29 Jan 2024 12:55:36 GMT",
-        index_md5: "347df8fac17ea374c4598f4f44c7ce8b",
-    },
-    CaddArtifact {
-        id: "indel",
-        data_url: "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/gnomad.genomes.r4.0.indel.tsv.gz",
-        data_bytes: 1_257_151_321,
-        data_etag: "\"4aee9b59-60eab276e4b00\"",
-        data_last_modified: "Thu, 11 Jan 2024 13:02:04 GMT",
-        data_md5: "4b9c685c96d396af4d001c2f7dd9d8f9",
-        index_url: "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/gnomad.genomes.r4.0.indel.tsv.gz.tbi",
-        index_bytes: 1_899_705,
-        index_etag: "\"1cfcb9-60eab289f7800\"",
-        index_last_modified: "Thu, 11 Jan 2024 13:02:24 GMT",
-        index_md5: "85f3d2daa9202c5915c0ce0f1c749a66",
-    },
-];
-
-#[derive(Debug, Clone, Copy)]
-struct SpliceAiArtifact {
-    data_url: &'static str,
-    data_bytes: u64,
-    data_etag: &'static str,
-    data_last_modified: &'static str,
-    index_url: &'static str,
-    index_bytes: u64,
-    index_etag: &'static str,
-    index_last_modified: &'static str,
-    index_md5: &'static str,
-}
-
-const SPLICEAI_ARTIFACT: SpliceAiArtifact = SpliceAiArtifact {
-    data_url: "https://ftp.ensembl.org/pub/data_files/homo_sapiens/GRCh38/variation_plugins/spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.vcf.gz",
-    data_bytes: 28_643_031_420,
-    data_etag: "\"6ab41f97c-64146427056f6\"",
-    data_last_modified: "Thu, 16 Oct 2025 13:04:38 GMT",
-    index_url: "https://ftp.ensembl.org/pub/data_files/homo_sapiens/GRCh38/variation_plugins/spliceai_scores.masked.snv.ensembl_mane_v1.4.grch38.vcf.gz.tbi",
-    index_bytes: 1_266_506,
-    index_etag: "\"13534a-64146427cfab1\"",
-    index_last_modified: "Thu, 16 Oct 2025 13:04:39 GMT",
-    index_md5: "1501717babb5224fda0b63a977fe1fe6",
-};
-
-#[derive(Debug, Clone)]
-struct CaddByteRange {
-    chromosome: String,
-    start: u64,
-    end: u64,
-    uncompressed_skip: u16,
-}
-
-impl CaddByteRange {
-    fn len(&self) -> u64 {
-        self.end - self.start + 1
-    }
-}
-
 #[derive(Debug, Clone)]
 struct CaddArtifactPlan {
     artifact: CaddArtifact,
-    ranges: Vec<CaddByteRange>,
+    ranges: Vec<IndexedByteRange>,
 }
 
 #[derive(Debug, Clone)]
 struct SpliceAiArtifactPlan {
     artifact: SpliceAiArtifact,
-    ranges: Vec<CaddByteRange>,
-}
-
-#[derive(Debug)]
-struct CountedReader<R> {
-    inner: R,
-    count: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl<R: Read> Read for CountedReader<R> {
-    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(output)?;
-        self.count.fetch_add(read as u64, Ordering::Relaxed);
-        Ok(read)
-    }
-}
-
-fn cadd_http_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(10))
-        .build()
-        .map_err(|error| format!("cannot create CADD HTTP client: {error}"))
+    ranges: Vec<IndexedByteRange>,
 }
 
 fn validate_pinned_headers(
@@ -1179,50 +1084,73 @@ fn validate_pinned_headers(
     Ok(())
 }
 
-fn fetch_cadd_index(
+#[allow(clippy::too_many_arguments)]
+fn fetch_index(
     client: &reqwest::blocking::Client,
-    artifact: CaddArtifact,
+    label: &str,
+    url: &str,
+    bytes: u64,
+    md5: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    strict_headers: bool,
 ) -> Result<Vec<TabixReferenceOffset>, String> {
     let mut response = client
-        .get(artifact.index_url)
+        .get(url)
         .send()
-        .map_err(|error| format!("CADD {} index request failed: {error}", artifact.id))?;
-    validate_pinned_headers(
-        &response,
-        artifact.index_bytes,
-        artifact.index_etag,
-        artifact.index_last_modified,
-        &format!("CADD {} index", artifact.id),
-    )?;
-    let mut compressed = Vec::with_capacity(artifact.index_bytes as usize);
-    response
-        .read_to_end(&mut compressed)
-        .map_err(|error| format!("cannot read CADD {} index: {error}", artifact.id))?;
-    if compressed.len() as u64 != artifact.index_bytes
-        || format!("{:x}", md5::compute(&compressed)) != artifact.index_md5
-    {
-        return Err(format!(
-            "CADD {} tabix index checksum mismatch",
-            artifact.id
-        ));
+        .map_err(|error| format!("{label} request failed: {error}"))?;
+    if strict_headers {
+        validate_pinned_headers(
+            &response,
+            bytes,
+            etag.ok_or_else(|| format!("{label} has no pinned ETag"))?,
+            last_modified.ok_or_else(|| format!("{label} has no pinned Last-Modified"))?,
+            label,
+        )?;
+    } else {
+        if !response.status().is_success()
+            || response
+                .content_length()
+                .is_some_and(|actual| actual != bytes)
+        {
+            return Err(format!("{label} returned unexpected HTTP metadata"));
+        }
+        validate_optional_header(
+            response.headers(),
+            reqwest::header::LAST_MODIFIED,
+            last_modified,
+            "Last-Modified",
+        )?;
     }
-    parse_tabix_reference_offsets(&compressed)
+    let mut compressed = Vec::with_capacity(bytes as usize);
+    (&mut response)
+        .take(bytes.saturating_add(1))
+        .read_to_end(&mut compressed)
+        .map_err(|error| format!("cannot read {label}: {error}"))?;
+    if compressed.len() as u64 != bytes || format!("{:x}", md5::compute(&compressed)) != md5 {
+        return Err(format!("{label} checksum mismatch"));
+    }
+    parse_tabix_reference_offsets(&compressed).map_err(|error| format!("invalid {label}: {error}"))
 }
 
-fn cadd_bgzf_block_size(
+#[allow(clippy::too_many_arguments)]
+fn bgzf_block_size(
     client: &reqwest::blocking::Client,
-    artifact: CaddArtifact,
+    label: &str,
+    url: &str,
+    data_bytes: u64,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    strict_headers: bool,
     offset: u64,
 ) -> Result<u64, String> {
-    let end = offset
-        .checked_add(17)
-        .ok_or("CADD BGZF probe offset overflow")?;
+    let end = offset.checked_add(17).ok_or("BGZF probe offset overflow")?;
     let mut response = client
-        .get(artifact.data_url)
+        .get(url)
         .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
         .send()
-        .map_err(|error| format!("CADD {} BGZF probe failed: {error}", artifact.id))?;
-    let expected_range = format!("bytes {offset}-{end}/{}", artifact.data_bytes);
+        .map_err(|error| format!("{label} BGZF probe failed: {error}"))?;
+    let expected_range = format!("bytes {offset}-{end}/{data_bytes}");
     let actual_range = response
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
@@ -1230,305 +1158,238 @@ fn cadd_bgzf_block_size(
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         || response.content_length() != Some(18)
         || actual_range != Some(expected_range.as_str())
-        || response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            != Some(artifact.data_etag)
-        || response
-            .headers()
-            .get(reqwest::header::LAST_MODIFIED)
-            .and_then(|v| v.to_str().ok())
-            != Some(artifact.data_last_modified)
     {
-        return Err(format!("CADD {} BGZF probe metadata mismatch", artifact.id));
+        return Err(format!(
+            "{label} BGZF probe returned unexpected range metadata"
+        ));
+    }
+    if strict_headers {
+        validate_pinned_headers(
+            &response,
+            18,
+            etag.ok_or_else(|| format!("{label} has no pinned ETag"))?,
+            last_modified.ok_or_else(|| format!("{label} has no pinned Last-Modified"))?,
+            label,
+        )?;
+    } else {
+        validate_optional_header(
+            response.headers(),
+            reqwest::header::LAST_MODIFIED,
+            last_modified,
+            "Last-Modified",
+        )?;
     }
     let mut header = [0_u8; 18];
     response
         .read_exact(&mut header)
-        .map_err(|error| format!("cannot read CADD {} BGZF probe: {error}", artifact.id))?;
+        .map_err(|error| format!("cannot read {label} BGZF probe: {error}"))?;
     if header[0..4] != [0x1f, 0x8b, 0x08, 0x04] || &header[12..14] != b"BC" {
-        return Err(format!("CADD {} range is not BGZF", artifact.id));
+        return Err(format!("{label} range is not BGZF"));
     }
     Ok(u16::from_le_bytes([header[16], header[17]]) as u64 + 1)
+}
+
+#[derive(Clone, Copy)]
+struct IndexedSource<'a> {
+    label: &'a str,
+    data_url: &'a str,
+    data_bytes: u64,
+    data_etag: Option<&'a str>,
+    data_last_modified: Option<&'a str>,
+    index_url: &'a str,
+    index_bytes: u64,
+    index_md5: &'a str,
+    index_etag: Option<&'a str>,
+    index_last_modified: Option<&'a str>,
+    strict_headers: bool,
+}
+
+fn indexed_ranges(
+    client: &reqwest::blocking::Client,
+    source: IndexedSource<'_>,
+    contigs: Vec<(String, String)>,
+    require_following: bool,
+) -> Result<Vec<IndexedByteRange>, String> {
+    let indexed = fetch_index(
+        client,
+        &format!("{} tabix index", source.label),
+        source.index_url,
+        source.index_bytes,
+        source.index_md5,
+        source.index_etag,
+        source.index_last_modified,
+        source.strict_headers,
+    )?;
+    contigs
+        .into_iter()
+        .map(|(chromosome, source_contig)| {
+            let index = indexed
+                .iter()
+                .position(|item| {
+                    item.name.strip_prefix("chr").unwrap_or(&item.name) == source_contig
+                })
+                .ok_or_else(|| format!("{} index is missing {source_contig}", source.label))?;
+            let current = indexed[index].virtual_offset;
+            let start = current >> 16;
+            let uncompressed_skip = current as u16;
+            let end = match indexed.get(index + 1) {
+                Some(next) => {
+                    let next_block = next.virtual_offset >> 16;
+                    next_block
+                        .checked_add(bgzf_block_size(
+                            client,
+                            source.label,
+                            source.data_url,
+                            source.data_bytes,
+                            source.data_etag,
+                            source.data_last_modified,
+                            source.strict_headers,
+                            next_block,
+                        )?)
+                        .and_then(|exclusive| exclusive.checked_sub(1))
+                        .ok_or_else(|| format!("{} chromosome range overflow", source.label))?
+                }
+                None if !require_following => source.data_bytes - 1,
+                None => return Err(format!("{source_contig} has no following index range")),
+            };
+            if end < start || end >= source.data_bytes {
+                return Err(format!(
+                    "{} chromosome {chromosome} has an invalid range",
+                    source.label
+                ));
+            }
+            Ok(IndexedByteRange {
+                chromosome,
+                start,
+                end,
+                uncompressed_skip,
+            })
+        })
+        .collect()
 }
 
 fn plan_cadd_artifact(
     client: &reqwest::blocking::Client,
     artifact: CaddArtifact,
+    resource_root: &Path,
 ) -> Result<CaddArtifactPlan, String> {
-    let indexed = fetch_cadd_index(client, artifact)?;
-    let chromosomes = canonical_chromosomes(false);
-    let mut ranges = Vec::with_capacity(chromosomes.len());
-    for chromosome in chromosomes {
-        let index = indexed
-            .iter()
-            .position(|item| item.name.strip_prefix("chr").unwrap_or(&item.name) == chromosome)
-            .ok_or_else(|| {
-                format!(
-                    "CADD {} index is missing chromosome {chromosome}",
-                    artifact.id
-                )
-            })?;
-        let current = indexed[index].virtual_offset;
-        let start = current >> 16;
-        let uncompressed_skip = current as u16;
-        let end = if let Some(next) = indexed.get(index + 1) {
-            let next_block = next.virtual_offset >> 16;
-            next_block
-                .checked_add(cadd_bgzf_block_size(client, artifact, next_block)?)
-                .and_then(|exclusive| exclusive.checked_sub(1))
-                .ok_or("CADD chromosome range overflow")?
-        } else {
-            artifact.data_bytes - 1
-        };
-        if end < start || end >= artifact.data_bytes {
-            return Err(format!(
-                "CADD {} chromosome {chromosome} has an invalid range",
-                artifact.id
-            ));
-        }
-        ranges.push(CaddByteRange {
-            chromosome: chromosome.to_string(),
-            start,
-            end,
-            uncompressed_skip,
-        });
-    }
-    Ok(CaddArtifactPlan { artifact, ranges })
-}
-
-fn fetch_spliceai_index(
-    client: &reqwest::blocking::Client,
-    artifact: SpliceAiArtifact,
-) -> Result<Vec<TabixReferenceOffset>, String> {
-    let mut response = client
-        .get(artifact.index_url)
-        .send()
-        .map_err(|error| format!("SpliceAI tabix index request failed: {error}"))?;
-    validate_pinned_headers(
-        &response,
+    let identity = format!(
+        "{}|{}|{}|{}|{}|{}",
+        artifact.data_url,
+        artifact.data_bytes,
+        artifact.data_md5,
+        artifact.index_url,
         artifact.index_bytes,
-        artifact.index_etag,
-        artifact.index_last_modified,
-        "SpliceAI tabix index",
+        artifact.index_md5,
+    );
+    let ranges = range_plan::load_or_build(
+        resource_root,
+        &format!("cadd-{}", artifact.id),
+        &identity,
+        || {
+            let label = format!("CADD {}", artifact.id);
+            indexed_ranges(
+                client,
+                IndexedSource {
+                    label: &label,
+                    data_url: &artifact.data_url,
+                    data_bytes: artifact.data_bytes,
+                    data_etag: Some(&artifact.data_etag),
+                    data_last_modified: Some(&artifact.data_last_modified),
+                    index_url: &artifact.index_url,
+                    index_bytes: artifact.index_bytes,
+                    index_md5: &artifact.index_md5,
+                    index_etag: Some(&artifact.index_etag),
+                    index_last_modified: Some(&artifact.index_last_modified),
+                    strict_headers: true,
+                },
+                canonical_chromosomes(false)
+                    .into_iter()
+                    .map(|chromosome| (chromosome.into(), chromosome.into()))
+                    .collect(),
+                false,
+            )
+        },
     )?;
-    let mut compressed = Vec::with_capacity(artifact.index_bytes as usize);
-    response
-        .read_to_end(&mut compressed)
-        .map_err(|error| format!("cannot read SpliceAI tabix index: {error}"))?;
-    if compressed.len() as u64 != artifact.index_bytes
-        || format!("{:x}", md5::compute(&compressed)) != artifact.index_md5
-    {
-        return Err("SpliceAI tabix index checksum mismatch".into());
-    }
-    parse_tabix_reference_offsets(&compressed)
-        .map_err(|error| format!("invalid SpliceAI tabix index: {error}"))
-}
-
-fn spliceai_bgzf_block_size(
-    client: &reqwest::blocking::Client,
-    artifact: SpliceAiArtifact,
-    offset: u64,
-) -> Result<u64, String> {
-    let end = offset
-        .checked_add(17)
-        .ok_or("SpliceAI BGZF probe offset overflow")?;
-    let mut response = client
-        .get(artifact.data_url)
-        .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
-        .send()
-        .map_err(|error| format!("SpliceAI BGZF probe failed: {error}"))?;
-    let expected_range = format!("bytes {offset}-{end}/{}", artifact.data_bytes);
-    let actual_range = response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok());
-    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-        || response.content_length() != Some(18)
-        || actual_range != Some(expected_range.as_str())
-        || response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            != Some(artifact.data_etag)
-        || response
-            .headers()
-            .get(reqwest::header::LAST_MODIFIED)
-            .and_then(|v| v.to_str().ok())
-            != Some(artifact.data_last_modified)
-    {
-        return Err("SpliceAI BGZF probe metadata mismatch".into());
-    }
-    let mut header = [0_u8; 18];
-    response
-        .read_exact(&mut header)
-        .map_err(|error| format!("cannot read SpliceAI BGZF probe: {error}"))?;
-    if header[0..4] != [0x1f, 0x8b, 0x08, 0x04] || &header[12..14] != b"BC" {
-        return Err("SpliceAI range is not BGZF".into());
-    }
-    Ok(u16::from_le_bytes([header[16], header[17]]) as u64 + 1)
+    Ok(CaddArtifactPlan { artifact, ranges })
 }
 
 fn plan_spliceai_artifact(
     client: &reqwest::blocking::Client,
+    resource_root: &Path,
 ) -> Result<SpliceAiArtifactPlan, String> {
-    let artifact = SPLICEAI_ARTIFACT;
-    let indexed = fetch_spliceai_index(client, artifact)?;
-    let chromosomes = canonical_chromosomes(false);
-    let mut ranges = Vec::with_capacity(chromosomes.len());
-    for chromosome in chromosomes {
-        let index = indexed
-            .iter()
-            .position(|item| item.name.strip_prefix("chr").unwrap_or(&item.name) == chromosome)
-            .ok_or_else(|| format!("SpliceAI index is missing chromosome {chromosome}"))?;
-        let current = indexed[index].virtual_offset;
-        let start = current >> 16;
-        let uncompressed_skip = current as u16;
-        let end = if let Some(next) = indexed.get(index + 1) {
-            let next_block = next.virtual_offset >> 16;
-            next_block
-                .checked_add(spliceai_bgzf_block_size(client, artifact, next_block)?)
-                .and_then(|exclusive| exclusive.checked_sub(1))
-                .ok_or("SpliceAI chromosome range overflow")?
-        } else {
-            artifact.data_bytes - 1
-        };
-        if end < start || end >= artifact.data_bytes {
-            return Err(format!(
-                "SpliceAI chromosome {chromosome} has an invalid range"
-            ));
-        }
-        ranges.push(CaddByteRange {
-            chromosome: chromosome.to_string(),
-            start,
-            end,
-            uncompressed_skip,
-        });
-    }
+    let artifact = indexed_catalog::spliceai_artifact()?;
+    let identity = format!(
+        "{}|{}|{}|{}|{}",
+        artifact.data_url,
+        artifact.data_bytes,
+        artifact.index_url,
+        artifact.index_bytes,
+        artifact.index_md5,
+    );
+    let ranges = range_plan::load_or_build(resource_root, "spliceai", &identity, || {
+        indexed_ranges(
+            client,
+            IndexedSource {
+                label: "SpliceAI",
+                data_url: &artifact.data_url,
+                data_bytes: artifact.data_bytes,
+                data_etag: Some(&artifact.data_etag),
+                data_last_modified: Some(&artifact.data_last_modified),
+                index_url: &artifact.index_url,
+                index_bytes: artifact.index_bytes,
+                index_md5: &artifact.index_md5,
+                index_etag: Some(&artifact.index_etag),
+                index_last_modified: Some(&artifact.index_last_modified),
+                strict_headers: true,
+            },
+            canonical_chromosomes(false)
+                .into_iter()
+                .map(|chromosome| (chromosome.into(), chromosome.into()))
+                .collect(),
+            false,
+        )
+    })?;
     Ok(SpliceAiArtifactPlan { artifact, ranges })
-}
-
-fn fetch_dbsnp_index(
-    client: &reqwest::blocking::Client,
-    artifact: &DbsnpArtifact,
-) -> Result<Vec<TabixReferenceOffset>, String> {
-    let response = client
-        .get(&artifact.index_url)
-        .send()
-        .map_err(|error| format!("dbSNP tabix index request failed: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "dbSNP tabix index request returned HTTP {}",
-            response.status()
-        ));
-    }
-    // Some local proxies strip Content-Length even though NCBI advertises it.
-    // The published size and MD5 remain authoritative; cap the read at one
-    // byte beyond that size so accepting a chunked response cannot become an
-    // unbounded allocation.
-    if response
-        .content_length()
-        .is_some_and(|bytes| bytes != artifact.index_bytes)
-    {
-        return Err(format!(
-            "dbSNP tabix index advertised {} bytes instead of {}",
-            response.content_length().unwrap_or_default(),
-            artifact.index_bytes
-        ));
-    }
-    validate_optional_header(
-        response.headers(),
-        reqwest::header::LAST_MODIFIED,
-        artifact.index_last_modified.as_deref(),
-        "Last-Modified",
-    )?;
-    let mut compressed = Vec::with_capacity(artifact.index_bytes as usize);
-    response
-        .take(artifact.index_bytes.saturating_add(1))
-        .read_to_end(&mut compressed)
-        .map_err(|error| format!("cannot read dbSNP tabix index: {error}"))?;
-    if compressed.len() as u64 != artifact.index_bytes
-        || format!("{:x}", md5::compute(&compressed)) != artifact.index_md5
-    {
-        return Err("dbSNP tabix index checksum mismatch".into());
-    }
-    parse_tabix_reference_offsets(&compressed)
-        .map_err(|error| format!("invalid dbSNP tabix index: {error}"))
-}
-
-fn dbsnp_bgzf_block_size(
-    client: &reqwest::blocking::Client,
-    artifact: &DbsnpArtifact,
-    offset: u64,
-) -> Result<u64, String> {
-    let end = offset.checked_add(17).ok_or("dbSNP BGZF probe overflow")?;
-    let mut response = client
-        .get(&artifact.data_url)
-        .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
-        .send()
-        .map_err(|error| format!("dbSNP BGZF probe failed: {error}"))?;
-    let expected_range = format!("bytes {offset}-{end}/{}", artifact.data_bytes);
-    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-        || response.content_length() != Some(18)
-        || response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok())
-            != Some(expected_range.as_str())
-    {
-        return Err("dbSNP BGZF probe returned unexpected range metadata".into());
-    }
-    validate_optional_header(
-        response.headers(),
-        reqwest::header::LAST_MODIFIED,
-        artifact.data_last_modified.as_deref(),
-        "Last-Modified",
-    )?;
-    let mut header = [0_u8; 18];
-    response
-        .read_exact(&mut header)
-        .map_err(|error| format!("cannot read dbSNP BGZF probe: {error}"))?;
-    if header[0..4] != [0x1f, 0x8b, 0x08, 0x04] || &header[12..14] != b"BC" {
-        return Err("dbSNP indexed data is not BGZF".into());
-    }
-    Ok(u16::from_le_bytes([header[16], header[17]]) as u64 + 1)
 }
 
 fn plan_dbsnp_artifact(
     client: &reqwest::blocking::Client,
     artifact: DbsnpArtifact,
+    resource_root: &Path,
 ) -> Result<DbsnpArtifactPlan, String> {
-    let indexed = fetch_dbsnp_index(client, &artifact)?;
-    let mut ranges = Vec::with_capacity(DBSNP_PRIMARY_CONTIGS.len());
-    for (chromosome, source_contig) in DBSNP_PRIMARY_CONTIGS {
-        let index = indexed
-            .iter()
-            .position(|entry| entry.name == source_contig)
-            .ok_or_else(|| format!("dbSNP index is missing primary contig {source_contig}"))?;
-        let current = indexed[index].virtual_offset;
-        let start = current >> 16;
-        let uncompressed_skip = current as u16;
-        let next = indexed
-            .get(index + 1)
-            .ok_or_else(|| format!("dbSNP contig {source_contig} has no following index range"))?;
-        let next_block = next.virtual_offset >> 16;
-        let end = next_block
-            .checked_add(dbsnp_bgzf_block_size(client, &artifact, next_block)?)
-            .and_then(|exclusive| exclusive.checked_sub(1))
-            .ok_or("dbSNP chromosome range overflow")?;
-        if end < start || end >= artifact.data_bytes {
-            return Err(format!(
-                "dbSNP chromosome {chromosome} has an invalid range"
-            ));
-        }
-        ranges.push(CaddByteRange {
-            chromosome: chromosome.into(),
-            start,
-            end,
-            uncompressed_skip,
-        });
-    }
+    let identity = format!(
+        "{}|{}|{}|{}|{}|{}",
+        artifact.data_url,
+        artifact.data_bytes,
+        artifact.data_md5,
+        artifact.index_url,
+        artifact.index_bytes,
+        artifact.index_md5,
+    );
+    let ranges = range_plan::load_or_build(resource_root, "dbsnp", &identity, || {
+        indexed_ranges(
+            client,
+            IndexedSource {
+                label: "dbSNP",
+                data_url: &artifact.data_url,
+                data_bytes: artifact.data_bytes,
+                data_etag: None,
+                data_last_modified: artifact.data_last_modified.as_deref(),
+                index_url: &artifact.index_url,
+                index_bytes: artifact.index_bytes,
+                index_md5: &artifact.index_md5,
+                index_etag: None,
+                index_last_modified: artifact.index_last_modified.as_deref(),
+                strict_headers: false,
+            },
+            DBSNP_PRIMARY_CONTIGS
+                .into_iter()
+                .map(|(chromosome, source)| (chromosome.into(), source.into()))
+                .collect(),
+            true,
+        )
+    })?;
     Ok(DbsnpArtifactPlan { artifact, ranges })
 }
 
@@ -1682,14 +1543,15 @@ pub struct LivePreparationRequest {
     pub identity: PreparationIdentity,
 }
 
+fn load_selected_fields(
+    resource_id: &str,
+    resource_root: &Path,
+) -> Result<SupplementaryFieldSelection, String> {
+    load_supplementary_field_selection(resource_id, resource_root.parent().unwrap_or(resource_root))
+}
+
 pub fn start_live(mut request: LivePreparationRequest) -> Result<(), String> {
-    let selection = load_supplementary_field_selection(
-        &request.identity.resource_id,
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let selection = load_selected_fields(&request.identity.resource_id, &request.resource_root)?;
     request.identity.selected_schema = supplementary_schema_identity(
         &request.identity.selected_schema,
         &request.identity.resource_id,
@@ -1721,13 +1583,7 @@ pub struct DbsnpLiveRequest {
 }
 
 pub fn start_dbsnp_live(request: DbsnpLiveRequest) -> Result<(), String> {
-    let selection = load_supplementary_field_selection(
-        "dbsnp",
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let selection = load_selected_fields("dbsnp", &request.resource_root)?;
     let job = register_live_job(LivePreparationState {
         resource_id: Some("dbsnp".into()),
         state: "running".into(),
@@ -1792,13 +1648,7 @@ pub struct RevelLiveRequest {
 
 pub fn start_revel_live(request: RevelLiveRequest) -> Result<(), String> {
     let manifest = pinned_revel_manifest()?;
-    let selection = load_supplementary_field_selection(
-        "revel",
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let selection = load_selected_fields("revel", &request.resource_root)?;
     let expected = manifest.archives.iter().map(|item| item.bytes).sum();
     let job = register_live_job(LivePreparationState {
         resource_id: Some("revel".into()),
@@ -1813,18 +1663,13 @@ pub fn start_revel_live(request: RevelLiveRequest) -> Result<(), String> {
 }
 
 pub fn start_spliceai_live(request: SpliceAiLiveRequest) -> Result<(), String> {
-    let selection = load_supplementary_field_selection(
-        "spliceai",
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let artifact = indexed_catalog::spliceai_artifact()?;
+    let selection = load_selected_fields("spliceai", &request.resource_root)?;
     let job = register_live_job(LivePreparationState {
         resource_id: Some("spliceai".into()),
         state: "running".into(),
         phase: "reading-index".into(),
-        expected_network_bytes: SPLICEAI_ARTIFACT.data_bytes,
+        expected_network_bytes: artifact.data_bytes,
         remaining_chromosomes: 24,
         detail: "Reading the public Ensembl SpliceAI tabix index".into(),
         ..LivePreparationState::default()
@@ -1833,18 +1678,13 @@ pub fn start_spliceai_live(request: SpliceAiLiveRequest) -> Result<(), String> {
 }
 
 pub fn start_cadd_live(request: CaddLiveRequest) -> Result<(), String> {
-    let selection = load_supplementary_field_selection(
-        "cadd",
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let artifacts = indexed_catalog::cadd_artifacts()?;
+    let selection = load_selected_fields("cadd", &request.resource_root)?;
     let job = register_live_job(LivePreparationState {
         resource_id: Some("cadd".into()),
         state: "running".into(),
         phase: "reading-indexes".into(),
-        expected_network_bytes: CADD_ARTIFACTS.iter().map(|item| item.data_bytes).sum(),
+        expected_network_bytes: artifacts.iter().map(|item| item.data_bytes).sum(),
         remaining_chromosomes: 24,
         detail: "Reading the two small CADD tabix indexes".into(),
         ..LivePreparationState::default()
@@ -1852,110 +1692,9 @@ pub fn start_cadd_live(request: CaddLiveRequest) -> Result<(), String> {
     spawn_live_job(job, move || run_cadd_live(request, selection))
 }
 
-type CaddHttpReader = CaddChromosomeReader<CountedReader<Box<dyn Read>>>;
-
-fn open_cadd_range<F>(
-    request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
-    plan: &CaddArtifactPlan,
-    range: &CaddByteRange,
-    part_tag: &str,
-    count: Arc<std::sync::atomic::AtomicU64>,
-    cancelled: &AtomicBool,
-    progress: F,
-) -> Result<CaddHttpReader, String>
-where
-    F: FnMut(resumable::PartProgress),
-{
-    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
-        let paths = request.paths.source_part_variant(part_tag);
-        let mut identity = request.identity.clone();
-        identity.source_url = format!("{}#{part_tag}", plan.artifact.data_url);
-        identity.expected_compressed_bytes = range.len();
-        identity.source_etag = Some(plan.artifact.data_etag.into());
-        identity.source_last_modified = Some(plan.artifact.data_last_modified.into());
-        let part = resumable::acquire_range(
-            &paths,
-            &identity,
-            plan.artifact.data_url,
-            range.start,
-            plan.artifact.data_bytes,
-            Some(plan.artifact.data_etag),
-            Some(plan.artifact.data_last_modified),
-            cancelled,
-            progress,
-        )?;
-        Box::new(part.reader)
-    } else {
-        let response = client
-            .get(plan.artifact.data_url)
-            .header(
-                reqwest::header::RANGE,
-                format!("bytes={}-{}", range.start, range.end),
-            )
-            .send()
-            .map_err(|error| {
-                format!(
-                    "CADD {} chromosome {} range request failed: {error}",
-                    plan.artifact.id, range.chromosome
-                )
-            })?;
-        let expected_range = format!(
-            "bytes {}-{}/{}",
-            range.start, range.end, plan.artifact.data_bytes
-        );
-        let actual_range = response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok());
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-            || response.content_length() != Some(range.len())
-            || actual_range != Some(expected_range.as_str())
-            || response
-                .headers()
-                .get(reqwest::header::ETAG)
-                .and_then(|v| v.to_str().ok())
-                != Some(plan.artifact.data_etag)
-            || response
-                .headers()
-                .get(reqwest::header::LAST_MODIFIED)
-                .and_then(|v| v.to_str().ok())
-                != Some(plan.artifact.data_last_modified)
-        {
-            return Err(format!(
-                "CADD {} chromosome {} no longer matches its pinned byte range",
-                plan.artifact.id, range.chromosome
-            ));
-        }
-        Box::new(response)
-    };
-    let reader = CaddChromosomeReader::new(
-        flate2::read::MultiGzDecoder::new(CountedReader {
-            inner: source,
-            count,
-        }),
-        range.uncompressed_skip,
-        &range.chromosome,
-    )?;
-    Ok(reader)
-}
-
-fn cadd_record_before_or_equal(left: &CaddRecord, right: &CaddRecord) -> bool {
-    (
-        left.position,
-        left.reference.as_str(),
-        left.alternate.as_str(),
-    ) <= (
-        right.position,
-        right.reference.as_str(),
-        right.alternate.as_str(),
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn stream_cadd_ranges_to_partial_osa(
     request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
     plans: &[CaddArtifactPlan; 2],
     chromosome_index: usize,
     base_network: u64,
@@ -1963,507 +1702,151 @@ fn stream_cadd_ranges_to_partial_osa(
     completed: u16,
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
-    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let resumable = source_input_mode() == SourceInputMode::Resumable;
     let snv_range = &plans[0].ranges[chromosome_index];
     let indel_range = &plans[1].ranges[chromosome_index];
-    let mut snv = open_cadd_range(
-        request,
-        client,
-        &plans[0],
-        snv_range,
-        "snv",
-        count.clone(),
-        live_cancel().as_ref(),
-        |state| {
-            update_cadd_progress(
-                &request.identity.chromosome,
-                completed,
-                base_network.saturating_add(state.persisted_bytes),
-                total_network,
-                prepared_bytes,
-                state.bytes_per_second,
-            );
-            update_resumable_download_detail(
-                "CADD",
-                &request.identity.chromosome,
-                state.persisted_bytes,
-                snv_range.len().saturating_add(indel_range.len()),
-            );
-        },
-    )?;
-    let mut indel = open_cadd_range(
-        request,
-        client,
-        &plans[1],
-        indel_range,
-        "indel",
-        count.clone(),
-        live_cancel().as_ref(),
-        |state| {
-            let persisted = snv_range.len().saturating_add(state.persisted_bytes);
-            update_cadd_progress(
-                &request.identity.chromosome,
-                completed,
-                base_network.saturating_add(persisted),
-                total_network,
-                prepared_bytes,
-                state.bytes_per_second,
-            );
-            update_resumable_download_detail(
-                "CADD",
-                &request.identity.chromosome,
-                persisted,
-                snv_range.len().saturating_add(indel_range.len()),
-            );
-        },
-    )?;
-    if resumable {
-        update_local_build_detail("CADD", &request.identity.chromosome);
-    }
-    let log = fs::File::create(request.log_path)
-        .map_err(|error| format!("cannot create CADD preparation log: {error}"))?;
-    let output_base = request.paths.partial_directory.join("source");
-    let mut child = Command::new(request.fastvep_executable)
-        .arg("sa-build")
-        .arg("--source")
-        .arg("cadd")
-        .arg("--input")
-        .arg("-")
-        .arg("--output")
-        .arg(&output_base)
-        .arg("--assembly")
-        .arg(&request.identity.assembly)
-        .arg("--no-progress")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|error| format!("cannot start fastVEP CADD preparation: {error}"))?;
-    let result = (|| {
-        let mut stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
-        stdin
-            .write_all(b"#Chrom\tPos\tRef\tAlt\tRawScore\tPHRED\n")
-            .map_err(|error| format!("cannot write CADD header to fastVEP: {error}"))?;
-        let mut left = snv.next_record()?;
-        let mut right = indel.next_record()?;
-        let started = Instant::now();
-        let mut last_report = 0_u64;
-        while left.is_some() || right.is_some() {
-            if live_cancel().load(Ordering::SeqCst) {
-                return Err("cancelled".into());
-            }
-            let take_left = match (&left, &right) {
-                (Some(left), Some(right)) => cadd_record_before_or_equal(left, right),
-                (Some(_), None) => true,
-                _ => false,
-            };
-            let record = if take_left {
-                let record = left.take().unwrap();
-                left = snv.next_record()?;
-                record
-            } else {
-                let record = right.take().unwrap();
-                right = indel.next_record()?;
-                record
-            };
-            stdin
-                .write_all(record.line.as_bytes())
-                .map_err(|error| format!("cannot stream CADD to fastVEP: {error}"))?;
-            let current = count.load(Ordering::Relaxed);
-            if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
-                let elapsed = started.elapsed().as_secs_f64();
-                let downloaded = if resumable {
-                    request.identity.expected_compressed_bytes
-                } else {
-                    current
-                };
-                if resumable {
-                    update_local_build_progress_detail(
-                        "CADD",
-                        &request.identity.chromosome,
-                        current,
-                        request.identity.expected_compressed_bytes,
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            current as f64 / elapsed
-                        },
-                    );
-                } else {
-                    update_cadd_progress(
-                        &request.identity.chromosome,
-                        completed,
-                        base_network.saturating_add(downloaded),
-                        total_network,
-                        prepared_bytes,
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            downloaded as f64 / elapsed
-                        },
-                    );
-                }
-                last_report = current;
-            }
-        }
-        drop(stdin);
-        let received = count.load(Ordering::Relaxed);
-        if received != request.identity.expected_compressed_bytes {
-            return Err(format!(
-                "truncated CADD chromosome stream: received {received}, expected {}",
-                request.identity.expected_compressed_bytes
-            ));
-        }
-        Ok(received)
-    })();
-    let received = match result {
-        Ok(received) => received,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            remove_incomplete_outputs(request.paths);
-            return Err(error);
-        }
-    };
-    let status = child
-        .wait()
-        .map_err(|error| format!("cannot wait for fastVEP CADD preparation: {error}"))?;
-    if !status.success() {
-        remove_incomplete_outputs(request.paths);
-        return Err(format!(
-            "fastVEP CADD preparation failed with status {status}"
-        ));
-    }
-    Ok(StreamingBuildResult {
-        compressed_bytes_read: received,
-        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_osa())?,
-        prepared_index_bytes: required_nonempty_file(&request.paths.partial_index())?,
-    })
-}
-
-fn update_cadd_progress(
-    chromosome: &str,
-    completed: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(chromosome.to_string());
-        state.phase = "streaming-ranges-to-fastvep".into();
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = 24_u16.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            (network_bytes as f64 * 100.0 / expected_network_bytes as f64).min(99.9)
-        };
-        state.detail =
-            format!("CADD chromosome {chromosome}: streaming indexed SNV and indel ranges");
-    }
-}
-
-type SpliceAiHttpReader = SpliceAiReader<CountedReader<Box<dyn Read>>>;
-
-fn open_spliceai_range<F>(
-    request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
-    plan: &SpliceAiArtifactPlan,
-    range: &CaddByteRange,
-    count: Arc<std::sync::atomic::AtomicU64>,
-    cancelled: &AtomicBool,
-    progress: F,
-) -> Result<SpliceAiHttpReader, String>
-where
-    F: FnMut(resumable::PartProgress),
-{
-    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
+    let mut inputs = Vec::with_capacity(2);
+    let mut persisted_before = 0_u64;
+    for (plan, range, tag) in [
+        (&plans[0], snv_range, "snv"),
+        (&plans[1], indel_range, "indel"),
+    ] {
+        let paths = request.paths.source_part_variant(tag);
+        let mut identity = request.identity.clone();
+        identity.source_url = format!("{}#{tag}", plan.artifact.data_url);
+        identity.expected_compressed_bytes = range.len();
+        identity.source_etag = Some(plan.artifact.data_etag.clone());
+        identity.source_last_modified = Some(plan.artifact.data_last_modified.clone());
+        let base = persisted_before;
         let part = resumable::acquire_range(
-            request.paths,
-            request.identity,
-            plan.artifact.data_url,
+            &paths,
+            &identity,
+            &plan.artifact.data_url,
             range.start,
             plan.artifact.data_bytes,
-            Some(plan.artifact.data_etag),
-            Some(plan.artifact.data_last_modified),
-            cancelled,
-            progress,
+            Some(&plan.artifact.data_etag),
+            Some(&plan.artifact.data_last_modified),
+            live_cancel().as_ref(),
+            |state| {
+                let persisted = base.saturating_add(state.persisted_bytes);
+                update_indexed_progress(
+                    "CADD",
+                    &request.identity.chromosome,
+                    completed,
+                    24,
+                    base_network.saturating_add(persisted),
+                    total_network,
+                    prepared_bytes,
+                    state.bytes_per_second,
+                );
+                update_resumable_download_detail(
+                    "CADD",
+                    &request.identity.chromosome,
+                    persisted,
+                    snv_range.len().saturating_add(indel_range.len()),
+                );
+            },
         )?;
-        Box::new(part.reader)
-    } else {
-        let response = client
-            .get(plan.artifact.data_url)
-            .header(
-                reqwest::header::RANGE,
-                format!("bytes={}-{}", range.start, range.end),
-            )
-            .send()
-            .map_err(|error| {
-                format!(
-                    "SpliceAI chromosome {} range request failed: {error}",
-                    range.chromosome
-                )
-            })?;
-        let expected_range = format!(
-            "bytes {}-{}/{}",
-            range.start, range.end, plan.artifact.data_bytes
-        );
-        let actual_range = response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|value| value.to_str().ok());
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-            || response.content_length() != Some(range.len())
-            || actual_range != Some(expected_range.as_str())
-            || response
-                .headers()
-                .get(reqwest::header::ETAG)
-                .and_then(|value| value.to_str().ok())
-                != Some(plan.artifact.data_etag)
-            || response
-                .headers()
-                .get(reqwest::header::LAST_MODIFIED)
-                .and_then(|value| value.to_str().ok())
-                != Some(plan.artifact.data_last_modified)
-        {
-            return Err(format!(
-                "SpliceAI chromosome {} no longer matches its pinned byte range",
-                range.chromosome
-            ));
-        }
-        Box::new(response)
-    };
-    let mut decoder = flate2::read::MultiGzDecoder::new(CountedReader {
-        inner: source,
-        count,
-    });
-    if range.uncompressed_skip > 0 {
-        std::io::copy(
-            &mut decoder.by_ref().take(range.uncompressed_skip as u64),
-            &mut std::io::sink(),
-        )
-        .map_err(|error| format!("cannot seek to SpliceAI tabix virtual offset: {error}"))?;
+        drop(part.reader);
+        inputs.push(builder::RawFileInput {
+            path: paths.source_part().to_path_buf(),
+            uncompressed_skip: range.uncompressed_skip as u64,
+        });
+        persisted_before = persisted_before.saturating_add(range.len());
     }
-    Ok(SpliceAiReader {
-        input: BufReader::new(decoder),
-        chromosome: Some(range.chromosome.clone()),
-    })
+    builder::build_from_files(
+        request,
+        &inputs,
+        Some(&request.identity.chromosome),
+        "CADD",
+        live_cancel().as_ref(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn stream_spliceai_range_to_partial_osa(
     request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
     plan: &SpliceAiArtifactPlan,
-    range: &CaddByteRange,
+    range: &IndexedByteRange,
     base_network: u64,
     total_network: u64,
     completed: u16,
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
-    let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let resumable = source_input_mode() == SourceInputMode::Resumable;
-    let mut reader = open_spliceai_range(
-        request,
-        client,
-        plan,
-        range,
-        count.clone(),
-        live_cancel().as_ref(),
-        |state| {
-            update_spliceai_progress(
-                &range.chromosome,
-                completed,
-                base_network.saturating_add(state.persisted_bytes),
-                total_network,
-                prepared_bytes,
-                state.bytes_per_second,
-            );
-            update_resumable_download_detail(
-                "SpliceAI",
-                &range.chromosome,
-                state.persisted_bytes,
-                state.expected_bytes,
-            );
-        },
-    )?;
     if resumable {
-        update_local_build_detail("SpliceAI", &range.chromosome);
-    }
-    let log = fs::File::create(request.log_path)
-        .map_err(|error| format!("cannot create SpliceAI preparation log: {error}"))?;
-    let output_base = request.paths.partial_directory.join("source");
-    let mut child = Command::new(request.fastvep_executable)
-        .arg("sa-build")
-        .arg("--source")
-        .arg("spliceai")
-        .arg("--input")
-        .arg("-")
-        .arg("--output")
-        .arg(&output_base)
-        .arg("--assembly")
-        .arg(&request.identity.assembly)
-        .arg("--no-progress")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|error| format!("cannot start fastVEP SpliceAI preparation: {error}"))?;
-    let result = (|| {
-        let mut stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
-        stdin
-            .write_all(b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
-            .map_err(|error| format!("cannot write SpliceAI header to fastVEP: {error}"))?;
-        let started = Instant::now();
-        let mut last_report = 0_u64;
-        while let Some(record) = reader.next_record()? {
-            if live_cancel().load(Ordering::SeqCst) {
-                return Err("cancelled".into());
-            }
-            stdin
-                .write_all(record.line.as_bytes())
-                .map_err(|error| format!("cannot stream SpliceAI to fastVEP: {error}"))?;
-            let current = count.load(Ordering::Relaxed);
-            if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
-                let elapsed = started.elapsed().as_secs_f64();
-                let downloaded = if resumable {
-                    request.identity.expected_compressed_bytes
-                } else {
-                    current
-                };
-                if resumable {
-                    update_local_build_progress_detail(
-                        "SpliceAI",
-                        &range.chromosome,
-                        current,
-                        request.identity.expected_compressed_bytes,
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            current as f64 / elapsed
-                        },
-                    );
-                } else {
-                    update_spliceai_progress(
-                        &range.chromosome,
-                        completed,
-                        base_network.saturating_add(downloaded),
-                        total_network,
-                        prepared_bytes,
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            downloaded as f64 / elapsed
-                        },
-                    );
-                }
-                last_report = current;
-            }
-        }
-        drop(stdin);
-        let received = count.load(Ordering::Relaxed);
-        if received != request.identity.expected_compressed_bytes {
-            return Err(format!(
-                "truncated SpliceAI chromosome stream: received {received}, expected {}",
-                request.identity.expected_compressed_bytes
-            ));
-        }
-        Ok(received)
-    })();
-    let received = match result {
-        Ok(received) => received,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            remove_incomplete_outputs(request.paths);
-            return Err(error);
-        }
-    };
-    let status = child
-        .wait()
-        .map_err(|error| format!("cannot wait for fastVEP SpliceAI preparation: {error}"))?;
-    if !status.success() {
-        remove_incomplete_outputs(request.paths);
-        return Err(format!(
-            "fastVEP SpliceAI preparation failed with status {status}"
-        ));
-    }
-    Ok(StreamingBuildResult {
-        compressed_bytes_read: received,
-        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_osa())?,
-        prepared_index_bytes: required_nonempty_file(&request.paths.partial_index())?,
-    })
-}
-
-fn update_spliceai_progress(
-    chromosome: &str,
-    completed: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(chromosome.to_string());
-        state.phase = "streaming-ranges-to-fastvep".into();
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = 24_u16.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            (network_bytes as f64 * 100.0 / expected_network_bytes as f64).min(99.9)
-        };
-        state.detail = format!(
-            "SpliceAI chromosome {chromosome}: streaming the indexed public MANE SNV range"
+        let part = resumable::acquire_range(
+            request.paths,
+            request.identity,
+            &plan.artifact.data_url,
+            range.start,
+            plan.artifact.data_bytes,
+            Some(&plan.artifact.data_etag),
+            Some(&plan.artifact.data_last_modified),
+            live_cancel().as_ref(),
+            |state| {
+                update_indexed_progress(
+                    "SpliceAI",
+                    &range.chromosome,
+                    completed,
+                    24,
+                    base_network.saturating_add(state.persisted_bytes),
+                    total_network,
+                    prepared_bytes,
+                    state.bytes_per_second,
+                );
+                update_resumable_download_detail(
+                    "SpliceAI",
+                    &range.chromosome,
+                    state.persisted_bytes,
+                    state.expected_bytes,
+                );
+            },
+        )?;
+        drop(part.reader);
+        return builder::build_from_files(
+            request,
+            &[builder::RawFileInput {
+                path: request.paths.source_part().to_path_buf(),
+                uncompressed_skip: range.uncompressed_skip as u64,
+            }],
+            Some(&range.chromosome),
+            "SpliceAI",
+            live_cancel().as_ref(),
         );
     }
-}
-
-fn update_revel_progress(
-    chromosome: &str,
-    completed: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(chromosome.to_string());
-        state.phase = "streaming-zip-to-fastvep".into();
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = 24_u16.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            (network_bytes as f64 * 100.0 / expected_network_bytes as f64).min(99.9)
-        };
-        state.detail =
-            format!("REVEL chromosome {chromosome}: validating and inflating official ZIP members");
-    }
+    let mut reader = transport::ReconnectingRangeReader::new(
+        &plan.artifact.data_url,
+        "spliceai",
+        &range.chromosome,
+        range.start,
+        range.end,
+        plan.artifact.data_bytes,
+        Some(&plan.artifact.data_etag),
+        Some(&plan.artifact.data_last_modified),
+    )?;
+    builder::build_from_reader(
+        request,
+        &mut reader,
+        range.uncompressed_skip as u64,
+        Some(&range.chromosome),
+        live_cancel().as_ref(),
+        |bytes, throughput| {
+            update_indexed_progress(
+                "SpliceAI",
+                &range.chromosome,
+                completed,
+                24,
+                base_network.saturating_add(bytes),
+                total_network,
+                prepared_bytes,
+                throughput,
+            );
+        },
+    )
 }
 
 pub fn start_sharded_live(mut request: ShardedLiveRequest) -> Result<(), String> {
-    let selection = load_supplementary_field_selection(
-        &request.source.resource_id,
-        request
-            .resource_root
-            .parent()
-            .unwrap_or(&request.resource_root),
-    )?;
+    let selection = load_selected_fields(&request.source.resource_id, &request.resource_root)?;
     request.source.selected_schema = supplementary_schema_identity(
         &request.source.selected_schema,
         &request.source.resource_id,
@@ -2488,6 +1871,39 @@ pub fn start_sharded_live(mut request: ShardedLiveRequest) -> Result<(), String>
         ..LivePreparationState::default()
     })?;
     spawn_live_job(job, move || run_sharded_live(request, selection))
+}
+
+fn finish_sharded_preparation(
+    result: Result<(u64, u64, u16), String>,
+    ready_detail: &str,
+    cancelled_detail: &str,
+    failed_detail: &str,
+) {
+    if let Ok(mut state) = live_state().lock() {
+        match result {
+            Ok((network, prepared, completed)) => {
+                state.state = "ready".into();
+                state.phase = "ready".into();
+                state.network_bytes = network;
+                state.prepared_bytes = prepared;
+                state.completed_chromosomes = completed;
+                state.remaining_chromosomes = 0;
+                state.percent = 100.0;
+                state.detail = ready_detail.into();
+            }
+            Err(error) if error == "cancelled" => {
+                state.state = "cancelled".into();
+                state.phase = "cancelled".into();
+                state.detail = cancelled_detail.into();
+            }
+            Err(error) => {
+                state.state = "failed".into();
+                state.phase = "failed".into();
+                state.error = Some(error);
+                state.detail = failed_detail.into();
+            }
+        }
+    }
 }
 
 fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSelection) {
@@ -2536,7 +1952,7 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                     }
                     update_sharded_progress(
                         &request.source.resource_id,
-                        shard,
+                        &shard.chromosome,
                         completed,
                         request.source.shards.len() as u16,
                         network_bytes,
@@ -2576,7 +1992,7 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                 |progress| {
                     update_sharded_progress(
                         &request.source.resource_id,
-                        shard,
+                        &shard.chromosome,
                         completed,
                         request.source.shards.len() as u16,
                         base_network.saturating_add(progress.compressed_bytes_read),
@@ -2623,51 +2039,25 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
         )?;
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = format!("All {resource_id} chromosome shards are verified");
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail =
-                    format!("Cancellation completed; verified {resource_id} shards were retained");
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail =
-                    format!("{resource_id} preparation failed; completed shards were retained");
-            }
-        }
-    }
+    finish_sharded_preparation(
+        result,
+        &format!("All {resource_id} chromosome shards are verified"),
+        &format!("Cancellation completed; verified {resource_id} shards were retained"),
+        &format!("{resource_id} preparation failed; completed shards were retained"),
+    );
 }
 
-type DbsnpHttpReader = DbsnpReader<CountedReader<Box<dyn Read>>>;
-
-fn open_dbsnp_range<F>(
+fn stream_dbsnp_range_to_partial_osa(
     request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
     plan: &DbsnpArtifactPlan,
-    range: &CaddByteRange,
-    source_contig: &str,
-    count: Arc<AtomicU64>,
-    cancelled: &AtomicBool,
-    progress: F,
-) -> Result<DbsnpHttpReader, String>
-where
-    F: FnMut(resumable::PartProgress),
-{
-    let source: Box<dyn Read> = if source_input_mode() == SourceInputMode::Resumable {
+    range: &IndexedByteRange,
+    base_network: u64,
+    total_network: u64,
+    completed: u16,
+    prepared_bytes: u64,
+) -> Result<StreamingBuildResult, String> {
+    let resumable = source_input_mode() == SourceInputMode::Resumable;
+    if resumable {
         let part = resumable::acquire_range(
             request.paths,
             request.identity,
@@ -2676,309 +2066,67 @@ where
             plan.artifact.data_bytes,
             None,
             plan.artifact.data_last_modified.as_deref(),
-            cancelled,
-            progress,
+            live_cancel().as_ref(),
+            |state| {
+                update_indexed_progress(
+                    "dbSNP",
+                    &range.chromosome,
+                    completed,
+                    DBSNP_PRIMARY_CONTIGS.len() as u16,
+                    base_network.saturating_add(state.persisted_bytes),
+                    total_network,
+                    prepared_bytes,
+                    state.bytes_per_second,
+                );
+                update_resumable_download_detail(
+                    "dbSNP",
+                    &range.chromosome,
+                    state.persisted_bytes,
+                    state.expected_bytes,
+                );
+            },
         )?;
-        Box::new(part.reader)
-    } else {
-        let response = client
-            .get(&plan.artifact.data_url)
-            .header(
-                reqwest::header::RANGE,
-                format!("bytes={}-{}", range.start, range.end),
-            )
-            .send()
-            .map_err(|error| {
-                format!(
-                    "dbSNP chromosome {} range request failed: {error}",
-                    range.chromosome
-                )
-            })?;
-        let expected_range = format!(
-            "bytes {}-{}/{}",
-            range.start, range.end, plan.artifact.data_bytes
+        drop(part.reader);
+        return builder::build_from_files(
+            request,
+            &[builder::RawFileInput {
+                path: request.paths.source_part().to_path_buf(),
+                uncompressed_skip: range.uncompressed_skip as u64,
+            }],
+            Some(&range.chromosome),
+            "dbSNP",
+            live_cancel().as_ref(),
         );
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
-            || response.content_length() != Some(range.len())
-            || response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                != Some(expected_range.as_str())
-        {
-            return Err(format!(
-                "dbSNP chromosome {} returned incompatible range metadata",
-                range.chromosome
-            ));
-        }
-        validate_optional_header(
-            response.headers(),
-            reqwest::header::LAST_MODIFIED,
-            plan.artifact.data_last_modified.as_deref(),
-            "Last-Modified",
-        )?;
-        Box::new(response)
-    };
-    let mut decoder = flate2::read::MultiGzDecoder::new(CountedReader {
-        inner: source,
-        count,
-    });
-    if range.uncompressed_skip > 0 {
-        std::io::copy(
-            &mut decoder.by_ref().take(range.uncompressed_skip as u64),
-            &mut std::io::sink(),
-        )
-        .map_err(|error| format!("cannot seek to dbSNP tabix virtual offset: {error}"))?;
     }
-    Ok(DbsnpReader {
-        input: BufReader::new(decoder),
-        source_contig: source_contig.into(),
-        chromosome: range.chromosome.clone(),
-    })
-}
-
-fn stream_dbsnp_range_to_partial_osa(
-    request: &StreamingBuildRequest<'_>,
-    client: &reqwest::blocking::Client,
-    plan: &DbsnpArtifactPlan,
-    range: &CaddByteRange,
-    source_contig: &str,
-    base_network: u64,
-    total_network: u64,
-    completed: u16,
-    prepared_bytes: u64,
-) -> Result<StreamingBuildResult, String> {
-    let count = Arc::new(AtomicU64::new(0));
-    let resumable = source_input_mode() == SourceInputMode::Resumable;
-    let mut reader = open_dbsnp_range(
+    let mut reader = transport::ReconnectingRangeReader::new(
+        &plan.artifact.data_url,
+        "dbsnp",
+        &range.chromosome,
+        range.start,
+        range.end,
+        plan.artifact.data_bytes,
+        None,
+        plan.artifact.data_last_modified.as_deref(),
+    )?;
+    builder::build_from_reader(
         request,
-        client,
-        plan,
-        range,
-        source_contig,
-        count.clone(),
+        &mut reader,
+        range.uncompressed_skip as u64,
+        Some(&range.chromosome),
         live_cancel().as_ref(),
-        |state| {
+        |bytes, throughput| {
             update_indexed_progress(
                 "dbSNP",
                 &range.chromosome,
                 completed,
                 DBSNP_PRIMARY_CONTIGS.len() as u16,
-                base_network.saturating_add(state.persisted_bytes),
+                base_network.saturating_add(bytes),
                 total_network,
                 prepared_bytes,
-                state.bytes_per_second,
-            );
-            update_resumable_download_detail(
-                "dbSNP",
-                &range.chromosome,
-                state.persisted_bytes,
-                state.expected_bytes,
+                throughput,
             );
         },
-    )?;
-    if resumable {
-        update_local_build_detail("dbSNP", &range.chromosome);
-    }
-    let log = fs::File::create(request.log_path)
-        .map_err(|error| format!("cannot create dbSNP preparation log: {error}"))?;
-    let output_base = request.paths.partial_directory.join("source");
-    let mut command = Command::new(request.fastvep_executable);
-    command
-        .arg("sa-build")
-        .arg("--source")
-        .arg("dbsnp")
-        .arg("--input")
-        .arg("-")
-        .arg("--output")
-        .arg(&output_base)
-        .arg("--assembly")
-        .arg(&request.identity.assembly)
-        .arg("--no-progress")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null());
-    if let Some(fields) = request.source_fields {
-        command.env(
-            "ANNOCAT_SOURCE_FIELDS",
-            serde_json::to_string(fields)
-                .map_err(|error| format!("cannot encode dbSNP fields: {error}"))?,
-        );
-    }
-    let mut child = command
-        .stderr(Stdio::from(log))
-        .spawn()
-        .map_err(|error| format!("cannot start fastVEP dbSNP preparation: {error}"))?;
-    let result = (|| {
-        let mut stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
-        stdin
-            .write_all(b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
-            .map_err(|error| format!("cannot write dbSNP header to fastVEP: {error}"))?;
-        let started = Instant::now();
-        let mut last_report = 0_u64;
-        while let Some(line) = reader.next_record()? {
-            if live_cancel().load(Ordering::SeqCst) {
-                return Err("cancelled".into());
-            }
-            stdin
-                .write_all(line.as_bytes())
-                .map_err(|error| format!("cannot stream dbSNP to fastVEP: {error}"))?;
-            let current = count.load(Ordering::Relaxed);
-            if current.saturating_sub(last_report) >= 4 * 1024 * 1024 {
-                let elapsed = started.elapsed().as_secs_f64();
-                let downloaded = if resumable { range.len() } else { current };
-                if resumable {
-                    update_local_build_progress_detail(
-                        "dbSNP",
-                        &range.chromosome,
-                        current,
-                        range.len(),
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            current as f64 / elapsed
-                        },
-                    );
-                } else {
-                    update_indexed_progress(
-                        "dbSNP",
-                        &range.chromosome,
-                        completed,
-                        DBSNP_PRIMARY_CONTIGS.len() as u16,
-                        base_network.saturating_add(downloaded),
-                        total_network,
-                        prepared_bytes,
-                        if elapsed == 0.0 {
-                            0.0
-                        } else {
-                            downloaded as f64 / elapsed
-                        },
-                    );
-                }
-                last_report = current;
-            }
-        }
-        drop(stdin);
-        let received = count.load(Ordering::Relaxed);
-        if received != range.len() {
-            return Err(format!(
-                "truncated dbSNP chromosome stream: received {received}, expected {}",
-                range.len()
-            ));
-        }
-        Ok(received)
-    })();
-    let received = match result {
-        Ok(received) => received,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            remove_incomplete_outputs(request.paths);
-            return Err(error);
-        }
-    };
-    let status = child
-        .wait()
-        .map_err(|error| format!("cannot wait for fastVEP dbSNP preparation: {error}"))?;
-    if !status.success() {
-        remove_incomplete_outputs(request.paths);
-        return Err(format!(
-            "fastVEP dbSNP preparation failed with status {status}"
-        ));
-    }
-    Ok(StreamingBuildResult {
-        compressed_bytes_read: received,
-        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_osa())?,
-        prepared_index_bytes: required_nonempty_file(&request.paths.partial_index())?,
-    })
-}
-
-fn update_resumable_progress_detail(label: &str, chromosome: &str, progress: StreamingProgress) {
-    if source_input_mode() != SourceInputMode::Resumable {
-        return;
-    }
-    if progress.consumed_bytes == 0
-        && progress.compressed_bytes_read < progress.expected_compressed_bytes
-    {
-        update_resumable_download_detail(
-            label,
-            chromosome,
-            progress.compressed_bytes_read,
-            progress.expected_compressed_bytes,
-        );
-    } else {
-        update_local_build_progress_detail(
-            label,
-            chromosome,
-            progress.consumed_bytes,
-            progress.expected_compressed_bytes,
-            progress.bytes_per_second,
-        );
-    }
-}
-
-fn update_resumable_download_detail(label: &str, chromosome: &str, persisted: u64, expected: u64) {
-    if let Ok(mut state) = live_state().lock() {
-        state.phase = "downloading-source-part".into();
-        state.detail = format!(
-            "{label} chromosome {chromosome}: saved {} of {} resumable source data",
-            format_decimal_bytes(persisted),
-            format_decimal_bytes(expected)
-        );
-    }
-}
-
-fn update_local_build_detail(label: &str, chromosome: &str) {
-    update_local_build_progress_detail(label, chromosome, 0, 0, 0.0);
-}
-
-fn update_local_build_progress_detail(
-    label: &str,
-    chromosome: &str,
-    consumed: u64,
-    expected: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.phase = "building-cache".into();
-        state.throughput_bytes_per_second = throughput;
-        state.detail = if consumed > 0 && expected > 0 {
-            format!(
-                "{label} chromosome {chromosome}: building cache from {} of {} saved source data",
-                format_decimal_bytes(consumed),
-                format_decimal_bytes(expected)
-            )
-        } else {
-            format!("{label} chromosome {chromosome}: building cache from completed source part")
-        };
-    }
-}
-
-fn update_indexed_progress(
-    label: &str,
-    chromosome: &str,
-    completed: u16,
-    total: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(chromosome.into());
-        state.phase = "streaming-ranges-to-fastvep".into();
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = total.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            (network_bytes as f64 * 100.0 / expected_network_bytes as f64).min(99.9)
-        };
-        state.detail = format!("{label} chromosome {chromosome}: streaming indexed range");
-    }
+    )
 }
 
 fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelection) {
@@ -2988,9 +2136,9 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
             "dbsnp",
             &selection,
         )?;
-        let client = cadd_http_client()?;
-        let plan = plan_dbsnp_artifact(&client, request.artifact)?;
-        let expected_total = plan.ranges.iter().map(CaddByteRange::len).sum();
+        let client = crate::http_client::source()?;
+        let plan = plan_dbsnp_artifact(&client, request.artifact, &request.resource_root)?;
+        let expected_total = plan.ranges.iter().map(IndexedByteRange::len).sum();
         let mut network_bytes = 0_u64;
         let mut prepared_bytes = 0_u64;
         let mut completed = 0_u16;
@@ -3059,10 +2207,8 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
                 || {
                     stream_dbsnp_range_to_partial_osa(
                         &build_request,
-                        &client,
                         &plan,
                         range,
-                        source_contig,
                         network_bytes,
                         expected_total,
                         completed,
@@ -3097,46 +2243,28 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
         )?;
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = "All dbSNP chromosome shards are verified".into();
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail = "dbSNP paused; source prefix and verified shards retained".into();
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail = "dbSNP preparation failed; resumable data was retained".into();
-            }
-        }
-    }
+    finish_sharded_preparation(
+        result,
+        "All dbSNP chromosome shards are verified",
+        "dbSNP paused; source prefix and verified shards retained",
+        "dbSNP preparation failed; resumable data was retained",
+    );
 }
 
 fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelection) {
     let result = (|| {
         let selected_schema =
             supplementary_schema_identity("cadd-v1.7-grch38", "cadd", &selection)?;
-        let client = cadd_http_client()?;
+        let client = crate::http_client::source()?;
+        let artifacts = indexed_catalog::cadd_artifacts()?;
         let plans = [
-            plan_cadd_artifact(&client, CADD_ARTIFACTS[0])?,
-            plan_cadd_artifact(&client, CADD_ARTIFACTS[1])?,
+            plan_cadd_artifact(&client, artifacts[0].clone(), &request.resource_root)?,
+            plan_cadd_artifact(&client, artifacts[1].clone(), &request.resource_root)?,
         ];
         let expected_total = plans
             .iter()
             .flat_map(|plan| plan.ranges.iter())
-            .map(CaddByteRange::len)
+            .map(IndexedByteRange::len)
             .sum();
         let mut network_bytes = 0_u64;
         let mut prepared_bytes = 0_u64;
@@ -3195,9 +2323,11 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                             .saturating_add(checkpoint.prepared_bytes)
                             .saturating_add(checkpoint.prepared_index_bytes);
                     }
-                    update_cadd_progress(
+                    update_indexed_progress(
+                        "CADD",
                         chromosome,
                         completed,
+                        24,
                         network_bytes,
                         expected_total,
                         prepared_bytes,
@@ -3224,7 +2354,6 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                     dbnsfp_fields: None,
                     source_fields: Some(&selection.fields),
                 },
-                &client,
                 &plans,
                 index,
                 network_bytes,
@@ -3257,31 +2386,12 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
         )?;
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = "All CADD chromosome shards are verified".into();
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail = "Cancellation completed; verified CADD shards were retained".into();
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail = "CADD preparation failed; completed shards were retained".into();
-            }
-        }
-    }
+    finish_sharded_preparation(
+        result,
+        "All CADD chromosome shards are verified",
+        "Cancellation completed; verified CADD shards were retained",
+        "CADD preparation failed; completed shards were retained",
+    );
 }
 
 fn run_revel_live(
@@ -3305,10 +2415,7 @@ fn run_revel_live(
                 release: manifest.release.clone(),
                 assembly: manifest.assembly.clone(),
                 chromosome: archive.chromosome.clone(),
-                source_url: format!(
-                    "https://zenodo.org/api/records/7072866/files/{}/content",
-                    archive.filename
-                ),
+                source_url: manifest.archive_url(&archive.filename),
                 expected_compressed_bytes: archive.bytes,
                 source_etag: Some(format!("md5:{}", archive.md5)),
                 source_last_modified: None,
@@ -3392,31 +2499,12 @@ fn run_revel_live(
         )?;
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = "All REVEL v1.3 chromosome shards are verified".into();
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail = "Cancellation completed; verified REVEL shards were retained".into();
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail = "REVEL preparation failed; completed shards were retained".into();
-            }
-        }
-    }
+    finish_sharded_preparation(
+        result,
+        "All REVEL v1.3 chromosome shards are verified",
+        "Cancellation completed; verified REVEL shards were retained",
+        "REVEL preparation failed; completed shards were retained",
+    );
 }
 
 fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryFieldSelection) {
@@ -3426,9 +2514,9 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
             "spliceai",
             &selection,
         )?;
-        let client = cadd_http_client()?;
-        let plan = plan_spliceai_artifact(&client)?;
-        let expected_total = plan.ranges.iter().map(CaddByteRange::len).sum();
+        let client = crate::http_client::source()?;
+        let plan = plan_spliceai_artifact(&client, &request.resource_root)?;
+        let expected_total = plan.ranges.iter().map(IndexedByteRange::len).sum();
         let mut network_bytes = 0_u64;
         let mut prepared_bytes = 0_u64;
         let mut completed = 0_u16;
@@ -3450,8 +2538,8 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                     plan.artifact.data_url, range.start, range.end
                 ),
                 expected_compressed_bytes: range.len(),
-                source_etag: Some(plan.artifact.data_etag.into()),
-                source_last_modified: Some(plan.artifact.data_last_modified.into()),
+                source_etag: Some(plan.artifact.data_etag.clone()),
+                source_last_modified: Some(plan.artifact.data_last_modified.clone()),
                 selected_schema: selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
                 osa_schema_version: 1,
@@ -3471,9 +2559,11 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                             .saturating_add(checkpoint.prepared_bytes)
                             .saturating_add(checkpoint.prepared_index_bytes);
                     }
-                    update_spliceai_progress(
+                    update_indexed_progress(
+                        "SpliceAI",
                         chromosome,
                         completed,
+                        24,
                         network_bytes,
                         expected_total,
                         prepared_bytes,
@@ -3500,7 +2590,6 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                     dbnsfp_fields: None,
                     source_fields: Some(&selection.fields),
                 },
-                &client,
                 &plan,
                 range,
                 network_bytes,
@@ -3533,63 +2622,12 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
         )?;
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = "All public SpliceAI chromosome shards are verified".into();
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail =
-                    "Cancellation completed; verified SpliceAI shards were retained".into();
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail = "SpliceAI preparation failed; completed shards were retained".into();
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn update_sharded_progress(
-    resource_id: &str,
-    shard: &PinnedStreamShard,
-    completed: u16,
-    total: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(shard.chromosome.clone());
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = total.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            network_bytes as f64 * 100.0 / expected_network_bytes as f64
-        };
-        state.detail = format!(
-            "{resource_id} chromosome {}: {} of {} source bytes",
-            shard.chromosome, network_bytes, expected_network_bytes
-        );
-    }
+    finish_sharded_preparation(
+        result,
+        "All public SpliceAI chromosome shards are verified",
+        "Cancellation completed; verified SpliceAI shards were retained",
+        "SpliceAI preparation failed; completed shards were retained",
+    );
 }
 
 const TRANSIENT_CHROMOSOME_STREAM_RETRY_DELAYS: [Duration; 3] = [
@@ -3615,18 +2653,22 @@ where
     F: FnMut() -> Result<StreamingBuildResult, String>,
 {
     let total_attempts = TRANSIENT_CHROMOSOME_STREAM_RETRY_DELAYS.len() + 1;
-    for attempt in 0..total_attempts {
+    for (attempt, retry_delay) in TRANSIENT_CHROMOSOME_STREAM_RETRY_DELAYS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
         match operation() {
             Ok(result) => return Ok(result),
             Err(error) if error == "cancelled" || cancelled.load(Ordering::SeqCst) => {
                 return Err("cancelled".into());
             }
-            Err(error)
-                if is_transient_chromosome_stream_error(&error) && attempt + 1 < total_attempts =>
-            {
-                let delay = TRANSIENT_CHROMOSOME_STREAM_RETRY_DELAYS[attempt];
+            Err(error) if is_transient_chromosome_stream_error(&error) && retry_delay.is_some() => {
+                let delay = retry_delay.expect("guarded retry delay");
                 crate::terminal_log(
-                    "prepare",
+                    "resources",
                     format!(
                         "{resource_id} chromosome {chromosome} interrupted on attempt {}/{}: {error}; retrying in {}s",
                         attempt + 1,
@@ -3656,7 +2698,7 @@ where
             }
             Err(error) if is_transient_chromosome_stream_error(&error) => {
                 crate::terminal_log(
-                    "prepare",
+                    "resources",
                     format!(
                         "{resource_id} chromosome {chromosome} failed after {total_attempts} attempts: {error}"
                     ),
@@ -3712,8 +2754,9 @@ fn run_dbnsfp_live(
                             .saturating_add(checkpoint.prepared_bytes)
                             .saturating_add(checkpoint.prepared_index_bytes);
                     }
-                    update_dbnsfp_progress(
-                        member,
+                    update_sharded_progress(
+                        "dbNSFP",
+                        &member.chromosome,
                         completed,
                         manifest.members.len() as u16,
                         network_bytes,
@@ -3760,8 +2803,9 @@ fn run_dbnsfp_live(
                     member,
                     live_cancel().as_ref(),
                     |progress| {
-                        update_dbnsfp_progress(
-                            member,
+                        update_sharded_progress(
+                            "dbNSFP",
+                            &member.chromosome,
                             completed,
                             manifest.members.len() as u16,
                             base_network.saturating_add(progress.compressed_bytes_read),
@@ -3784,8 +2828,9 @@ fn run_dbnsfp_live(
                             member,
                             live_cancel().as_ref(),
                             |progress| {
-                                update_dbnsfp_progress(
-                                    member,
+                                update_sharded_progress(
+                                    "dbNSFP",
+                                    &member.chromosome,
                                     completed,
                                     manifest.members.len() as u16,
                                     base_network.saturating_add(progress.compressed_bytes_read),
@@ -3827,32 +2872,12 @@ fn run_dbnsfp_live(
         }
         Ok((network_bytes, prepared_bytes, completed))
     })();
-    if let Ok(mut state) = live_state().lock() {
-        match result {
-            Ok((network, prepared, completed)) => {
-                state.state = "ready".into();
-                state.phase = "ready".into();
-                state.network_bytes = network;
-                state.prepared_bytes = prepared;
-                state.completed_chromosomes = completed;
-                state.remaining_chromosomes = 0;
-                state.percent = 100.0;
-                state.detail = "All dbNSFP 4.9a chromosome shards are verified".into();
-            }
-            Err(error) if error == "cancelled" => {
-                state.state = "cancelled".into();
-                state.phase = "cancelled".into();
-                state.detail =
-                    "Cancellation completed; verified dbNSFP shards were retained".into();
-            }
-            Err(error) => {
-                state.state = "failed".into();
-                state.phase = "failed".into();
-                state.error = Some(error);
-                state.detail = "dbNSFP preparation failed; completed shards were retained".into();
-            }
-        }
-    }
+    finish_sharded_preparation(
+        result,
+        "All dbNSFP 4.9a chromosome shards are verified",
+        "Cancellation completed; verified dbNSFP shards were retained",
+        "dbNSFP preparation failed; completed shards were retained",
+    );
 }
 
 fn remove_legacy_dbnsfp_shards(
@@ -3961,35 +2986,6 @@ where
     Ok(result)
 }
 
-fn update_dbnsfp_progress(
-    member: &DbnsfpArchiveShard,
-    completed: u16,
-    total: u16,
-    network_bytes: u64,
-    expected_network_bytes: u64,
-    prepared_bytes: u64,
-    throughput: f64,
-) {
-    if let Ok(mut state) = live_state().lock() {
-        state.chromosome = Some(member.chromosome.clone());
-        state.network_bytes = network_bytes;
-        state.expected_network_bytes = expected_network_bytes;
-        state.prepared_bytes = prepared_bytes;
-        state.throughput_bytes_per_second = throughput;
-        state.completed_chromosomes = completed;
-        state.remaining_chromosomes = total.saturating_sub(completed);
-        state.percent = if expected_network_bytes == 0 {
-            0.0
-        } else {
-            network_bytes as f64 * 100.0 / expected_network_bytes as f64
-        };
-        state.detail = format!(
-            "dbNSFP chromosome {}: {} of {} source bytes",
-            member.chromosome, network_bytes, expected_network_bytes
-        );
-    }
-}
-
 fn write_shard_manifest(
     resource_root: &Path,
     members: &[DbnsfpArchiveShard],
@@ -4009,6 +3005,7 @@ fn write_osa_shard_manifest<'a>(
     if !matches!(
         resource_id,
         "dbnsfp"
+            | "dbsnp"
             | "gnomad"
             | "gnomad-genomes"
             | "phylop"
@@ -4184,6 +3181,14 @@ mod tests {
     use std::io;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn parser_worker_budget_tracks_installation_concurrency() {
+        assert_eq!(fastvep_parser_workers_for_concurrency(1), 4);
+        assert_eq!(fastvep_parser_workers_for_concurrency(2), 2);
+        assert_eq!(fastvep_parser_workers_for_concurrency(3), 1);
+        assert_eq!(fastvep_parser_workers_for_concurrency(4), 1);
+    }
 
     #[test]
     fn live_preparation_jobs_keep_progress_and_cancellation_independent() {
@@ -4678,120 +3683,6 @@ mod tests {
     }
 
     #[test]
-    fn dbsnp_reader_filters_the_indexed_contig_and_rewrites_its_chromosome() {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(
-                b"##fileformat=VCFv4.2\n\
-NC_000001.11\t101\trs1\tA\tG\t.\tPASS\tRS=1\n\
-NC_000002.12\t202\trs2\tC\tT\t.\tPASS\tRS=2\n",
-            )
-            .unwrap();
-        let compressed = encoder.finish().unwrap();
-        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(compressed));
-        let mut reader = DbsnpReader {
-            input: BufReader::new(decoder),
-            source_contig: "NC_000001.11".into(),
-            chromosome: "1".into(),
-        };
-
-        assert_eq!(
-            reader.next_record().unwrap().as_deref(),
-            Some("1\t101\trs1\tA\tG\t.\tPASS\tRS=1\n")
-        );
-        assert_eq!(reader.next_record().unwrap(), None);
-    }
-
-    #[test]
-    fn indexed_bgzf_readers_ignore_only_unterminated_range_tails() {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(
-                b"NC_000001.11\t101\trs1\tA\tG\t.\tPASS\tRS=1\n\
-partial dbSNP row",
-            )
-            .unwrap();
-        let mut dbsnp = DbsnpReader {
-            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
-                encoder.finish().unwrap(),
-            ))),
-            source_contig: "NC_000001.11".into(),
-            chromosome: "1".into(),
-        };
-        assert!(dbsnp.next_record().unwrap().is_some());
-        assert!(dbsnp.next_record().unwrap().is_none());
-
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(
-                b"1\t100\t.\tA\tG\t.\t.\tSpliceAI=G|GENE1|0.1|0.0|0.0|0.0|1|0|0|0\n\
-1\t101\t.\tA",
-            )
-            .unwrap();
-        let mut spliceai = SpliceAiReader {
-            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
-                encoder.finish().unwrap(),
-            ))),
-            chromosome: Some("1".into()),
-        };
-        assert!(spliceai.next_record().unwrap().is_some());
-        assert!(spliceai.next_record().unwrap().is_none());
-
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(b"1\t2\tA\tG\t0.1\t10\n1\t3\tC\tT\t0.2")
-            .unwrap();
-        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(encoder.finish().unwrap()));
-        let mut cadd = CaddChromosomeReader::new(decoder, 0, "1").unwrap();
-        assert!(cadd.next_record().unwrap().is_some());
-        assert!(cadd.next_record().unwrap().is_none());
-    }
-
-    #[test]
-    fn indexed_bgzf_readers_still_reject_malformed_complete_rows() {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"partial dbSNP row\n").unwrap();
-        let mut dbsnp = DbsnpReader {
-            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
-                encoder.finish().unwrap(),
-            ))),
-            source_contig: "NC_000001.11".into(),
-            chromosome: "1".into(),
-        };
-        assert!(
-            dbsnp
-                .next_record()
-                .unwrap_err()
-                .contains("no tab-delimited fields")
-        );
-
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"1\t101\t.\tA\n").unwrap();
-        let mut spliceai = SpliceAiReader {
-            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(
-                encoder.finish().unwrap(),
-            ))),
-            chromosome: Some("1".into()),
-        };
-        assert!(
-            spliceai
-                .next_record()
-                .unwrap_err()
-                .contains("fewer than eight columns")
-        );
-
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"1\t3\tC\tT\t0.2\n").unwrap();
-        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(encoder.finish().unwrap()));
-        let mut cadd = CaddChromosomeReader::new(decoder, 0, "1").unwrap();
-        assert!(
-            cadd.next_record()
-                .unwrap_err()
-                .contains("5 columns instead of 6")
-        );
-    }
-
-    #[test]
     fn dbnsfp_inventory_selects_exact_variant_members_in_genomic_order() {
         let root = root("dbnsfp-inventory");
         fs::create_dir_all(&root).unwrap();
@@ -4978,7 +3869,7 @@ partial dbSNP row",
     }
 
     #[test]
-    fn cadd_tabix_offsets_and_chromosome_filter_are_bounded_and_strict() {
+    fn tabix_virtual_offsets_are_bounded_and_strict() {
         let mut tbi = Vec::new();
         tbi.extend_from_slice(b"TBI\x01");
         tbi.extend_from_slice(&1_i32.to_le_bytes());
@@ -5001,33 +3892,6 @@ partial dbSNP row",
         assert_eq!(offsets.len(), 1);
         assert_eq!(offsets[0].name, "1");
         assert_eq!(offsets[0].virtual_offset, virtual_offset);
-
-        let rows =
-            b"#Chrom\tPos\tRef\tAlt\tRawScore\tPHRED\n1\t2\tA\tG\t0.1\t10\n2\t3\tC\tT\t0.2\t20\n";
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(rows).unwrap();
-        let decoder = flate2::read::MultiGzDecoder::new(Cursor::new(encoder.finish().unwrap()));
-        let mut reader = CaddChromosomeReader::new(decoder, 0, "1").unwrap();
-        assert_eq!(reader.next_record().unwrap().unwrap().position, 2);
-        assert!(reader.next_record().unwrap().is_none());
-    }
-
-    #[test]
-    fn cadd_snv_and_indel_merge_order_is_deterministic() {
-        let snv = CaddRecord {
-            position: 10,
-            reference: "A".into(),
-            alternate: "G".into(),
-            line: String::new(),
-        };
-        let indel = CaddRecord {
-            position: 11,
-            reference: "AT".into(),
-            alternate: "A".into(),
-            line: String::new(),
-        };
-        assert!(cadd_record_before_or_equal(&snv, &indel));
-        assert!(!cadd_record_before_or_equal(&indel, &snv));
     }
 
     #[test]
@@ -5092,21 +3956,6 @@ partial dbSNP row",
         let upgraded = crate::cache_contract::read(&paths.cache_contract()).unwrap();
         assert_eq!(upgraded.builder_provenance.commit, "unknown-legacy");
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn spliceai_reader_keeps_only_the_requested_chromosome() {
-        let rows = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t100\t.\tA\tG\t.\t.\tSpliceAI=G|GENE1|0.1|0.0|0.0|0.0|1|0|0|0\n2\t101\t.\tA\tC\t.\t.\tSpliceAI=C|GENE2|0.0|0.2|0.0|0.0|0|2|0|0\n";
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(rows).unwrap();
-        let compressed = encoder.finish().unwrap();
-        let mut reader = SpliceAiReader {
-            input: BufReader::new(flate2::read::MultiGzDecoder::new(Cursor::new(compressed))),
-            chromosome: Some("1".into()),
-        };
-        let record = reader.next_record().unwrap().unwrap();
-        assert!(record.line.starts_with("1\t100\t"));
-        assert!(reader.next_record().unwrap().is_none());
     }
 
     #[test]
@@ -5807,10 +4656,10 @@ partial dbSNP row",
         if !fastvep.is_file() {
             return;
         }
-        let archive = pinned_revel_manifest()
-            .unwrap()
+        let manifest = pinned_revel_manifest().unwrap();
+        let archive = manifest
             .archives
-            .into_iter()
+            .iter()
             .find(|archive| archive.chromosome == "Y")
             .unwrap();
         let root = root("official-revel-y");
@@ -5820,10 +4669,7 @@ partial dbSNP row",
             release: "1.3".into(),
             assembly: "GRCh38".into(),
             chromosome: "Y".into(),
-            source_url: format!(
-                "https://zenodo.org/api/records/7072866/files/{}/content",
-                archive.filename
-            ),
+            source_url: manifest.archive_url(&archive.filename),
             expected_compressed_bytes: archive.bytes,
             source_etag: Some(format!("md5:{}", archive.md5)),
             source_last_modified: None,
@@ -5842,7 +4688,7 @@ partial dbSNP row",
                 dbnsfp_fields: None,
                 source_fields: None,
             },
-            &archive,
+            archive,
             0,
             archive.bytes,
             0,
@@ -5856,6 +4702,31 @@ partial dbSNP row",
                 .record_count,
             31_551
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn every_current_osa_resource_supports_a_shard_manifest() {
+        let root = std::env::temp_dir().join(format!("annocat-manifests-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        for resource_id in [
+            "dbnsfp",
+            "dbsnp",
+            "gnomad",
+            "gnomad-genomes",
+            "phylop",
+            "cadd",
+            "spliceai",
+            "revel",
+            "clinvar",
+        ] {
+            write_osa_shard_manifest(&root, resource_id, ["1", "2"].into_iter()).unwrap();
+            let manifest =
+                fs::read_to_string(root.join(format!("{resource_id}.osa-shards.json"))).unwrap();
+            assert!(manifest.contains("shards/chr1/source.osa"));
+            assert!(manifest.contains("shards/chr2/source.osa"));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

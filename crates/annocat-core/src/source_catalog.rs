@@ -71,6 +71,8 @@ pub struct Release {
     pub size_checked_at: String,
     pub checksum: Option<Checksum>,
     pub resolver: Option<String>,
+    pub resolver_directory_url: Option<String>,
+    pub resolver_notes_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -122,7 +124,7 @@ pub fn profiles_json() -> String {
                     "purpose": profile.purpose,
                     "sourceIds": profile.source_ids,
                     "requiredEngineIds": ["fastvep"],
-                    "requiredResourceIds": ["grch38-reference", "transcript-cache"]
+                    "requiredResourceIds": ["grch38-reference", "ensembl-gff3"]
                 })
             })
             .collect::<Vec<_>>(),
@@ -143,7 +145,6 @@ pub fn download_release(id: &str) -> Option<crate::ResourceRelease> {
         filename: release.filename.as_str(),
         url: release.primary_url.as_str(),
         download_bytes: Some(release.download_bytes),
-        installed_bytes: None,
         range_resume: release.range_resume,
         size_checked_at: release.size_checked_at.as_str(),
         archive_format: release.archive_format.as_str(),
@@ -165,6 +166,14 @@ pub fn download_releases() -> impl Iterator<Item = crate::ResourceRelease> {
         .resources
         .iter()
         .filter_map(|resource| download_release(&resource.id))
+}
+
+pub fn resolver_directory_url(id: &str) -> Option<&'static str> {
+    resource(id)?.release.resolver_directory_url.as_deref()
+}
+
+pub fn resolver_notes_url(id: &str) -> Option<&'static str> {
+    resource(id)?.release.resolver_notes_url.as_deref()
 }
 
 pub fn artifact_identity(
@@ -267,6 +276,20 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             _ => {
                 return Err(format!(
                     "resource {} has an invalid release policy",
+                    resource.id
+                ));
+            }
+        }
+        for url in [
+            resource.release.resolver_directory_url.as_deref(),
+            resource.release.resolver_notes_url.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !url.starts_with("https://") {
+                return Err(format!(
+                    "resource {} has an unsafe resolver URL",
                     resource.id
                 ));
             }
@@ -396,69 +419,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_matches_every_legacy_source_and_implementation_policy() {
-        assert_eq!(catalog().sources.len(), crate::SOURCES.len());
-        assert_eq!(catalog().sources.len(), crate::SOURCE_IMPLEMENTATIONS.len());
-        for legacy in crate::SOURCES {
-            let current = source(legacy.id).expect("catalog source");
-            let implementation = crate::source_implementation(legacy.id)
-                .expect("legacy source implementation policy");
-            assert_eq!(current.name, legacy.name);
-            assert_eq!(current.purpose, legacy.purpose);
-            assert_eq!(current.default_enabled, legacy.default_enabled);
-            assert_eq!(
-                current.fastvep_source.as_deref(),
-                implementation.fastvep_source
-            );
-            assert_eq!(current.delivery, implementation.delivery);
-            assert_eq!(current.assembly, implementation.assembly);
-        }
+    fn catalog_is_the_complete_source_api() {
         let json: serde_json::Value = serde_json::from_str(&sources_json()).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), crate::SOURCES.len());
+        assert_eq!(json.as_array().unwrap().len(), catalog().sources.len());
         assert_eq!(json[0]["id"], "fastvep");
         assert_eq!(json[0]["defaultEnabled"], true);
     }
 
     #[test]
-    fn catalog_matches_every_actionable_legacy_release() {
-        assert_eq!(catalog().resources.len(), crate::RESOURCE_RELEASES.len());
-        for legacy in crate::RESOURCE_RELEASES {
-            let current = resource(legacy.resource_id).expect("catalog resource");
-            let projected = download_release(legacy.resource_id).expect("download release");
-            assert_eq!(projected.resource_id, legacy.resource_id);
-            assert_eq!(projected.version, legacy.version);
-            assert_eq!(projected.url, legacy.url);
-            assert_eq!(current.release.version, legacy.version);
-            assert_eq!(current.release.primary_url, legacy.url);
-            assert_eq!(current.release.filename, legacy.filename);
+    fn every_actionable_release_projects_to_the_downloader_contract() {
+        assert_eq!(download_releases().count(), catalog().resources.len());
+        for current in &catalog().resources {
+            let projected = download_release(&current.id).expect("download release");
+            assert_eq!(projected.resource_id, current.id);
+            assert_eq!(projected.version, current.release.version);
+            assert_eq!(projected.url, current.release.primary_url);
+            assert_eq!(projected.filename, current.release.filename);
             assert_eq!(
-                current.release.download_bytes,
-                legacy.download_bytes.unwrap()
+                projected.download_bytes,
+                Some(current.release.download_bytes)
             );
-            assert_eq!(current.release.archive_format, legacy.archive_format);
-            assert_eq!(current.release.range_resume, legacy.range_resume);
-            assert_eq!(current.release.size_checked_at, legacy.size_checked_at);
-            assert_eq!(
-                current
-                    .release
-                    .checksum
-                    .as_ref()
-                    .filter(|checksum| checksum.algorithm == "md5")
-                    .map(|checksum| checksum.value.as_str()),
-                legacy.publisher_md5
-            );
-            assert_eq!(
-                current
-                    .release
-                    .checksum
-                    .as_ref()
-                    .filter(|checksum| checksum.algorithm == "sha256")
-                    .map(|checksum| checksum.value.as_str()),
-                legacy.publisher_sha256
-            );
+            assert_eq!(projected.archive_format, current.release.archive_format);
+            assert_eq!(projected.range_resume, current.release.range_resume);
+            assert_eq!(projected.size_checked_at, current.release.size_checked_at);
         }
     }
-
     #[test]
     fn every_streamed_resource_has_a_stable_adapter_and_artifact_identity() {
         for resource in &catalog().resources {
@@ -479,21 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn profiles_match_the_legacy_api_contract() {
-        assert_eq!(catalog().profiles.len(), crate::ANNOTATION_PROFILES.len());
-        for legacy in crate::ANNOTATION_PROFILES {
-            let current = profile(legacy.id).expect("catalog profile");
-            assert_eq!(current.name, legacy.name);
-            assert_eq!(current.purpose, legacy.purpose);
-            assert_eq!(
-                current
-                    .source_ids
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                legacy.source_ids
-            );
-        }
+    fn profiles_serialize_from_the_catalog() {
         let json: serde_json::Value = serde_json::from_str(&profiles_json()).unwrap();
         assert_eq!(json[0]["id"], "wgs");
         assert_eq!(json[1]["id"], "standard");

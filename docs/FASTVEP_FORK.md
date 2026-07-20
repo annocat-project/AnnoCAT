@@ -37,6 +37,11 @@ formats the already annotated in-memory result as newline-delimited JSON through
 buffered writer; it does not repeat transcript prediction, HGVS calculation, or fastSA
 lookups.
 
+Source-format ownership also belongs to fastVEP. AnnoCAT may resolve an HTTP artifact,
+resume a raw byte range, and provide tabix framing metadata, but it must not decode,
+rewrite, merge, or validate database rows. `sa-build` accepts raw BGZF range prefixes,
+an optional chromosome filter, and multiple sorted artifacts for this boundary.
+
 On 2026-07-16, the Windows release build was measured on fastVEP's 1,003-record
 `validation/human/chr22_1kgp.vcf` fixture using the same warmed transcript cache and
 three warm runs per mode:
