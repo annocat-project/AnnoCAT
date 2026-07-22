@@ -1,6 +1,7 @@
 use crate::normalization::{IndexedReference, NormalizeError, canonicalize};
 use flate2::read::MultiGzDecoder;
 use noodles::vcf;
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::Path;
@@ -9,12 +10,21 @@ use std::path::Path;
 pub struct VcfSummary {
     pub assembly: Option<String>,
     pub samples: Vec<String>,
+    pub source_records: u64,
+    pub skipped_non_variant_records: u64,
     pub records: u64,
     pub alleles: u64,
     pub snps: u64,
     pub indels: u64,
     pub other_alleles: u64,
     pub multiallelic_records: u64,
+    pub identity_sha256: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VcfHeaderSummary {
+    pub assembly: Option<String>,
+    pub samples: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -116,7 +126,7 @@ pub fn open_vcf(path: &Path) -> io::Result<Box<dyn BufRead>> {
 
 pub fn inspect(path: &Path) -> Result<VcfSummary, String> {
     let mut summary = VcfSummary {
-        assembly: read_declared_assembly(path)?,
+        assembly: declared_assembly(path)?,
         ..VcfSummary::default()
     };
     let reader =
@@ -126,23 +136,40 @@ pub fn inspect(path: &Path) -> Result<VcfSummary, String> {
         .read_header()
         .map_err(|error| format!("invalid VCF header in {}: {error}", path.display()))?;
     summary.samples = header.sample_names().iter().cloned().collect();
+    let mut identity = Sha256::new();
 
     for result in vcf_reader.records() {
         let record = result.map_err(|error| {
             format!(
                 "invalid VCF record {} in {}: {error}",
-                summary.records + 1,
+                summary.source_records + 1,
                 path.display()
             )
         })?;
-        summary.records += 1;
+        summary.source_records += 1;
+        let chromosome = record.reference_sequence_name();
+        let position = record
+            .variant_start()
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .ok_or("VCF record has no position")?
+            .get() as u64;
         let reference = record.reference_bases();
         let alternate_bases = record.alternate_bases();
         let alt_values: Vec<&str> = alternate_bases.as_ref().split(',').collect();
+        if !alt_values
+            .iter()
+            .any(|alternate| is_variant_alternate(alternate))
+        {
+            summary.skipped_non_variant_records += 1;
+            continue;
+        }
+        summary.records += 1;
         if alt_values.len() > 1 {
             summary.multiallelic_records += 1;
         }
         for alternate in alt_values {
+            update_identity_digest(&mut identity, chromosome, position, reference, alternate);
             summary.alleles += 1;
             if reference.len() == 1
                 && alternate.len() == 1
@@ -157,28 +184,69 @@ pub fn inspect(path: &Path) -> Result<VcfSummary, String> {
             }
         }
     }
+    summary.identity_sha256 = format!("{:x}", identity.finalize());
     Ok(summary)
 }
 
-fn read_declared_assembly(path: &Path) -> Result<Option<String>, String> {
+pub fn update_identity_digest(
+    digest: &mut Sha256,
+    chromosome: &str,
+    position: u64,
+    reference: &str,
+    alternate: &str,
+) {
+    for value in [
+        chromosome.as_bytes(),
+        reference.as_bytes(),
+        alternate.as_bytes(),
+    ] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    digest.update(position.to_le_bytes());
+}
+
+pub fn declared_assembly(path: &Path) -> Result<Option<String>, String> {
+    Ok(inspect_header(path)?.assembly)
+}
+
+pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
     let reader =
         open_vcf(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let mut assembly = None;
     for line in reader.lines() {
         let line =
             line.map_err(|error| format!("cannot read VCF header in {}: {error}", path.display()))?;
         if let Some(value) = line.strip_prefix("##reference=") {
-            return Ok(assembly_name(value).or_else(|| Some(value.to_string())));
+            assembly = assembly_name(value).or_else(|| Some(value.to_string()));
         }
         if line.starts_with("##contig=<")
-            && let Some(assembly) = assembly_name(&line)
+            && let Some(value) = assembly_name(&line)
         {
-            return Ok(Some(assembly));
+            assembly = Some(value);
         }
-        if line.starts_with("#CHROM") {
-            break;
+        if line.starts_with("#CHROM\t") {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            return Ok(VcfHeaderSummary {
+                assembly,
+                samples: columns
+                    .get(9..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect(),
+            });
         }
     }
-    Ok(None)
+    Err(format!("VCF header is missing #CHROM in {}", path.display()))
+}
+
+pub fn is_variant_alternate(value: &str) -> bool {
+    !matches!(value, "" | "." | "<NON_REF>" | "<*>")
+}
+
+pub fn has_variant_alternate(value: &str) -> bool {
+    value.split(',').any(is_variant_alternate)
 }
 
 fn is_sequence(value: &str) -> bool {
@@ -196,5 +264,34 @@ fn assembly_name(value: &str) -> Option<String> {
         Some("GRCh37".into())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspection_counts_only_records_with_real_alternate_alleles() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input.vcf");
+        std::fs::write(
+            &path,
+            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n",
+        )
+        .unwrap();
+        let summary = inspect(&path).unwrap();
+        assert_eq!(summary.source_records, 4);
+        assert_eq!(summary.skipped_non_variant_records, 2);
+        assert_eq!(summary.records, 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

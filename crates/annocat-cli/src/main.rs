@@ -293,8 +293,12 @@ fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, Str
 }
 
 mod annotation;
+mod annotation_input;
+mod annotation_progress;
+mod annotation_recovery;
 mod cache_contract;
 mod csq;
+mod detail_lookup;
 mod downloader;
 mod fastvep;
 mod http_client;
@@ -520,6 +524,11 @@ fn terminal_task_activity(task: &tasks::TaskSnapshot) -> (&'static str, &'static
         "failed" => ("Failed", "Failed"),
         "downloaded" => ("Ready to install", "Ready"),
         "running" => match task.phase.as_str() {
+            "recovery-scan" => ("Scanning recovery", "Scan"),
+            "recovery-input" => ("Preparing recovery", "Prepare"),
+            "recovery-merge" => ("Joining recovery", "Join"),
+            "indexing-variants" => ("Building variant table", "Index"),
+            "indexing-evidence" => ("Building evidence tables", "Index"),
             "reconnecting" | "retrying" => ("Reconnecting", "Reconnect"),
             "replaying" => ("Replaying", "Replay"),
             "building-cache" => ("Building cache", "Cache"),
@@ -555,14 +564,24 @@ fn terminal_task_table(active: &[tasks::TaskSnapshot], available: usize) -> Vec<
         "Source",
         "Activity",
         "Chromosome",
-        "Downloaded",
+        "Progress",
         "Complete",
         "Speed",
     ];
     let rows = active
         .iter()
         .map(|task| {
-            let downloaded = if task.total_bytes > 0 {
+            let downloaded = if task.kind == "annotation"
+                && task.phase.starts_with("indexing-")
+                && task.completed_bytes > 0
+            {
+                format!("{} written", format_terminal_size(task.completed_bytes))
+            } else if task.kind == "annotation" && task.total_records > 0 {
+                format!(
+                    "{} / {} variants",
+                    task.completed_records, task.total_records
+                )
+            } else if task.total_bytes > 0 {
                 format_terminal_size_pair(task.completed_bytes, task.total_bytes)
             } else if task.completed_bytes > 0 {
                 format_terminal_size(task.completed_bytes)
@@ -575,7 +594,11 @@ fn terminal_task_table(active: &[tasks::TaskSnapshot], available: usize) -> Vec<
                 } else {
                     "-".into()
                 };
-            let speed = format_terminal_rate(task.throughput_bytes_per_second);
+            let speed = if task.throughput_records_per_second > 0.0 {
+                format!("{:.0} variants/s", task.throughput_records_per_second)
+            } else {
+                format_terminal_rate(task.throughput_bytes_per_second)
+            };
             [
                 task.title.clone(),
                 terminal_task_activity(task).0.into(),
@@ -618,7 +641,12 @@ fn terminal_task_table(active: &[tasks::TaskSnapshot], available: usize) -> Vec<
                 } else {
                     "-".into()
                 };
-                let downloaded = if task.total_bytes > 0 {
+                let downloaded = if task.kind == "annotation" && task.total_records > 0 {
+                    format!(
+                        "{} / {} variants",
+                        task.completed_records, task.total_records
+                    )
+                } else if task.total_bytes > 0 {
                     format_terminal_size_pair(task.completed_bytes, task.total_bytes)
                 } else {
                     format_terminal_size(task.completed_bytes)
@@ -806,6 +834,9 @@ fn annotate_command(args: &[String]) -> Result<(), String> {
             output_directory,
             source_ids: Vec::new(),
             include_annotated_vcf,
+            run_mode: annotation::RunMode::Annotation,
+            add_local_consequences: false,
+            confirm_grch38: false,
         },
         paths.runs,
         paths.resources,
@@ -821,7 +852,12 @@ fn inspect_fastvep_command(args: &[String]) -> Result<(), String> {
     let summary = csq::inspect(std::path::Path::new(path))?;
     println!("fastVEP output: {path}");
     println!("  CSQ fields          : {}", summary.fields.len());
-    println!("  Records             : {}", summary.records);
+    println!("  Records (source)    : {}", summary.source_records);
+    println!("  Records (variants)  : {}", summary.records);
+    println!(
+        "  Reference-only      : {}",
+        summary.skipped_non_variant_records
+    );
     println!("  Alternate alleles   : {}", summary.alternate_alleles);
     println!("  CSQ entries         : {}", summary.csq_entries);
     println!("  Records without CSQ : {}", summary.records_without_csq);
@@ -847,7 +883,12 @@ fn inspect_vcf_command(args: &[String]) -> Result<(), String> {
             summary.samples.join(", ")
         }
     );
-    println!("  Records              : {}", summary.records);
+    println!("  Records (source)     : {}", summary.source_records);
+    println!("  Records (variants)   : {}", summary.records);
+    println!(
+        "  Reference-only       : {}",
+        summary.skipped_non_variant_records
+    );
     println!("  Alternate alleles    : {}", summary.alleles);
     println!("  SNP alleles          : {}", summary.snps);
     println!("  Indel alleles        : {}", summary.indels);
@@ -1219,6 +1260,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
     let mutating = path.ends_with("/start")
         || path.ends_with("/cancel")
+        || path.ends_with("/resume")
+        || path.ends_with("/recover")
         || path.ends_with("/delete")
         || path.ends_with("/name")
         || path.ends_with("/share")
@@ -1231,6 +1274,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 | "/api/pick-resource-folder"
                 | "/api/pick-results-folder"
                 | "/api/pick-vcfs"
+                | "/api/pick-recovery-files"
+                | "/api/pick-recovery-input"
                 | "/api/pick-results"
         );
     if mutating {
@@ -1283,6 +1328,47 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                     "{{\"accepted\":true,\"runId\":\"{}\"}}",
                     json_escape(&run_id)
                 ),
+            ),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if path == "/api/annotations/recover" {
+        let response = portable_paths().and_then(|paths| {
+            let request = serde_json::from_slice::<annotation::RecoveryRequest>(request_body)
+                .map_err(|error| format!("invalid annotation recovery request: {error}"))?;
+            annotation::start_recovery_background(request, paths.runs, paths.resources)
+        });
+        let (status, body) = match response {
+            Ok(run_id) => (
+                "202 Accepted",
+                serde_json::json!({"accepted": true, "runId": run_id}).to_string(),
+            ),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if path == "/api/annotations/resume" {
+        let response = portable_paths().and_then(|paths| {
+            let value: serde_json::Value = serde_json::from_slice(request_body)
+                .map_err(|error| format!("invalid annotation resume request: {error}"))?;
+            let run_id = value
+                .get("runId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or("annotation run ID is required")?;
+            annotation::resume_background(run_id, paths.runs, paths.resources)
+        });
+        let (status, body) = match response {
+            Ok(run_id) => (
+                "202 Accepted",
+                serde_json::json!({"accepted": true, "runId": run_id}).to_string(),
             ),
             Err(error) => (
                 "409 Conflict",
@@ -1809,14 +1895,6 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let page_request = result_page_request(query);
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
-            let consequences = completed_run_file(
-                &paths.runs,
-                run_id,
-                "consequencesFile",
-                "consequences.parquet",
-                "parquet",
-            )
-            .ok();
             let evidence = completed_run_file(
                 &paths.runs,
                 run_id,
@@ -1838,8 +1916,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 .map(|candidate| candidate.allele_id)
                 .collect::<Vec<_>>();
             results::page_json_with_details_for_candidates(
+                run_id,
                 &result,
-                consequences.as_deref(),
                 evidence.as_deref(),
                 catalog.as_deref(),
                 offset,
@@ -1921,11 +1999,17 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "parquet",
             )
             .ok();
-            results::complete_detail_json(
+            let record_number = query_parameter_u64(query, "recordNumber")
+                .and_then(|value| i64::try_from(value).ok());
+            let alt_index = query_parameter_u64(query, "altIndex")
+                .and_then(|value| i32::try_from(value).ok());
+            results::complete_detail_json_at(
                 &variants,
                 consequences.as_deref(),
                 evidence.as_deref(),
                 allele_id,
+                record_number,
+                alt_index,
             )
         });
         let (status, body) = match response {
@@ -1947,14 +2031,6 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let page_request = result_page_request(query);
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
-            let consequences = completed_run_file(
-                &paths.runs,
-                run_id,
-                "consequencesFile",
-                "consequences.parquet",
-                "parquet",
-            )
-            .ok();
             let evidence = completed_run_file(
                 &paths.runs,
                 run_id,
@@ -1973,8 +2049,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             .ok();
             let page_request = page_request?;
             results::page_json_with_details(
+                run_id,
                 &result,
-                consequences.as_deref(),
                 evidence.as_deref(),
                 catalog.as_deref(),
                 offset,
@@ -2168,11 +2244,44 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             ),
         },
         "/api/pick-vcfs" => match pick_vcf_files() {
-            Ok(paths) => (
+            Ok(paths) => {
+                let files = selected_vcf_summaries(&paths);
+                (
+                    "200 OK",
+                    "application/json",
+                    serde_json::json!({"paths": paths, "files": files}).to_string(),
+                )
+            }
+            Err(error) => (
+                "500 Internal Server Error",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
+        "/api/pick-recovery-files" => match pick_recovery_files() {
+            Ok(Some((partial_vcf, structured_output))) => (
                 "200 OK",
                 "application/json",
-                serde_json::json!({"paths": paths}).to_string(),
+                serde_json::json!({
+                    "partialVcf": partial_vcf,
+                    "structuredOutput": structured_output
+                })
+                .to_string(),
             ),
+            Ok(None) => ("200 OK", "application/json", "{\"partialVcf\":null}".into()),
+            Err(error) => (
+                "500 Internal Server Error",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
+        "/api/pick-recovery-input" => match pick_recovery_input() {
+            Ok(Some(path)) => (
+                "200 OK",
+                "application/json",
+                serde_json::json!({"path": path}).to_string(),
+            ),
+            Ok(None) => ("200 OK", "application/json", "{\"path\":null}".to_string()),
             Err(error) => (
                 "500 Internal Server Error",
                 "application/json",
@@ -2408,6 +2517,13 @@ fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
         serde_json::from_str(&evidence_filters)
             .map_err(|error| format!("evidenceFilters must be a JSON array: {error}"))?
     };
+    let sorts = text("sorts")?;
+    let sorts = if sorts.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&sorts)
+            .map_err(|error| format!("sorts must be a JSON array: {error}"))?
+    };
     Ok(results::PageRequest {
         search: text("search")?,
         sort: text("sort")?,
@@ -2417,6 +2533,15 @@ fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
                 usize::try_from(value).map_err(|_| "sortEvidence must be a non-negative index")
             })
             .transpose()?,
+        sorts,
+        known_total: integer("knownTotal")?
+            .map(|value| u64::try_from(value).map_err(|_| "knownTotal must be non-negative"))
+            .transpose()?,
+        query_session: text("querySession")?,
+        request_generation: integer("requestGeneration")?
+            .map(|value| u64::try_from(value).map_err(|_| "requestGeneration must be non-negative"))
+            .transpose()?
+            .unwrap_or(0),
         chromosome: text("chromosome")?,
         position_min: integer("positionMin")?,
         position_max: integer("positionMax")?,
@@ -3260,6 +3385,7 @@ struct CompletedRunSummary {
     original_name: String,
     completed_at: String,
     assembly: String,
+    report_kind: String,
     variant_count: u64,
     canonical_result_bytes: Option<u64>,
     annotated_vcf_bytes: Option<u64>,
@@ -3336,6 +3462,10 @@ fn completed_runs(runs_directory: &std::path::Path) -> Result<Vec<CompletedRunSu
         let Some(variant_count) = manifest["variantCount"].as_u64() else {
             continue;
         };
+        let report_kind = manifest["reportKind"].as_str().unwrap_or("annotation");
+        if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
+            continue;
+        }
         let canonical_result_bytes = manifest["canonicalResultBytes"].as_u64();
         let annotated_vcf_bytes = manifest["annotatedVcfBytes"].as_u64();
         let Some(result_file) = manifest["resultFile"].as_str() else {
@@ -3368,6 +3498,7 @@ fn completed_runs(runs_directory: &std::path::Path) -> Result<Vec<CompletedRunSu
             original_name: name.into(),
             completed_at: completed_at.into(),
             assembly: assembly.into(),
+            report_kind: report_kind.into(),
             variant_count,
             canonical_result_bytes,
             annotated_vcf_bytes,
@@ -3659,6 +3790,13 @@ fn task_status_from_current(
     paths: &PortablePaths,
     mut snapshots: Vec<tasks::TaskSnapshot>,
 ) -> Result<TaskStatus, String> {
+    let active_run_id = annotation::status().run_id;
+    snapshots.extend(
+        annotation::interrupted_runs(&paths.runs)
+            .into_iter()
+            .filter(|run| run.run_id != active_run_id)
+            .map(tasks::from_annotation),
+    );
     let runs = completed_runs(&paths.runs)?;
     let completed_ids = runs
         .iter()
@@ -4041,6 +4179,84 @@ fn pick_vcf_files() -> Result<Vec<String>, String> {
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectedVcfSummary {
+    path: String,
+    name: String,
+    bytes: u64,
+    assembly: Option<String>,
+    samples: Vec<String>,
+    error: Option<String>,
+}
+
+fn selected_vcf_summaries(paths: &[String]) -> Vec<SelectedVcfSummary> {
+    paths
+        .iter()
+        .map(|path| {
+            let file = std::path::Path::new(path);
+            let bytes = std::fs::metadata(file)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let inspected = annocat_core::vcf::inspect_header(file);
+            let (assembly, samples, error) = match inspected {
+                Ok(summary) => (summary.assembly, summary.samples, None),
+                Err(error) => (None, Vec::new(), Some(error)),
+            };
+            SelectedVcfSummary {
+                path: path.clone(),
+                name: file
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(path)
+                    .to_owned(),
+                bytes,
+                assembly,
+                samples,
+                error,
+            }
+        })
+        .collect()
+}
+
+fn pick_recovery_files() -> Result<Option<(String, String)>, String> {
+    let selection = run_native_dialog(
+        || -> Result<Option<(std::path::PathBuf, std::path::PathBuf)>, String> {
+            let Some(partial_vcf) = rfd::FileDialog::new()
+                .set_title("Choose the interrupted annotated VCF")
+                .add_filter("Uncompressed annotated VCF", &["vcf"])
+                .pick_file()
+            else {
+                return Ok(None);
+            };
+            let structured_output = partial_vcf
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("fastvep.ndjson");
+            if !structured_output.is_file() {
+                return Err("fastvep.ndjson was not found beside the interrupted VCF".into());
+            }
+            Ok(Some((partial_vcf, structured_output)))
+        },
+    )??;
+    Ok(selection.map(|(partial_vcf, structured_output)| {
+        (
+            partial_vcf.to_string_lossy().into_owned(),
+            structured_output.to_string_lossy().into_owned(),
+        )
+    }))
+}
+
+fn pick_recovery_input() -> Result<Option<String>, String> {
+    let selection = run_native_dialog(|| {
+        rfd::FileDialog::new()
+            .set_title("Choose the original input VCF")
+            .add_filter("Variant call file", &["vcf", "gz", "bgz"])
+            .pick_file()
+    })?;
+    Ok(selection.map(|path| path.to_string_lossy().into_owned()))
 }
 
 fn pick_result_file() -> Result<Option<String>, String> {
@@ -4427,6 +4643,34 @@ mod profile_status_tests {
             missing.is_empty(),
             "POST request lines missing X-AnnoCat-CSRF: {missing:#?}"
         );
+    }
+
+    #[test]
+    fn legacy_recovery_never_chains_native_windows_dialogs() {
+        let source = include_str!("main.rs");
+        let picker = source
+            .split_once("fn pick_recovery_files()")
+            .unwrap()
+            .1
+            .split_once("fn pick_recovery_input()")
+            .unwrap()
+            .0;
+        assert_eq!(picker.matches("rfd::FileDialog::new()").count(), 1);
+        assert!(picker.contains(".pick_file()"));
+        assert!(!picker.contains(".pick_files()"));
+        let input_picker = source
+            .split_once("fn pick_recovery_input()")
+            .unwrap()
+            .1
+            .split_once("fn pick_result_file()")
+            .unwrap()
+            .0;
+        assert_eq!(input_picker.matches("rfd::FileDialog::new()").count(), 1);
+        assert!(input_picker.contains(".pick_file()"));
+        assert!(!input_picker.contains(".pick_files()"));
+        let app = include_str!("../../../web/src/app.js");
+        assert!(app.contains("'/api/pick-recovery-input'"));
+        assert!(app.contains("recoveryFiles.input=paths[0]"));
     }
 
     #[test]

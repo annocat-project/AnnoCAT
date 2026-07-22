@@ -23,6 +23,8 @@ struct ReportManifest {
     completed_at: String,
     assembly: String,
     variant_count: u64,
+    #[serde(default)]
+    report_kind: Option<String>,
     files: Vec<ManifestFile>,
 }
 
@@ -164,6 +166,10 @@ fn validate_manifest(
             "unsupported AnnoCAT result schema version {}",
             manifest.schema_version
         ));
+    }
+    let report_kind = manifest.report_kind.as_deref().unwrap_or("annotation");
+    if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
+        return Err(format!("unsupported AnnoCAT report kind: {report_kind}"));
     }
     validate_identifier(&manifest.run_id, "run ID")?;
     if manifest.display_name.trim().is_empty()

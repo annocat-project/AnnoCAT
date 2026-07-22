@@ -23,8 +23,13 @@ pub struct TaskSnapshot {
     pub updated_at: Option<String>,
     pub completed_bytes: u64,
     pub total_bytes: u64,
+    pub completed_records: u64,
+    pub total_records: u64,
     pub percent: f64,
     pub throughput_bytes_per_second: f64,
+    pub throughput_records_per_second: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub available_actions: Vec<&'static str>,
@@ -72,8 +77,12 @@ pub fn from_download(
         updated_at: None,
         completed_bytes: status.downloaded_bytes,
         total_bytes: status.expected_bytes,
+        completed_records: 0,
+        total_records: 0,
         percent: status.percent,
         throughput_bytes_per_second: status.throughput_bytes_per_second,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
         error: status.error,
         available_actions: resource_actions("download", &status.state),
     }
@@ -102,8 +111,12 @@ pub fn from_preparation(
         updated_at: None,
         completed_bytes: status.network_bytes,
         total_bytes: status.expected_network_bytes,
+        completed_records: 0,
+        total_records: 0,
         percent: status.percent,
         throughput_bytes_per_second: status.throughput_bytes_per_second,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
         error: status.error,
         available_actions: resource_actions("installation", &status.state),
     }
@@ -129,8 +142,12 @@ pub fn from_reference(
         updated_at: None,
         completed_bytes: status.completed_bytes,
         total_bytes: status.total_bytes,
+        completed_records: 0,
+        total_records: 0,
         percent: status.percent,
         throughput_bytes_per_second: 0.0,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
         error: status.error,
         available_actions: resource_actions("installation", &status.state),
     }
@@ -156,8 +173,12 @@ pub fn from_transcript(
         updated_at: None,
         completed_bytes: 0,
         total_bytes: 0,
+        completed_records: 0,
+        total_records: 0,
         percent: if status.state == "ready" { 100.0 } else { 0.0 },
         throughput_bytes_per_second: 0.0,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
         error: status.error,
         available_actions: resource_actions("installation", status.state),
     }
@@ -177,20 +198,28 @@ pub fn from_annotation(status: annotation::State) -> TaskSnapshot {
         phase: status.phase.into(),
         detail: status.detail,
         resource_id: None,
-        chromosome: None,
+        chromosome: status.chromosome,
         completed_chromosomes: 0,
         total_chromosomes: 0,
         run_id: status.run_id,
         updated_at: None,
         completed_bytes: status.output_bytes,
-        total_bytes: 0,
-        percent: if state == "completed" { 100.0 } else { 0.0 },
-        throughput_bytes_per_second: 0.0,
-        error: status.error,
-        available_actions: if state == "running" {
-            vec!["cancel"]
+        total_bytes: status.total_bytes,
+        completed_records: status.completed_records,
+        total_records: status.total_records,
+        percent: if state == "completed" {
+            100.0
         } else {
-            Vec::new()
+            status.percent
+        },
+        throughput_bytes_per_second: status.throughput_bytes_per_second,
+        throughput_records_per_second: status.throughput_records_per_second,
+        eta_seconds: status.eta_seconds,
+        error: status.error,
+        available_actions: match state.as_str() {
+            "running" => vec!["cancel"],
+            "interrupted" | "failed" if status.resumable => vec!["resume"],
+            _ => Vec::new(),
         },
     }
 }
@@ -218,8 +247,12 @@ pub fn from_completed_run(
         updated_at: Some(completed_at.into()),
         completed_bytes: result_bytes,
         total_bytes: result_bytes,
+        completed_records: variant_count,
+        total_records: variant_count,
         percent: 100.0,
         throughput_bytes_per_second: 0.0,
+        throughput_records_per_second: 0.0,
+        eta_seconds: Some(0),
         error: None,
         available_actions: Vec::new(),
     }
@@ -351,5 +384,38 @@ mod tests {
         );
         assert_eq!(task.throughput_bytes_per_second, 12.5);
         assert_eq!(task.available_actions, vec!["pause", "cancel"]);
+    }
+
+    #[test]
+    fn annotation_progress_is_projected_into_the_shared_task() {
+        let task = from_annotation(annotation::State {
+            state: "running",
+            phase: "annotating",
+            detail: "Chromosome 22".into(),
+            run_id: Some("run-test".into()),
+            name: Some("Recovery".into()),
+            input: None,
+            output: None,
+            records: Some(1_000),
+            completed_records: 400,
+            total_records: 1_000,
+            output_bytes: 1_100_000_000,
+            valid_output_bytes: 1_100_000_000,
+            total_bytes: 2_000_000_000,
+            chromosome: Some("22".into()),
+            percent: 40.0,
+            throughput_bytes_per_second: 1_100_000_000.0,
+            throughput_records_per_second: 25_000.0,
+            eta_seconds: Some(24),
+            resumable: true,
+            cancel_requested: false,
+            error: None,
+        });
+        assert_eq!(task.chromosome.as_deref(), Some("22"));
+        assert_eq!(task.completed_records, 400);
+        assert_eq!(task.percent, 40.0);
+        assert_eq!(task.throughput_bytes_per_second, 1_100_000_000.0);
+        assert_eq!(task.throughput_records_per_second, 25_000.0);
+        assert_eq!(task.eta_seconds, Some(24));
     }
 }

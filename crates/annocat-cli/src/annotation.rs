@@ -6,10 +6,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static BATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunMode {
+    #[default]
+    Annotation,
+    VcfReview,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,12 +31,55 @@ pub struct AnnotationRequest {
     pub source_ids: Vec<String>,
     #[serde(default)]
     pub include_annotated_vcf: bool,
+    #[serde(default)]
+    pub run_mode: RunMode,
+    #[serde(default)]
+    pub add_local_consequences: bool,
+    #[serde(default)]
+    pub confirm_grch38: bool,
+}
+
+impl AnnotationRequest {
+    fn uses_fastvep(&self) -> bool {
+        self.run_mode == RunMode::Annotation || self.add_local_consequences
+    }
+
+    fn report_kind(&self) -> &'static str {
+        match (self.run_mode, self.add_local_consequences) {
+            (RunMode::VcfReview, false) => "vcf-only",
+            (RunMode::VcfReview, true) => "core-consequences",
+            (RunMode::Annotation, _) => "annotation",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchAnnotationRequest {
     pub inputs: Vec<PathBuf>,
+    #[serde(default)]
+    pub output_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+    #[serde(default)]
+    pub include_annotated_vcf: bool,
+    #[serde(default)]
+    pub run_mode: RunMode,
+    #[serde(default)]
+    pub add_local_consequences: bool,
+    #[serde(default)]
+    pub confirm_grch38: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRequest {
+    pub input: PathBuf,
+    pub partial_vcf: PathBuf,
+    #[serde(default)]
+    pub structured_output: Option<PathBuf>,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub output_directory: Option<PathBuf>,
     #[serde(default)]
@@ -48,7 +99,17 @@ pub struct State {
     pub input: Option<PathBuf>,
     pub output: Option<PathBuf>,
     pub records: Option<u64>,
+    pub completed_records: u64,
+    pub total_records: u64,
     pub output_bytes: u64,
+    pub valid_output_bytes: u64,
+    pub total_bytes: u64,
+    pub chromosome: Option<String>,
+    pub percent: f64,
+    pub throughput_bytes_per_second: f64,
+    pub throughput_records_per_second: f64,
+    pub eta_seconds: Option<u64>,
+    pub resumable: bool,
     pub cancel_requested: bool,
     pub error: Option<String>,
 }
@@ -77,6 +138,37 @@ struct ShardEntry {
     file: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnnotationCheckpoint {
+    schema_version: u16,
+    run_id: String,
+    name: String,
+    input: PathBuf,
+    source_ids: Vec<String>,
+    include_annotated_vcf: bool,
+    #[serde(default)]
+    run_mode: RunMode,
+    #[serde(default)]
+    add_local_consequences: bool,
+    #[serde(default)]
+    confirm_grch38: bool,
+    state: String,
+    phase: String,
+    detail: String,
+    completed_records: u64,
+    total_records: u64,
+    output_bytes: u64,
+    valid_output_bytes: u64,
+    total_bytes: u64,
+    chromosome: Option<String>,
+    percent: f64,
+    throughput_bytes_per_second: f64,
+    throughput_records_per_second: f64,
+    eta_seconds: Option<u64>,
+    updated_at: String,
+}
+
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(idle_state()))
@@ -92,7 +184,17 @@ fn idle_state() -> State {
         input: None,
         output: None,
         records: None,
+        completed_records: 0,
+        total_records: 0,
         output_bytes: 0,
+        valid_output_bytes: 0,
+        total_bytes: 0,
+        chromosome: None,
+        percent: 0.0,
+        throughput_bytes_per_second: 0.0,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
+        resumable: false,
         cancel_requested: false,
         error: None,
     }
@@ -103,6 +205,53 @@ pub fn status() -> State {
         .lock()
         .map(|value| value.clone())
         .unwrap_or_else(|_| idle_state())
+}
+
+pub fn interrupted_runs(runs: &Path) -> Vec<State> {
+    let Ok(entries) = fs::read_dir(runs) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            read_checkpoint(&entry.path()).map(|checkpoint| (entry.path(), checkpoint))
+        })
+        .filter(|(_, checkpoint)| !matches!(checkpoint.state.as_str(), "completed" | "cancelled"))
+        .map(|(directory, checkpoint)| {
+            let resumable = recovery_outputs_exist(&directory);
+            State {
+                state: if resumable { "interrupted" } else { "failed" },
+                phase: if resumable { "interrupted" } else { "failed" },
+                detail: if resumable {
+                    format!("Interrupted during {} · Resume available", checkpoint.phase)
+                } else {
+                    format!(
+                        "Interrupted during {} before recoverable output was written",
+                        checkpoint.phase
+                    )
+                },
+                run_id: Some(checkpoint.run_id),
+                name: Some(checkpoint.name),
+                input: None,
+                output: Some(directory),
+                records: Some(checkpoint.total_records),
+                completed_records: checkpoint.completed_records,
+                total_records: checkpoint.total_records,
+                output_bytes: checkpoint.output_bytes,
+                valid_output_bytes: checkpoint.valid_output_bytes,
+                total_bytes: checkpoint.total_bytes,
+                chromosome: checkpoint.chromosome,
+                percent: checkpoint.percent,
+                throughput_bytes_per_second: 0.0,
+                throughput_records_per_second: 0.0,
+                eta_seconds: None,
+                resumable,
+                cancel_requested: false,
+                error: None,
+            }
+        })
+        .collect()
 }
 
 pub fn is_running() -> bool {
@@ -128,6 +277,146 @@ pub fn start_background(
     resources: PathBuf,
 ) -> Result<String, String> {
     start_background_inner(request, default_runs, resources, false)
+}
+
+pub fn start_recovery_background(
+    request: RecoveryRequest,
+    default_runs: PathBuf,
+    resources: PathBuf,
+) -> Result<String, String> {
+    if is_running() || BATCH_ACTIVE.load(Ordering::SeqCst) {
+        return Err("an annotation run or batch is already active".into());
+    }
+    let structured_output = recovery_structured_path(&request);
+    let recovery_name = request.name.clone().or_else(|| {
+        request
+            .partial_vcf
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+    });
+    let mut annotation = AnnotationRequest {
+        input: request.input,
+        name: recovery_name,
+        output_directory: request.output_directory,
+        source_ids: request.source_ids,
+        include_annotated_vcf: request.include_annotated_vcf,
+        run_mode: RunMode::Annotation,
+        add_local_consequences: false,
+        confirm_grch38: false,
+    };
+    validate_request(&annotation, &resources)?;
+    validate_recovery_files(&request.partial_vcf, &structured_output)?;
+    annotation
+        .source_ids
+        .sort_by_key(|source_id| source_order(source_id));
+    let name = display_name(&annotation);
+    let run_id = new_run_id(&annotation.input);
+    let output_root = annotation.output_directory.clone().unwrap_or(default_runs);
+    fs::create_dir_all(&output_root).map_err(|error| {
+        format!(
+            "cannot create output directory {}: {error}",
+            output_root.display()
+        )
+    })?;
+    let directory_name = format!("{}--{}", safe_name(&name), &run_id[4..]);
+    let final_directory = output_root.join(&directory_name);
+    let staging_directory = output_root.join(format!("{directory_name}.partial"));
+    if final_directory.exists() || staging_directory.exists() {
+        return Err("a run with the generated identifier already exists".into());
+    }
+    begin_run_state(
+        &annotation,
+        &name,
+        &run_id,
+        &final_directory,
+        "recovery-scan",
+        "Scanning the interrupted fastVEP output",
+    )?;
+    CANCEL.store(false, Ordering::SeqCst);
+    let returned_id = run_id.clone();
+    std::thread::spawn(move || {
+        let result = execute_recovery(
+            &annotation,
+            &resources,
+            &name,
+            &run_id,
+            &staging_directory,
+            &final_directory,
+            &request.partial_vcf,
+            &structured_output,
+            false,
+        );
+        finish_background(result, &run_id, &staging_directory, &final_directory, false);
+    });
+    Ok(returned_id)
+}
+
+pub fn resume_background(
+    run_id: &str,
+    runs: PathBuf,
+    resources: PathBuf,
+) -> Result<String, String> {
+    if is_running() || BATCH_ACTIVE.load(Ordering::SeqCst) {
+        return Err("an annotation run or batch is already active".into());
+    }
+    let (directory, checkpoint) = find_checkpoint(&runs, run_id)
+        .ok_or("the interrupted annotation checkpoint is unavailable")?;
+    let staging = if directory.extension().and_then(|value| value.to_str()) == Some("failed") {
+        let partial = directory.with_extension("partial");
+        if partial.exists() {
+            return Err("the interrupted annotation staging directory already exists".into());
+        }
+        fs::rename(&directory, &partial)
+            .map_err(|error| format!("cannot reopen interrupted annotation: {error}"))?;
+        partial
+    } else {
+        directory
+    };
+    let final_directory = staging.with_extension("");
+    if final_directory.exists() {
+        return Err("the completed output directory already exists".into());
+    }
+    let annotation = AnnotationRequest {
+        input: checkpoint.input,
+        name: Some(checkpoint.name.clone()),
+        output_directory: final_directory.parent().map(Path::to_path_buf),
+        source_ids: checkpoint.source_ids,
+        include_annotated_vcf: checkpoint.include_annotated_vcf,
+        run_mode: checkpoint.run_mode,
+        add_local_consequences: checkpoint.add_local_consequences,
+        confirm_grch38: checkpoint.confirm_grch38,
+    };
+    validate_request(&annotation, &resources)?;
+    let partial_vcf = staging.join("annotated.vcf");
+    let structured_output = staging.join("fastvep.ndjson");
+    validate_recovery_files(&partial_vcf, &structured_output)?;
+    begin_run_state(
+        &annotation,
+        &checkpoint.name,
+        run_id,
+        &final_directory,
+        "recovery-scan",
+        "Scanning the interrupted fastVEP output",
+    )?;
+    CANCEL.store(false, Ordering::SeqCst);
+    let returned_id = run_id.to_owned();
+    let thread_run_id = returned_id.clone();
+    std::thread::spawn(move || {
+        let result = execute_recovery(
+            &annotation,
+            &resources,
+            &checkpoint.name,
+            &thread_run_id,
+            &staging,
+            &final_directory,
+            &partial_vcf,
+            &structured_output,
+            true,
+        );
+        finish_background(result, &thread_run_id, &staging, &final_directory, true);
+    });
+    Ok(returned_id)
 }
 
 pub fn start_batch_background(
@@ -157,6 +446,9 @@ pub fn start_batch_background(
             output_directory: request.output_directory.clone(),
             source_ids: request.source_ids.clone(),
             include_annotated_vcf: request.include_annotated_vcf,
+            run_mode: request.run_mode,
+            add_local_consequences: request.add_local_consequences,
+            confirm_grch38: request.confirm_grch38,
         })
         .collect::<Vec<_>>();
     if let Err(error) = requests
@@ -246,38 +538,33 @@ fn start_background_inner(
     if final_directory.exists() || staging_directory.exists() {
         return Err("a run with the generated identifier already exists".into());
     }
-    {
-        let mut current = state().lock().map_err(|_| "annotation state lock failed")?;
-        if current.state == "running" {
-            return Err("an annotation run is already active".into());
-        }
-        *current = State {
-            state: "running",
-            phase: "queued",
-            detail: "Validating the input VCF".into(),
-            run_id: Some(run_id.clone()),
-            name: Some(name.clone()),
-            input: Some(request.input.clone()),
-            output: Some(final_directory.clone()),
-            records: None,
-            output_bytes: 0,
-            cancel_requested: false,
-            error: None,
-        };
-    }
+    begin_run_state(
+        &request,
+        &name,
+        &run_id,
+        &final_directory,
+        "queued",
+        "Validating the input VCF",
+    )?;
     CANCEL.store(false, Ordering::SeqCst);
     crate::terminal_log(
         "annotation",
         format!(
-            "{run_id} queued: input={} sources={}",
+            "{run_id} queued: input={} mode={} sources={}",
             request.input.display(),
+            request.report_kind(),
             if request.source_ids.is_empty() {
-                "core".into()
+                if request.uses_fastvep() {
+                    "core".into()
+                } else {
+                    "none".into()
+                }
             } else {
                 request.source_ids.join(",")
             }
         ),
     );
+    let allow_resume = request.uses_fastvep();
     let returned_id = run_id.clone();
     std::thread::spawn(move || {
         let result = execute(
@@ -288,46 +575,13 @@ fn start_background_inner(
             &staging_directory,
             &final_directory,
         );
-        if result.as_ref().is_err_and(|error| error != "cancelled") && staging_directory.exists() {
-            let failed = staging_directory.with_extension("failed");
-            if failed.exists() {
-                let _ = fs::remove_dir_all(&failed);
-            }
-            let _ = fs::rename(&staging_directory, failed);
-        }
-        if let Ok(mut current) = state().lock() {
-            match result {
-                Ok((records, bytes)) => {
-                    crate::terminal_log(
-                        "annotation",
-                        format!("{run_id} completed: {records} variants, {bytes} bytes"),
-                    );
-                    current.state = "completed";
-                    current.phase = "completed";
-                    current.detail = format!("Published {records} canonical variants");
-                    current.records = Some(records);
-                    current.output_bytes = bytes;
-                    current.output = Some(final_directory);
-                    current.cancel_requested = false;
-                }
-                Err(error) if error == "cancelled" => {
-                    crate::terminal_log("annotation", format!("{run_id} cancelled"));
-                    current.state = "cancelled";
-                    current.phase = "cancelled";
-                    current.detail = "Annotation cancelled; partial result discarded".into();
-                    current.cancel_requested = false;
-                    current.error = None;
-                }
-                Err(error) => {
-                    crate::terminal_log("annotation", format!("{run_id} failed: {error}"));
-                    current.state = "failed";
-                    current.phase = "failed";
-                    current.detail = "Annotation did not produce a publishable result".into();
-                    current.cancel_requested = false;
-                    current.error = Some(error);
-                }
-            }
-        }
+        finish_background(
+            result,
+            &run_id,
+            &staging_directory,
+            &final_directory,
+            allow_resume,
+        );
     });
     Ok(returned_id)
 }
@@ -365,6 +619,32 @@ fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(),
         return Err(format!("input VCF is missing: {}", request.input.display()));
     }
     validate_source_ids(&request.source_ids)?;
+    if request.run_mode == RunMode::VcfReview {
+        if !request.source_ids.is_empty() {
+            return Err("VCF review cannot select supplemental annotation sources".into());
+        }
+        if request.include_annotated_vcf && !request.add_local_consequences {
+            return Err("an annotated VCF is unavailable when local consequences are disabled".into());
+        }
+        match annocat_core::vcf::declared_assembly(&request.input)? {
+            Some(assembly) if assembly == "GRCh38" => {}
+            Some(assembly) => {
+                return Err(format!(
+                    "AnnoCAT supports GRCh38 VCF review; this file declares {assembly}"
+                ));
+            }
+            None if request.confirm_grch38 => {}
+            None => {
+                return Err(
+                    "the VCF header does not identify its genome build; confirm that it uses GRCh38"
+                        .into(),
+                );
+            }
+        }
+        if !request.add_local_consequences {
+            return Ok(());
+        }
+    }
     let engine = super::fastvep::readiness();
     if !engine.ready {
         return Err(format!("fastVEP is not ready: {}", engine.next_action));
@@ -381,6 +661,119 @@ fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(),
     Ok(())
 }
 
+fn begin_run_state(
+    request: &AnnotationRequest,
+    name: &str,
+    run_id: &str,
+    final_directory: &Path,
+    phase: &'static str,
+    detail: &str,
+) -> Result<(), String> {
+    let mut current = state().lock().map_err(|_| "annotation state lock failed")?;
+    if current.state == "running" {
+        return Err("an annotation run is already active".into());
+    }
+    *current = State {
+        state: "running",
+        phase,
+        detail: detail.into(),
+        run_id: Some(run_id.into()),
+        name: Some(name.into()),
+        input: Some(request.input.clone()),
+        output: Some(final_directory.to_path_buf()),
+        records: None,
+        completed_records: 0,
+        total_records: 0,
+        output_bytes: 0,
+        valid_output_bytes: 0,
+        total_bytes: 0,
+        chromosome: None,
+        percent: 0.0,
+        throughput_bytes_per_second: 0.0,
+        throughput_records_per_second: 0.0,
+        eta_seconds: None,
+        resumable: request.uses_fastvep(),
+        cancel_requested: false,
+        error: None,
+    };
+    Ok(())
+}
+
+fn finish_background(
+    result: Result<(u64, u64), String>,
+    run_id: &str,
+    staging: &Path,
+    final_directory: &Path,
+    allow_resume: bool,
+) {
+    if result.as_ref().is_err_and(|error| error != "cancelled") && staging.exists() {
+        let failed = staging.with_extension("failed");
+        if failed.exists() {
+            let _ = fs::remove_dir_all(&failed);
+        }
+        let _ = fs::rename(staging, failed);
+    }
+    let Ok(mut current) = state().lock() else {
+        return;
+    };
+    match result {
+        Ok((records, bytes)) => {
+            crate::terminal_log(
+                "annotation",
+                format!("{run_id} completed: {records} variants, {bytes} bytes"),
+            );
+            current.state = "completed";
+            current.phase = "completed";
+            current.detail = format!("Published {records} canonical variants");
+            current.records = Some(records);
+            current.completed_records = records;
+            current.total_records = records;
+            current.output_bytes = bytes;
+            current.percent = 100.0;
+            current.throughput_bytes_per_second = 0.0;
+            current.throughput_records_per_second = 0.0;
+            current.eta_seconds = Some(0);
+            current.resumable = false;
+            current.output = Some(final_directory.to_path_buf());
+            current.cancel_requested = false;
+        }
+        Err(error) if error == "cancelled" => {
+            crate::terminal_log("annotation", format!("{run_id} cancelled"));
+            let resumable = allow_resume && recovery_outputs_exist(staging);
+            current.state = if resumable {
+                "interrupted"
+            } else {
+                "cancelled"
+            };
+            current.phase = if resumable {
+                "interrupted"
+            } else {
+                "cancelled"
+            };
+            current.detail = if resumable {
+                "Annotation stopped; partial output retained for recovery".into()
+            } else {
+                "Annotation cancelled; partial result discarded".into()
+            };
+            current.resumable = resumable;
+            current.cancel_requested = false;
+            current.error = None;
+        }
+        Err(error) => {
+            crate::terminal_log("annotation", format!("{run_id} failed: {error}"));
+            current.state = "failed";
+            current.phase = "failed";
+            current.detail = "Annotation did not produce a publishable result".into();
+            current.resumable = allow_resume
+                && [staging.to_path_buf(), staging.with_extension("failed")]
+                    .iter()
+                    .any(|directory| recovery_outputs_exist(directory));
+            current.cancel_requested = false;
+            current.error = Some(error);
+        }
+    }
+}
+
 fn execute(
     request: &AnnotationRequest,
     resources: &Path,
@@ -389,38 +782,454 @@ fn execute(
     staging: &Path,
     final_directory: &Path,
 ) -> Result<(u64, u64), String> {
+    if !request.uses_fastvep() {
+        return execute_vcf_review(request, name, run_id, staging, final_directory);
+    }
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
-    set_phase("validating", "Validating the complete input VCF");
-    let input_summary = annocat_core::vcf::inspect(&request.input)?;
-    if input_summary.records == 0 {
-        return fail_staging(staging, "input VCF contains no variant records".into());
-    }
-    if input_summary
-        .assembly
-        .as_deref()
-        .is_some_and(|value| value != "GRCh38")
-    {
-        return fail_staging(
-            staging,
-            format!(
-                "input declares {0}; AnnoCAT currently requires GRCh38",
-                input_summary.assembly.unwrap()
-            ),
-        );
-    }
+    persist_current_checkpoint(staging, request, name, run_id)?;
     if CANCEL.load(Ordering::SeqCst) {
         let _ = fs::remove_dir_all(staging);
         return Err("cancelled".into());
     }
     if let Ok(mut current) = state().lock() {
-        current.records = Some(input_summary.records);
+        current.total_bytes = fs::metadata(&request.input)
+            .map(|value| value.len())
+            .unwrap_or(0);
     }
-    let readiness = super::fastvep::readiness();
-    let executable = readiness
-        .executable
-        .ok_or("fastVEP executable disappeared")?;
+    persist_current_checkpoint(staging, request, name, run_id)?;
     let output = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
+    let (source_bindings, input_summary) = run_fastvep(
+        request,
+        resources,
+        name,
+        run_id,
+        staging,
+        &request.input,
+        &output,
+        &structured_output,
+        0,
+        0,
+        0,
+        false,
+    )?;
+    if input_summary.records == 0 {
+        return fail_staging(staging, "input VCF contains no variant records".into());
+    }
+    if input_summary.skipped_non_variant_records > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} reference-only records before fastVEP",
+                input_summary.skipped_non_variant_records
+            ),
+        );
+    }
+    if let Ok(mut current) = state().lock() {
+        current.records = Some(input_summary.records);
+        current.total_records = input_summary.records;
+    }
+    finalize_outputs(
+        request,
+        name,
+        run_id,
+        staging,
+        final_directory,
+        &input_summary,
+        &output,
+        &structured_output,
+        source_bindings,
+    )
+}
+
+fn execute_vcf_review(
+    request: &AnnotationRequest,
+    name: &str,
+    run_id: &str,
+    staging: &Path,
+    final_directory: &Path,
+) -> Result<(u64, u64), String> {
+    fs::create_dir_all(staging).map_err(|error| error.to_string())?;
+    persist_current_checkpoint(staging, request, name, run_id)?;
+    if CANCEL.load(Ordering::SeqCst) {
+        let _ = fs::remove_dir_all(staging);
+        return Err("cancelled".into());
+    }
+    if let Ok(mut current) = state().lock() {
+        current.phase = "indexing-variants";
+        current.detail = "Reading VCF records".into();
+        current.total_bytes = fs::metadata(&request.input)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        current.resumable = false;
+    }
+
+    let parquet = staging.join("variants.parquet");
+    let canonical = match super::results::convert_input_vcf(
+        &request.input,
+        &parquet,
+        || CANCEL.load(Ordering::SeqCst),
+        |records, _writing, output_bytes, bytes_per_second, records_per_second| {
+            if let Ok(mut current) = state().lock() {
+                current.phase = "indexing-variants";
+                current.detail = "Building the local VCF review table".into();
+                current.completed_records = records;
+                current.output_bytes = output_bytes;
+                current.throughput_bytes_per_second = bytes_per_second;
+                current.throughput_records_per_second = records_per_second;
+            }
+        },
+    ) {
+        Ok(summary) => summary,
+        Err(error) if error == "cancelled" => {
+            let _ = fs::remove_dir_all(staging);
+            return Err(error);
+        }
+        Err(error) => return fail_staging(staging, format!("VCF review conversion failed: {error}")),
+    };
+
+    if let Ok(mut current) = state().lock() {
+        current.records = Some(canonical.rows);
+        current.completed_records = canonical.records;
+        current.total_records = canonical.records;
+        current.percent = 85.0;
+    }
+    set_phase("indexing-evidence", "Creating the report field catalog");
+    let consequences = staging.join("consequences.parquet");
+    let evidence = staging.join("evidence.parquet");
+    let field_catalog = staging.join("field-catalog.json");
+    if let Err(error) =
+        super::results::write_empty_detail_tables(&consequences, &evidence, &field_catalog)
+    {
+        return fail_staging(staging, error);
+    }
+
+    set_phase("publishing", "Verifying and publishing the VCF review");
+    if let Err(error) = super::results::validate_report_tables_allow_empty_consequences(
+        &parquet,
+        &consequences,
+        &evidence,
+        &field_catalog,
+        canonical.rows,
+    ) {
+        return fail_staging(staging, format!("VCF review validation failed: {error}"));
+    }
+
+    let result_bytes = file_bytes(&parquet)?;
+    let consequences_bytes = file_bytes(&consequences)?;
+    let evidence_bytes = file_bytes(&evidence)?;
+    let field_catalog_bytes = file_bytes(&field_catalog)?;
+    let canonical_result_bytes = result_bytes
+        .checked_add(consequences_bytes)
+        .and_then(|bytes| bytes.checked_add(evidence_bytes))
+        .and_then(|bytes| bytes.checked_add(field_catalog_bytes))
+        .ok_or("canonical result size overflow")?;
+    let assembly_source = if request.confirm_grch38 {
+        "user-confirmed"
+    } else {
+        "vcf-header"
+    };
+    let manifest = serde_json::json!({
+        "schemaVersion": 1,
+        "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
+        "state": "completed",
+        "reportKind": request.report_kind(),
+        "runId": run_id,
+        "name": name,
+        "completedAt": current_timestamp(),
+        "assembly": "GRCh38",
+        "assemblySource": assembly_source,
+        "variantCount": canonical.rows,
+        "vcfRecordCount": canonical.records,
+        "alleleCount": canonical.rows,
+        "sampleNames": canonical.samples,
+        "consequenceCount": 0,
+        "evidenceValueCount": 0,
+        "dynamicFieldCount": 0,
+        "resultBytes": result_bytes,
+        "consequencesBytes": consequences_bytes,
+        "evidenceBytes": evidence_bytes,
+        "fieldCatalogBytes": field_catalog_bytes,
+        "canonicalResultBytes": canonical_result_bytes,
+        "resultFile": "variants.parquet",
+        "consequencesFile": "consequences.parquet",
+        "evidenceFile": "evidence.parquet",
+        "fieldCatalogFile": "field-catalog.json",
+        "input": request.input,
+        "resultSha256": super::fastvep::sha256_file(&parquet)?,
+        "consequencesSha256": super::fastvep::sha256_file(&consequences)?,
+        "evidenceSha256": super::fastvep::sha256_file(&evidence)?,
+        "fieldCatalogSha256": super::fastvep::sha256_file(&field_catalog)?,
+        "sourceIds": [],
+        "sources": [],
+        "observedSourceIds": [],
+        "sourcesWithoutObservedEvidence": [],
+        "inputIdentityPreserved": true,
+    });
+    let _ = fs::remove_file(staging.join("annotation-state.json"));
+    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
+    fs::write(
+        staging.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    fs::rename(staging, final_directory)
+        .map_err(|error| format!("cannot publish completed VCF review: {error}"))?;
+    Ok((canonical.rows, result_bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_recovery(
+    request: &AnnotationRequest,
+    resources: &Path,
+    name: &str,
+    run_id: &str,
+    staging: &Path,
+    final_directory: &Path,
+    partial_vcf: &Path,
+    partial_structured: &Path,
+    preserve_on_cancel: bool,
+) -> Result<(u64, u64), String> {
+    fs::create_dir_all(staging).map_err(|error| error.to_string())?;
+    persist_current_checkpoint(staging, request, name, run_id)?;
+
+    set_phase("recovery-scan", "Scanning the interrupted annotated VCF");
+    let mut recovered_vcf = crate::annotation_recovery::scan_vcf(partial_vcf, |progress| {
+        update_recovery_progress(
+            "recovery-scan",
+            "Scanning annotated VCF",
+            &progress,
+            0.0,
+            5.0,
+        )
+    })?;
+    let discarded_tail_bytes = recovered_vcf
+        .total_bytes
+        .saturating_sub(recovered_vcf.valid_bytes);
+    if discarded_tail_bytes > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!("{run_id} recovery ignored {discarded_tail_bytes} incomplete trailing bytes"),
+        );
+    }
+    check_recovery_cancel(staging, preserve_on_cancel)?;
+
+    set_phase(
+        "recovery-scan",
+        "Scanning the interrupted structured output",
+    );
+    let mut recovered_structured =
+        crate::annotation_recovery::scan_ndjson(partial_structured, |progress| {
+            update_recovery_progress(
+                "recovery-scan",
+                "Scanning structured output",
+                &progress,
+                5.0,
+                5.0,
+            )
+        })?;
+    if recovered_vcf.records != recovered_structured.records {
+        let common_records = recovered_vcf.records.min(recovered_structured.records);
+        recovered_vcf.records = common_records;
+        recovered_vcf.valid_bytes =
+            crate::annotation_recovery::vcf_prefix_bytes(partial_vcf, common_records)?;
+        recovered_vcf.identity_sha256 =
+            crate::annotation_recovery::vcf_prefix_identity_sha256(partial_vcf, common_records)?;
+        recovered_structured.records = common_records;
+        recovered_structured.valid_bytes =
+            crate::annotation_recovery::ndjson_prefix_bytes(partial_structured, common_records)?;
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} recovery aligned VCF and structured output at {common_records} complete records"
+            ),
+        );
+    }
+    check_recovery_cancel(staging, preserve_on_cancel)?;
+
+    set_phase(
+        "recovery-input",
+        "Validating the original and preparing remaining variants",
+    );
+    let remaining_input = staging.join("remaining-input.vcf");
+    let projected = crate::annotation_input::stream_variants_after(
+        &request.input,
+        File::create(&remaining_input)
+            .map_err(|error| format!("cannot create remaining recovery input: {error}"))?,
+        recovered_vcf.records,
+        || CANCEL.load(Ordering::SeqCst),
+        update_recovery_input_progress,
+    )?;
+    let input_summary = projected.summary;
+    if input_summary.records == 0 {
+        return Err("original input VCF contains no variant records".into());
+    }
+    if projected.skipped_identity_sha256 != recovered_vcf.identity_sha256 {
+        set_phase("validating", "Locating the first recovery mismatch");
+        let mismatch = crate::annotation_recovery::first_vcf_identity_mismatch(
+            &request.input,
+            partial_vcf,
+            recovered_vcf.records,
+            |records, chromosome, records_per_second| {
+                update_recovery_comparison_progress(
+                    records,
+                    input_summary.records,
+                    chromosome,
+                    records_per_second,
+                )
+            },
+        )?;
+        if let Some(mismatch) = mismatch {
+            let detail = {
+                if mismatch.input_chromosome == mismatch.output_chromosome {
+                    format!(
+                        "the first difference is at record {} on chromosome {}",
+                        mismatch.record, mismatch.input_chromosome
+                    )
+                } else {
+                    format!(
+                        "the first difference is at record {} (input chromosome {}, annotated chromosome {})",
+                        mismatch.record, mismatch.input_chromosome, mismatch.output_chromosome
+                    )
+                }
+            };
+            return Err(format!(
+                "interrupted output does not match the selected original VCF: {detail}; no files were changed"
+            ));
+        }
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} direct ordered comparison confirmed that the interrupted annotated VCF matches the selected original"
+            ),
+        );
+    }
+    if let Ok(mut current) = state().lock() {
+        current.records = Some(input_summary.records);
+        current.completed_records = recovered_vcf.records;
+        current.total_records = input_summary.records;
+        current.output_bytes = recovered_vcf.valid_bytes;
+        current.valid_output_bytes = recovered_vcf.valid_bytes;
+        current.total_bytes = fs::metadata(&request.input)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        current.chromosome = recovered_vcf.chromosome.clone();
+        current.percent = recovered_vcf.records as f64 * 100.0 / input_summary.records as f64;
+        current.detail = annotation_progress_detail(&current);
+    }
+    persist_current_checkpoint(staging, request, name, run_id)?;
+
+    let remaining_records = projected.written_records;
+    let continuation_vcf = staging.join("continuation.vcf");
+    let continuation_structured = staging.join("continuation.ndjson");
+    let source_bindings = if remaining_records > 0 {
+        check_recovery_cancel(staging, preserve_on_cancel)?;
+        let (bindings, continuation_summary) = run_fastvep(
+            request,
+            resources,
+            name,
+            run_id,
+            staging,
+            &remaining_input,
+            &continuation_vcf,
+            &continuation_structured,
+            recovered_vcf.records,
+            recovered_vcf.valid_bytes,
+            input_summary.records,
+            preserve_on_cancel,
+        )?;
+        if continuation_summary.records != remaining_records {
+            return Err(format!(
+                "recovery streamed {} remaining variants but expected {remaining_records}",
+                continuation_summary.records
+            ));
+        }
+        bindings
+    } else {
+        let (provider_directory, bindings) =
+            compose_provider_set(resources, run_id, &request.source_ids)?;
+        if let Some(directory) = provider_directory {
+            let _ = fs::remove_dir_all(directory);
+        }
+        bindings
+    };
+
+    set_phase("recovery-merge", "Joining recovered and continued output");
+    let output = staging.join("annotated.vcf");
+    let structured_output = staging.join("fastvep.ndjson");
+    let merged_vcf = staging.join("annotated.recovered.vcf");
+    let merged_structured = staging.join("fastvep.recovered.ndjson");
+    crate::annotation_recovery::copy_prefix(
+        partial_vcf,
+        recovered_vcf.valid_bytes,
+        &merged_vcf,
+        |progress| {
+            update_recovery_progress(
+                "recovery-merge",
+                "Joining annotated VCF",
+                &progress,
+                0.0,
+                50.0,
+            )
+        },
+    )?;
+    if remaining_records > 0 {
+        crate::annotation_recovery::append_vcf_records(&continuation_vcf, &merged_vcf)?;
+    }
+    crate::annotation_recovery::copy_prefix(
+        partial_structured,
+        recovered_structured.valid_bytes,
+        &merged_structured,
+        |progress| {
+            update_recovery_progress(
+                "recovery-merge",
+                "Joining structured output",
+                &progress,
+                50.0,
+                50.0,
+            )
+        },
+    )?;
+    if remaining_records > 0 {
+        crate::annotation_recovery::append_file(&continuation_structured, &merged_structured)?;
+    }
+    replace_file(&merged_vcf, &output)?;
+    replace_file(&merged_structured, &structured_output)?;
+    let _ = fs::remove_file(&remaining_input);
+    let _ = fs::remove_file(&continuation_vcf);
+    let _ = fs::remove_file(&continuation_structured);
+    check_recovery_cancel(staging, true)?;
+    finalize_outputs(
+        request,
+        name,
+        run_id,
+        staging,
+        final_directory,
+        &input_summary,
+        &output,
+        &structured_output,
+        source_bindings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_fastvep(
+    request: &AnnotationRequest,
+    resources: &Path,
+    name: &str,
+    run_id: &str,
+    staging: &Path,
+    input: &Path,
+    output: &Path,
+    structured_output: &Path,
+    baseline_records: u64,
+    baseline_bytes: u64,
+    total_records: u64,
+    preserve_on_cancel: bool,
+) -> Result<(Vec<SourceBinding>, annocat_core::vcf::VcfSummary), String> {
+    let executable = super::fastvep::readiness()
+        .executable
+        .ok_or("fastVEP executable disappeared")?;
     let stdout =
         File::create(staging.join("fastvep.stdout.log")).map_err(|error| error.to_string())?;
     let stderr =
@@ -432,13 +1241,13 @@ fn execute(
     command
         .arg("annotate")
         .arg("--input")
-        .arg(&request.input)
+        .arg("-")
         .arg("--output")
-        .arg(&output)
+        .arg(output)
         .arg("--output-format")
         .arg("vcf")
         .arg("--structured-output")
-        .arg(&structured_output)
+        .arg(structured_output)
         .arg("--fasta")
         .arg(super::reference::fasta_path(resources))
         .arg("--transcript-cache")
@@ -448,12 +1257,10 @@ fn execute(
         command.arg("--sa-dir").arg(directory);
     }
     let child = command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .spawn();
-    // `Command` retains its configured stdio handles after spawning. Drop it now so
-    // Windows can atomically rename the staging directory after the child exits.
     drop(command);
     let mut child = match child {
         Ok(child) => child,
@@ -464,21 +1271,57 @@ fn execute(
             return Err(format!("cannot start fastVEP annotation: {error}"));
         }
     };
+    let stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
+    let input_path = input.to_path_buf();
+    let feeder = std::thread::spawn(move || {
+        crate::annotation_input::stream_variants(
+            &input_path,
+            stdin,
+            || CANCEL.load(Ordering::SeqCst),
+            update_annotation_input_progress,
+        )
+    });
+    let mut progress = crate::annotation_progress::VcfTail::default();
+    let mut last_checkpoint = Instant::now();
     let status = loop {
         if CANCEL.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            let _ = fs::remove_file(&output);
             if let Some(directory) = provider_directory.as_ref() {
                 let _ = fs::remove_dir_all(directory);
             }
-            let _ = fs::remove_dir_all(staging);
+            if !preserve_on_cancel {
+                let _ = fs::remove_dir_all(staging);
+            }
+            let _ = feeder.join();
             return Err("cancelled".into());
         }
-        if let Ok(bytes) = fs::metadata(&output).map(|value| value.len())
+        if output.is_file()
+            && let Ok(snapshot) = progress.update(output)
             && let Ok(mut current) = state().lock()
         {
-            current.output_bytes = bytes;
+            current.completed_records = baseline_records.saturating_add(snapshot.records);
+            current.valid_output_bytes = baseline_bytes.saturating_add(snapshot.valid_output_bytes);
+            current.chromosome = snapshot.chromosome;
+            if total_records > 0 {
+                current.output_bytes = baseline_bytes.saturating_add(snapshot.output_bytes);
+                current.percent = (current.completed_records as f64 * 100.0 / total_records as f64)
+                    .clamp(0.0, 100.0);
+                current.throughput_bytes_per_second = snapshot.bytes_per_second;
+            }
+            current.throughput_records_per_second = snapshot.records_per_second;
+            current.eta_seconds = (total_records > current.completed_records
+                && snapshot.records_per_second > 0.0)
+                .then(|| {
+                    ((total_records - current.completed_records) as f64
+                        / snapshot.records_per_second)
+                        .ceil() as u64
+                });
+            current.detail = annotation_progress_detail(&current);
+        }
+        if last_checkpoint.elapsed() >= Duration::from_secs(1) {
+            let _ = persist_current_checkpoint(staging, request, name, run_id);
+            last_checkpoint = Instant::now();
         }
         match child
             .try_wait()
@@ -491,17 +1334,35 @@ fn execute(
     if let Some(directory) = provider_directory.as_ref() {
         let _ = fs::remove_dir_all(directory);
     }
+    let input_summary = feeder
+        .join()
+        .map_err(|_| "fastVEP input streamer panicked".to_string())?;
     if !status.success() {
         return fail_staging(
             staging,
             format!("fastVEP annotation exited with {status}; see fastvep.stderr.log"),
         );
     }
+    let input_summary = input_summary?;
+    Ok((source_bindings, input_summary))
+}
+
+fn finalize_outputs(
+    request: &AnnotationRequest,
+    name: &str,
+    run_id: &str,
+    staging: &Path,
+    final_directory: &Path,
+    input_summary: &annocat_core::vcf::VcfSummary,
+    output: &Path,
+    structured_output: &Path,
+    source_bindings: Vec<SourceBinding>,
+) -> Result<(u64, u64), String> {
     set_phase(
         "verifying",
         "Checking record counts and the dynamic CSQ schema",
     );
-    let output_summary = super::csq::inspect(&output)
+    let output_summary = super::csq::inspect(output)
         .map_err(|error| format!("fastVEP output validation failed: {error}"))?;
     if output_summary.records != input_summary.records {
         return fail_staging(
@@ -509,6 +1370,34 @@ fn execute(
             format!(
                 "fastVEP output record count changed from {} to {}",
                 input_summary.records, output_summary.records
+            ),
+        );
+    }
+    if output_summary.identity_sha256 != input_summary.identity_sha256 {
+        set_phase("validating", "Comparing original and annotated VCF records");
+        let mismatch = crate::annotation_recovery::first_vcf_identity_mismatch(
+            &request.input,
+            output,
+            input_summary.records,
+            |records, chromosome, records_per_second| {
+                update_recovery_comparison_progress(
+                    records,
+                    input_summary.records,
+                    chromosome,
+                    records_per_second,
+                )
+            },
+        )?;
+        if mismatch.is_some() {
+            return fail_staging(
+                staging,
+                "fastVEP output does not preserve the complete ordered input variant set".into(),
+            );
+        }
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} direct ordered comparison confirmed complete VCF identity despite a parser fingerprint difference"
             ),
         );
     }
@@ -521,33 +1410,79 @@ fn execute(
             ),
         );
     }
-    set_phase("indexing", "Building the typed, paged Parquet result");
+    update_indexing_progress(
+        "indexing-variants",
+        "Indexing variants",
+        0,
+        input_summary.records,
+        0.0,
+        45.0,
+        0.0,
+    );
     let parquet = staging.join("variants.parquet");
-    let temporary_database = staging.join("result-build.duckdb");
-    let canonical =
-        match super::results::convert_vcf(&output, &parquet, &temporary_database, || {
-            CANCEL.load(Ordering::SeqCst)
-        }) {
-            Ok(summary) => summary,
-            Err(error) if error == "cancelled" => {
-                let _ = fs::remove_dir_all(staging);
-                return Err(error);
+    let canonical = match super::results::convert_vcf(
+        output,
+        &parquet,
+        || CANCEL.load(Ordering::SeqCst),
+        |records, _writing, output_bytes, bytes_per_second, records_per_second| {
+            update_indexing_progress(
+                "indexing-variants",
+                "Building variant table",
+                records,
+                input_summary.records,
+                0.0,
+                45.0,
+                records_per_second,
+            );
+            if output_bytes > 0 {
+                update_parquet_output(output_bytes, bytes_per_second);
             }
-            Err(error) => {
-                return fail_staging(staging, format!("result conversion failed: {error}"));
-            }
-        };
+        },
+    ) {
+        Ok(summary) => summary,
+        Err(error) if error == "cancelled" => {
+            let _ = fs::remove_dir_all(staging);
+            return Err(error);
+        }
+        Err(error) => return fail_staging(staging, format!("result conversion failed: {error}")),
+    };
     let consequences = staging.join("consequences.parquet");
     let evidence = staging.join("evidence.parquet");
     let field_catalog = staging.join("field-catalog.json");
-    let structured_database = staging.join("structured-result-build.duckdb");
+    update_indexing_progress(
+        "indexing-evidence",
+        "Indexing transcript and source evidence",
+        0,
+        input_summary.records,
+        45.0,
+        45.0,
+        0.0,
+    );
     let structured = match super::results::convert_structured(
-        &structured_output,
+        structured_output,
         &consequences,
         &evidence,
         &field_catalog,
-        &structured_database,
         || CANCEL.load(Ordering::SeqCst),
+        |records, writing, output_bytes, bytes_per_second, records_per_second| {
+            let detail = if writing {
+                "Writing transcript and evidence Parquet"
+            } else {
+                "Indexing transcript and source evidence"
+            };
+            update_indexing_progress(
+                "indexing-evidence",
+                detail,
+                records,
+                input_summary.records,
+                45.0,
+                45.0,
+                records_per_second,
+            );
+            if writing {
+                update_parquet_output(output_bytes, bytes_per_second);
+            }
+        },
     ) {
         Ok(summary) => summary,
         Err(error) if error == "cancelled" => {
@@ -561,22 +1496,38 @@ fn execute(
             );
         }
     };
-    if let Err(error) = fs::remove_file(&structured_output) {
+    if structured.records != input_summary.records {
+        return fail_staging(
+            staging,
+            format!(
+                "fastVEP structured output record count changed from {} to {}",
+                input_summary.records, structured.records
+            ),
+        );
+    }
+    if let Err(error) = fs::remove_file(structured_output) {
         return fail_staging(
             staging,
             format!("cannot remove temporary structured output: {error}"),
         );
     }
-    let output_bytes = fs::metadata(&parquet)
-        .map_err(|error| error.to_string())?
-        .len();
+    update_indexing_progress(
+        "publishing",
+        "Verifying and publishing result files",
+        input_summary.records,
+        input_summary.records,
+        90.0,
+        10.0,
+        0.0,
+    );
+    let output_bytes = file_bytes(&parquet)?;
     let consequences_bytes = file_bytes(&consequences)?;
     let evidence_bytes = file_bytes(&evidence)?;
     let field_catalog_bytes = file_bytes(&field_catalog)?;
     let annotated_vcf = if request.include_annotated_vcf {
-        Some((file_bytes(&output)?, super::fastvep::sha256_file(&output)?))
+        Some((file_bytes(output)?, super::fastvep::sha256_file(output)?))
     } else {
-        fs::remove_file(&output)
+        fs::remove_file(output)
             .map_err(|error| format!("cannot remove temporary annotated VCF: {error}"))?;
         None
     };
@@ -585,11 +1536,28 @@ fn execute(
         .and_then(|bytes| bytes.checked_add(evidence_bytes))
         .and_then(|bytes| bytes.checked_add(field_catalog_bytes))
         .ok_or("canonical result size overflow")?;
+    let readiness = super::fastvep::readiness();
+    let sources_without_observed_evidence = request
+        .source_ids
+        .iter()
+        .filter(|source| !structured.sources.contains(source))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !sources_without_observed_evidence.is_empty() {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} completed without observed evidence from: {}",
+                sources_without_observed_evidence.join(", ")
+            ),
+        );
+    }
     let mut manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
         "fastvepStructuredFormat": "ndjson-v1",
         "state": "completed",
+        "reportKind": request.report_kind(),
         "runId": run_id,
         "name": name,
         "completedAt": current_timestamp(),
@@ -598,6 +1566,7 @@ fn execute(
         "vcfRecordCount": output_summary.records,
         "alleleCount": output_summary.alternate_alleles,
         "csqEntryCount": output_summary.csq_entries,
+        "structuredRecordCount": structured.records,
         "consequenceCount": structured.consequences,
         "evidenceValueCount": structured.evidence,
         "dynamicFieldCount": structured.fields,
@@ -612,7 +1581,6 @@ fn execute(
         "evidenceFile": "evidence.parquet",
         "fieldCatalogFile": "field-catalog.json",
         "input": request.input,
-        "inputSha256": super::fastvep::sha256_file(&request.input)?,
         "resultSha256": super::fastvep::sha256_file(&parquet)?,
         "consequencesSha256": super::fastvep::sha256_file(&consequences)?,
         "evidenceSha256": super::fastvep::sha256_file(&evidence)?,
@@ -621,6 +1589,10 @@ fn execute(
         "fastvepSha256": readiness.sha256,
         "sourceIds": request.source_ids,
         "sources": source_bindings,
+        "observedSourceIds": structured.sources,
+        "sourcesWithoutObservedEvidence": sources_without_observed_evidence,
+        "inputIdentityVerified": true,
+        "observedSourceValueCounts": structured.source_value_counts,
     });
     if let Some((bytes, sha256)) = annotated_vcf {
         let object = manifest
@@ -630,6 +1602,8 @@ fn execute(
         object.insert("annotatedVcfBytes".into(), bytes.into());
         object.insert("annotatedVcfSha256".into(), sha256.into());
     }
+    let _ = fs::remove_file(staging.join("annotation-state.json"));
+    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
@@ -659,6 +1633,294 @@ fn set_phase(phase: &'static str, detail: &str) {
     if let Ok(mut current) = state().lock() {
         current.phase = phase;
         current.detail = detail.into();
+    }
+}
+
+fn update_recovery_progress(
+    phase: &'static str,
+    label: &str,
+    progress: &crate::annotation_recovery::Progress,
+    percent_start: f64,
+    percent_span: f64,
+) {
+    let ratio = if progress.total_bytes > 0 {
+        progress.completed_bytes as f64 / progress.total_bytes as f64
+    } else {
+        0.0
+    };
+    if let Ok(mut current) = state().lock() {
+        current.phase = phase;
+        current.output_bytes = progress.completed_bytes;
+        current.total_bytes = progress.total_bytes;
+        current.throughput_bytes_per_second = progress.bytes_per_second;
+        if phase == "recovery-scan" {
+            current.completed_records = progress.completed_records;
+        }
+        current.chromosome = progress.chromosome.clone().or(current.chromosome.take());
+        current.percent = (percent_start + ratio.clamp(0.0, 1.0) * percent_span).clamp(0.0, 100.0);
+        current.detail = if let Some(chromosome) = current.chromosome.as_deref() {
+            format!("{label} · Chromosome {chromosome}")
+        } else {
+            label.into()
+        };
+    }
+}
+
+fn update_indexing_progress(
+    phase: &'static str,
+    detail: &str,
+    completed_records: u64,
+    total_records: u64,
+    percent_start: f64,
+    percent_span: f64,
+    records_per_second: f64,
+) {
+    let ratio = if total_records > 0 {
+        completed_records as f64 / total_records as f64
+    } else {
+        0.0
+    };
+    if let Ok(mut current) = state().lock() {
+        current.phase = phase;
+        current.detail = detail.into();
+        current.completed_records = completed_records.min(total_records);
+        current.total_records = total_records;
+        current.chromosome = None;
+        current.percent = (percent_start + ratio.clamp(0.0, 1.0) * percent_span).clamp(0.0, 100.0);
+        current.output_bytes = 0;
+        current.throughput_bytes_per_second = 0.0;
+        current.throughput_records_per_second = records_per_second;
+        current.eta_seconds = (records_per_second > 0.0).then(|| {
+            ((total_records.saturating_sub(completed_records) as f64 / records_per_second).ceil())
+                as u64
+        });
+    }
+}
+
+fn update_annotation_input_progress(progress: crate::annotation_input::Progress) {
+    update_input_projection_progress(
+        "annotating",
+        "Streaming variants to fastVEP",
+        progress,
+        false,
+    );
+}
+
+fn update_recovery_input_progress(progress: crate::annotation_input::Progress) {
+    update_input_projection_progress(
+        "validating",
+        "Validating original variants for recovery",
+        progress,
+        true,
+    );
+}
+
+fn update_input_projection_progress(
+    phase: &'static str,
+    label: &str,
+    progress: crate::annotation_input::Progress,
+    show_input_records: bool,
+) {
+    let ratio = if progress.total_bytes > 0 {
+        progress.completed_bytes as f64 / progress.total_bytes as f64
+    } else {
+        0.0
+    };
+    if let Ok(mut current) = state().lock() {
+        current.phase = phase;
+        current.output_bytes = progress.completed_bytes;
+        current.total_bytes = progress.total_bytes;
+        if show_input_records {
+            current.completed_records = progress.completed_records;
+        }
+        current.chromosome = progress.chromosome;
+        current.percent = (ratio * 100.0).clamp(0.0, 100.0);
+        current.throughput_bytes_per_second = progress.bytes_per_second;
+        current.throughput_records_per_second = progress.records_per_second;
+        current.detail = current.chromosome.as_deref().map_or_else(
+            || label.into(),
+            |chromosome| format!("{label} · Chromosome {chromosome}"),
+        );
+    }
+}
+
+fn update_recovery_comparison_progress(
+    completed_records: u64,
+    total_records: u64,
+    chromosome: Option<String>,
+    records_per_second: f64,
+) {
+    if let Ok(mut current) = state().lock() {
+        current.phase = "validating";
+        current.detail = chromosome.as_deref().map_or_else(
+            || "Comparing original and annotated VCF".into(),
+            |chromosome| format!("Comparing original and annotated VCF · Chromosome {chromosome}"),
+        );
+        current.completed_records = completed_records;
+        current.total_records = total_records;
+        current.chromosome = chromosome;
+        current.percent = if total_records > 0 {
+            completed_records as f64 * 100.0 / total_records as f64
+        } else {
+            0.0
+        };
+        current.throughput_records_per_second = records_per_second;
+        current.throughput_bytes_per_second = 0.0;
+    }
+}
+
+fn update_parquet_output(output_bytes: u64, bytes_per_second: f64) {
+    if let Ok(mut current) = state().lock() {
+        current.output_bytes = output_bytes;
+        current.throughput_bytes_per_second = bytes_per_second;
+    }
+}
+
+fn check_recovery_cancel(staging: &Path, preserve: bool) -> Result<(), String> {
+    if !CANCEL.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    if !preserve {
+        let _ = fs::remove_dir_all(staging);
+    }
+    Err("cancelled".into())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        fs::remove_file(destination)
+            .map_err(|error| format!("cannot replace recovered output: {error}"))?;
+    }
+    fs::rename(source, destination)
+        .map_err(|error| format!("cannot publish recovered output: {error}"))
+}
+
+fn recovery_structured_path(request: &RecoveryRequest) -> PathBuf {
+    request.structured_output.clone().unwrap_or_else(|| {
+        request
+            .partial_vcf
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("fastvep.ndjson")
+    })
+}
+
+fn validate_recovery_files(partial_vcf: &Path, structured_output: &Path) -> Result<(), String> {
+    if !partial_vcf.is_file() {
+        return Err(format!(
+            "interrupted annotated VCF is missing: {}",
+            partial_vcf.display()
+        ));
+    }
+    if !structured_output.is_file() {
+        return Err(format!(
+            "matching fastvep.ndjson is missing: {}",
+            structured_output.display()
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_outputs_exist(directory: &Path) -> bool {
+    directory.join("annotated.vcf").is_file() && directory.join("fastvep.ndjson").is_file()
+}
+
+fn find_checkpoint(runs: &Path, run_id: &str) -> Option<(PathBuf, AnnotationCheckpoint)> {
+    fs::read_dir(runs)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .find_map(|entry| {
+            let directory = entry.path();
+            let checkpoint = read_checkpoint(&directory)?;
+            (checkpoint.run_id == run_id).then_some((directory, checkpoint))
+        })
+}
+
+fn persist_current_checkpoint(
+    staging: &Path,
+    request: &AnnotationRequest,
+    name: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let current = state()
+        .lock()
+        .map_err(|_| "annotation state lock failed")?
+        .clone();
+    let checkpoint = AnnotationCheckpoint {
+        schema_version: 1,
+        run_id: run_id.into(),
+        name: name.into(),
+        input: request.input.clone(),
+        source_ids: request.source_ids.clone(),
+        include_annotated_vcf: request.include_annotated_vcf,
+        run_mode: request.run_mode,
+        add_local_consequences: request.add_local_consequences,
+        confirm_grch38: request.confirm_grch38,
+        state: current.state.into(),
+        phase: current.phase.into(),
+        detail: current.detail,
+        completed_records: current.completed_records,
+        total_records: current.total_records,
+        output_bytes: current.output_bytes,
+        valid_output_bytes: current.valid_output_bytes,
+        total_bytes: current.total_bytes,
+        chromosome: current.chromosome,
+        percent: current.percent,
+        throughput_bytes_per_second: current.throughput_bytes_per_second,
+        throughput_records_per_second: current.throughput_records_per_second,
+        eta_seconds: current.eta_seconds,
+        updated_at: current_timestamp(),
+    };
+    let bytes = serde_json::to_vec_pretty(&checkpoint).map_err(|error| error.to_string())?;
+    let temporary = staging.join("annotation-state.json.tmp");
+    let destination = staging.join("annotation-state.json");
+    fs::write(&temporary, bytes)
+        .map_err(|error| format!("cannot write annotation recovery state: {error}"))?;
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("cannot replace annotation recovery state: {error}"))?;
+    }
+    fs::rename(&temporary, &destination)
+        .map_err(|error| format!("cannot publish annotation recovery state: {error}"))
+}
+
+fn read_checkpoint(directory: &Path) -> Option<AnnotationCheckpoint> {
+    ["annotation-state.json", "annotation-state.json.tmp"]
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find_map(|path| {
+            let metadata = fs::metadata(&path).ok()?;
+            if metadata.len() == 0 || metadata.len() > 1024 * 1024 {
+                return None;
+            }
+            let checkpoint: AnnotationCheckpoint =
+                serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+            (checkpoint.schema_version == 1).then_some(checkpoint)
+        })
+}
+
+fn annotation_progress_detail(current: &State) -> String {
+    let mut parts = Vec::new();
+    if let Some(chromosome) = current.chromosome.as_deref() {
+        parts.push(format!("Chromosome {chromosome}"));
+    }
+    if current.total_records > 0 {
+        parts.push(format!(
+            "{} of {} variants",
+            current.completed_records, current.total_records
+        ));
+    }
+    if current.throughput_records_per_second > 0.0 {
+        parts.push(format!(
+            "{:.0} variants/s",
+            current.throughput_records_per_second
+        ));
+    }
+    if parts.is_empty() {
+        "fastVEP is annotating variants".into()
+    } else {
+        parts.join(" · ")
     }
 }
 
@@ -1030,6 +2292,100 @@ mod tests {
         let request: AnnotationRequest =
             serde_json::from_str(r#"{"input":"fixture.vcf"}"#).unwrap();
         assert!(!request.include_annotated_vcf);
+        assert_eq!(request.run_mode, RunMode::Annotation);
+        assert!(!request.add_local_consequences);
+        assert!(!request.confirm_grch38);
+    }
+
+    #[test]
+    fn vcf_review_runs_without_fastvep_and_round_trips_through_a_shared_report() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-vcf-review-run-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input = root.join("input.vcf");
+        let staging = root.join("review.partial");
+        let completed = root.join("review");
+        let imported_runs = root.join("imported");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &input,
+            "##fileformat=VCFv4.2\n##reference=GRCh38\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tCASE\n22\t100\trs1\tA\tG\t50\tPASS\t.\tGT:DP\t0/1:24\n",
+        )
+        .unwrap();
+        let request = AnnotationRequest {
+            input,
+            name: Some("Review fixture".into()),
+            output_directory: Some(root.clone()),
+            source_ids: Vec::new(),
+            include_annotated_vcf: false,
+            run_mode: RunMode::VcfReview,
+            add_local_consequences: false,
+            confirm_grch38: false,
+        };
+        validate_request(&request, &root.join("missing-resources")).unwrap();
+        let (rows, _) = execute_vcf_review(
+            &request,
+            "Review fixture",
+            "run-vcf-review",
+            &staging,
+            &completed,
+        )
+        .unwrap();
+        assert_eq!(rows, 1);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(completed.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["reportKind"], "vcf-only");
+        assert!(manifest.get("fastvepVersion").is_none());
+
+        let package = root.join("review.zip");
+        crate::report_package::create(&completed, &package).unwrap();
+        let imported = crate::report_library::import(&package, &imported_runs).unwrap();
+        let imported_manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(imported.directory.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(imported_manifest["reportKind"], "vcf-only");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vcf_review_requires_confirmed_grch38_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-vcf-review-assembly-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("unknown.vcf");
+        fs::write(
+            &input,
+            "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n22\t100\t.\tA\tG\t.\tPASS\t.\n",
+        )
+        .unwrap();
+        let mut request = AnnotationRequest {
+            input,
+            name: None,
+            output_directory: None,
+            source_ids: Vec::new(),
+            include_annotated_vcf: false,
+            run_mode: RunMode::VcfReview,
+            add_local_consequences: false,
+            confirm_grch38: false,
+        };
+        assert!(validate_request(&request, &root).unwrap_err().contains("confirm"));
+        request.confirm_grch38 = true;
+        validate_request(&request, &root).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

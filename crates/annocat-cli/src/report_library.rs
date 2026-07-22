@@ -16,6 +16,8 @@ struct PackageManifest {
     completed_at: String,
     assembly: String,
     variant_count: u64,
+    #[serde(default)]
+    report_kind: Option<String>,
     files: Vec<PackageFile>,
 }
 
@@ -65,6 +67,10 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         || manifest.variant_count == 0
     {
         return Err("validated report package identity changed".into());
+    }
+    let report_kind = manifest.report_kind.as_deref().unwrap_or("annotation");
+    if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
+        return Err("validated report package has an unsupported report kind".into());
     }
     if let Some(existing) = existing_run(runs, &manifest)? {
         return Ok(existing);
@@ -116,13 +122,23 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     let evidence = role(&roles, "evidence")?;
     let catalog = role(&roles, "field-catalog")?;
     let variant_count = manifest.variant_count;
-    crate::results::validate_report_tables(
-        variants,
-        consequences,
-        evidence,
-        catalog,
-        variant_count,
-    )?;
+    if report_kind == "vcf-only" {
+        crate::results::validate_report_tables_allow_empty_consequences(
+            variants,
+            consequences,
+            evidence,
+            catalog,
+            variant_count,
+        )?;
+    } else {
+        crate::results::validate_report_tables(
+            variants,
+            consequences,
+            evidence,
+            catalog,
+            variant_count,
+        )?;
+    }
 
     let file_for_role = |role_name: &str| {
         manifest
@@ -144,6 +160,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         "completedAt": manifest.completed_at,
         "assembly": manifest.assembly,
         "variantCount": variant_count,
+        "reportKind": report_kind,
         "resultFile": variants_file.path,
         "resultSha256": variants_file.sha256,
         "consequencesFile": consequences_file.path,
@@ -313,8 +330,8 @@ mod tests {
         crate::results::convert_vcf(
             &vcf,
             &run.join("variants.parquet"),
-            &run.join("variants.duckdb"),
             || false,
+            |_, _, _, _, _| {},
         )
         .unwrap();
         let structured = run.join("fastvep.ndjson");
@@ -331,8 +348,8 @@ mod tests {
             &run.join("consequences.parquet"),
             &run.join("evidence.parquet"),
             &run.join("field-catalog.json"),
-            &run.join("structured.duckdb"),
             || false,
+            |_, _, _, _, _| {},
         )
         .unwrap();
         fs::write(

@@ -17,6 +17,7 @@
 /runs/
 /tools/
 /dist/
+/.pnpm-store/
 /web/assets/annocat-logo-concept*.png
 /resources/*
 !/resources/README.md

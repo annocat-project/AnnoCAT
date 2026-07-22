@@ -18,6 +18,8 @@ struct RunManifest {
     completed_at: String,
     assembly: String,
     variant_count: u64,
+    #[serde(default)]
+    report_kind: Option<String>,
     result_file: String,
     consequences_file: String,
     evidence_file: String,
@@ -53,6 +55,10 @@ pub fn create_with_display_name(
         ));
     }
     let manifest = read_run_manifest(run_directory)?;
+    let report_kind = manifest.report_kind.as_deref().unwrap_or("annotation");
+    if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
+        return Err(format!("completed run has unsupported report kind: {report_kind}"));
+    }
     let display_name = display_name.unwrap_or(&manifest.name).trim();
     if display_name.is_empty()
         || display_name.len() > 256
@@ -88,12 +94,13 @@ pub fn create_with_display_name(
         "completedAt": manifest.completed_at,
         "assembly": manifest.assembly,
         "variantCount": manifest.variant_count,
+        "reportKind": report_kind,
         "createdBy": {"application": "AnnoCAT", "version": env!("CARGO_PKG_VERSION")},
-        "annotationEngine": {
+        "annotationEngine": (report_kind != "vcf-only").then(|| serde_json::json!({
             "name": "fastVEP",
             "version": manifest.fastvep_version,
             "sha256": manifest.fastvep_sha256
-        },
+        })),
         "sourceIds": manifest.source_ids,
         "files": entries.iter().map(|(name, role, _, bytes, sha256)| serde_json::json!({
             "path": name, "role": role, "bytes": bytes, "sha256": sha256
