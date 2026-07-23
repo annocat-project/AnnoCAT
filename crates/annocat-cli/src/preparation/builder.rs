@@ -4,11 +4,246 @@ use super::{
 };
 use crate::preparation::cache::required_nonempty_file;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+const FASTVEP_LOG_TAIL_BYTES: u64 = 64 * 1024;
+
+fn fastvep_log_detail(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(
+        length.saturating_sub(FASTVEP_LOG_TAIL_BYTES),
+    ))
+    .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let tail = String::from_utf8_lossy(&bytes);
+    tail.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.eq_ignore_ascii_case("caused by:")
+                && !line.starts_with("Building ")
+        })
+        .map(|line| line.trim_start_matches("Error: ").to_string())
+}
+
+fn source_is_corrupt(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "corrupt gzip",
+        "corrupt bgzf",
+        "gzip checksum",
+        "matching checksum",
+        "checksum mismatch",
+        "crc mismatch",
+        "crc validation",
+        "invalid gzip",
+        "invalid bgzf",
+        "unexpected end of gzip",
+        "unexpected end of bgzf",
+        "truncated gzip",
+        "truncated bgzf",
+        "cannot inflate",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn part_identity_path(part: &Path) -> Option<PathBuf> {
+    let parent = part.parent()?;
+    if parent.file_name()?.to_str()? != "source-parts" {
+        return None;
+    }
+    let name = part.file_name()?.to_str()?.strip_suffix(".part")?;
+    Some(parent.join(format!("{name}.identity.json")))
+}
+
+/// Prefer fastVEP's parser/decompressor error to a secondary broken-pipe or
+/// exit-status message. If that error proves a retained source part is corrupt,
+/// discard only those current inputs so Resume downloads the chromosome again.
+pub(super) fn recover_build_failure(
+    log_path: &Path,
+    fallback: String,
+    retained_inputs: &[PathBuf],
+) -> String {
+    let read_fastvep_log = fallback.contains("fastVEP input failed")
+        || fallback.contains("cannot stream REVEL to fastVEP")
+        || (fallback.contains("fastVEP") && fallback.contains("status"));
+    let detail = if read_fastvep_log {
+        fastvep_log_detail(log_path).unwrap_or(fallback)
+    } else {
+        fallback
+    };
+    if !source_is_corrupt(&detail) {
+        return detail;
+    }
+    let mut discarded = false;
+    for part in retained_inputs {
+        let Some(identity) = part_identity_path(part) else {
+            continue;
+        };
+        discarded |= fs::remove_file(part).is_ok();
+        let _ = fs::remove_file(identity);
+    }
+    if discarded {
+        format!(
+            "{detail}; the corrupt retained source part was discarded, so Resume will redownload this chromosome"
+        )
+    } else {
+        detail
+    }
+}
+
+/// A failed process may have been recorded before AnnoCAT learned how to clean
+/// corrupt parts automatically. On the next Resume, remove that same older
+/// part before the range downloader decides it is already complete.
+pub(super) fn discard_parts_from_previous_corruption(
+    log_path: &Path,
+    base_part: &Path,
+) -> Option<String> {
+    let detail = fastvep_log_detail(log_path)?;
+    if !source_is_corrupt(&detail) {
+        return None;
+    }
+    let log_modified = fs::metadata(log_path).ok()?.modified().ok()?;
+    let parent = base_part.parent()?;
+    if parent.file_name()?.to_str()? != "source-parts" {
+        return None;
+    }
+    let base_name = base_part.file_name()?.to_str()?.strip_suffix(".part")?;
+    let variant_prefix = format!("{base_name}.");
+    let mut discarded = false;
+    for entry in fs::read_dir(parent).ok()?.filter_map(Result::ok) {
+        let part = entry.path();
+        let Some(name) = part.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name != format!("{base_name}.part")
+            && !(name.starts_with(&variant_prefix) && name.ends_with(".part"))
+        {
+            continue;
+        }
+        let part_modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
+            Ok(modified) => modified,
+            Err(_) => continue,
+        };
+        if part_modified > log_modified {
+            continue;
+        }
+        let Some(identity) = part_identity_path(&part) else {
+            continue;
+        };
+        discarded |= fs::remove_file(&part).is_ok();
+        let _ = fs::remove_file(identity);
+    }
+    discarded.then_some(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "annocat-builder-{label}-{}-{nonce}",
+            std::process::id(),
+        ))
+    }
+
+    #[test]
+    fn corruption_diagnostic_replaces_pipe_error_and_discards_only_source_parts() {
+        let root = root("corrupt-part");
+        let parts = root.join("source-parts");
+        fs::create_dir_all(&parts).unwrap();
+        let part = parts.join("2.part");
+        let identity = parts.join("2.identity.json");
+        let unrelated = root.join("input.vcf.gz");
+        let log = root.join("fastvep.log");
+        fs::write(&part, b"corrupt").unwrap();
+        fs::write(&identity, b"identity").unwrap();
+        fs::write(&unrelated, b"keep").unwrap();
+        fs::write(
+            &log,
+            b"Error: Reading gnomAD VCF line\n\nCaused by:\n    corrupt gzip stream does not have a matching checksum\n",
+        )
+        .unwrap();
+
+        let error = recover_build_failure(
+            &log,
+            "fastVEP input failed: pipe ended".into(),
+            &[part.clone(), unrelated.clone()],
+        );
+        assert!(error.contains("corrupt gzip stream"));
+        assert!(error.contains("Resume will redownload"));
+        assert!(!part.exists());
+        assert!(!identity.exists());
+        assert!(unrelated.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parser_errors_do_not_discard_resumable_parts() {
+        let root = root("parser-error");
+        let parts = root.join("source-parts");
+        fs::create_dir_all(&parts).unwrap();
+        let part = parts.join("2.part");
+        let identity = parts.join("2.identity.json");
+        let log = root.join("fastvep.log");
+        fs::write(&part, b"valid source").unwrap();
+        fs::write(&identity, b"identity").unwrap();
+        fs::write(&log, b"Error: VCF row has fewer than eight columns\n").unwrap();
+
+        let error = recover_build_failure(
+            &log,
+            "fastVEP preparation failed with status exit code: 1".into(),
+            &[part.clone()],
+        );
+        assert_eq!(error, "VCF row has fewer than eight columns");
+        assert!(part.exists());
+        assert!(identity.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resume_discards_all_current_range_parts_proven_corrupt_by_older_log() {
+        let root = root("previous-corruption");
+        let parts = root.join("source-parts");
+        let staging = root.join("staging").join("7.partial");
+        fs::create_dir_all(&parts).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        for name in ["7.part", "7.snv.part", "7.indel.part"] {
+            fs::write(parts.join(name), b"corrupt").unwrap();
+            fs::write(
+                parts.join(name.replace(".part", ".identity.json")),
+                b"identity",
+            )
+            .unwrap();
+        }
+        let log = staging.join("fastvep.log");
+        fs::write(
+            &log,
+            b"corrupt gzip stream does not have a matching checksum\n",
+        )
+        .unwrap();
+
+        let detail = discard_parts_from_previous_corruption(&log, &parts.join("7.part"));
+        assert!(detail.is_some());
+        assert!(!parts.join("7.part").exists());
+        assert!(!parts.join("7.snv.part").exists());
+        assert!(!parts.join("7.indel.part").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct RawFileInput {
@@ -197,7 +432,14 @@ pub(super) fn build_from_files(
     let outcome = wait_for_file_builder(request, &mut child, label, chromosome, total, cancelled);
     if let Err(error) = outcome {
         remove_incomplete_outputs(request.paths);
-        return Err(error);
+        return Err(recover_build_failure(
+            request.log_path,
+            error,
+            &inputs
+                .iter()
+                .map(|input| input.path.clone())
+                .collect::<Vec<_>>(),
+        ));
     }
     completed_result(request, total)
 }
@@ -247,7 +489,11 @@ where
             let _ = child.kill();
             let _ = child.wait();
             remove_incomplete_outputs(request.paths);
-            return Err(error);
+            return Err(recover_build_failure(
+                request.log_path,
+                error,
+                &[request.paths.source_part().to_path_buf()],
+            ));
         }
     };
     let status = child
@@ -255,7 +501,11 @@ where
         .map_err(|error| format!("cannot wait for fastVEP preparation: {error}"))?;
     if !status.success() {
         remove_incomplete_outputs(request.paths);
-        return Err(format!("fastVEP preparation failed with status {status}"));
+        return Err(recover_build_failure(
+            request.log_path,
+            format!("fastVEP preparation failed with status {status}"),
+            &[request.paths.source_part().to_path_buf()],
+        ));
     }
     if copied != request.identity.expected_compressed_bytes {
         remove_incomplete_outputs(request.paths);

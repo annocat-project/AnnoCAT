@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "ce3567e0336f306e2262117bc0b8302283186d2c",
+  "commit": "1654a63b3d7b19908a1d1fb6fe7abf8280b52a65",
   "branch": "annocat/cache-build-performance",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
@@ -58,30 +58,46 @@
       "purpose": "Validate and retain configurable field subsets for ClinVar, dbSNP, gnomAD, phyloP, CADD, SpliceAI, and REVEL caches"
     },
     {
-      "commit": "a01b1b6f7a20dea84134b5bc887911423f8c5bc2",
+      "commit": "4517c69d8c4d351e0a2a763ee8bdddf5ac8e9602",
       "purpose": "Own raw indexed-source framing and multi-artifact merging in fastVEP while removing redundant cache-writer cloning and sorting"
     },
     {
-      "commit": "7237a47ddac5d57bfee46dce31506b134ede458f",
+      "commit": "568f316bb6760ac8fae8efc46e2910d3655d8b32",
       "purpose": "Ignore an incomplete trailing text row at BGZF range boundaries while preserving complete full-file inputs"
     },
     {
-      "commit": "0e328370765e24d909764e254b15fcedde482eaa",
+      "commit": "b53966b135ff8787979ca936cf5fc91faf147722",
       "purpose": "Build all configurable supplementary caches with reusable input buffers, direct selected-field serialization, and overlapped ordered OSA compression"
     },
     {
-      "commit": "ce3567e0336f306e2262117bc0b8302283186d2c",
+      "commit": "51ec56fa9d42d506dbafb49b045a03a4fc97843d",
       "purpose": "Parse stateless supplementary source rows in bounded ordered batches with a configurable one-to-four worker budget"
+    },
+    {
+      "commit": "2cf0ff471fa2ffae42c366bef4a18330298adab0",
+      "purpose": "Keep explicitly supplied transcript caches read-only during annotation so an annotation run cannot overwrite an installed cache"
+    },
+    {
+      "commit": "9982af2c2f45863ae703a8fd1e7babd1475c72b4",
+      "purpose": "Fully decode and structurally verify staged transcript caches before installation, including primary coding-sequence coverage"
+    },
+    {
+      "commit": "876a35e713c3a573b8a66b1f60f3bb55c7e77804",
+      "purpose": "Summarize coding transcripts on contigs absent from the selected FASTA instead of emitting one warning per transcript"
+    },
+    {
+      "commit": "1654a63b3d7b19908a1d1fb6fe7abf8280b52a65",
+      "purpose": "Memory-map indexed FASTA files during transcript-cache construction instead of loading the complete genome into RAM"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 6567424,
-    "sha256": "375bcc04173d648fe420b5b37152fd68031271bf99c24dbea6bbf8135c3a3385",
+    "sizeBytes": 6589440,
+    "sha256": "59d6c48c7ab07577ce78d987977e5335b1bb850c8d25b41ead2c5cf253b7f6a2",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-07-19",
+  "reviewedOn": "2026-07-22",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
+  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact keeps explicit transcript caches read-only during annotation, memory-maps indexed FASTA files during transcript-cache construction, and fully verifies staged transcript caches before installation. It also owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
 }

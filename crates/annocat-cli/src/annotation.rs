@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
+static PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static BATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -263,10 +264,25 @@ pub fn cancel() -> bool {
         return false;
     }
     BATCH_ACTIVE.store(false, Ordering::SeqCst);
+    PAUSE_REQUESTED.store(false, Ordering::SeqCst);
     CANCEL.store(true, Ordering::SeqCst);
     if let Ok(mut current) = state().lock() {
         current.cancel_requested = true;
         current.detail = "Stopping fastVEP and discarding partial output".into();
+    }
+    true
+}
+
+pub fn pause() -> bool {
+    if !is_running() && !BATCH_ACTIVE.load(Ordering::SeqCst) {
+        return false;
+    }
+    BATCH_ACTIVE.store(false, Ordering::SeqCst);
+    PAUSE_REQUESTED.store(true, Ordering::SeqCst);
+    CANCEL.store(true, Ordering::SeqCst);
+    if let Ok(mut current) = state().lock() {
+        current.cancel_requested = true;
+        current.detail = "Pausing fastVEP and retaining partial output".into();
     }
     true
 }
@@ -334,6 +350,7 @@ pub fn start_recovery_background(
         "Scanning the interrupted fastVEP output",
     )?;
     CANCEL.store(false, Ordering::SeqCst);
+    PAUSE_REQUESTED.store(false, Ordering::SeqCst);
     let returned_id = run_id.clone();
     std::thread::spawn(move || {
         let result = execute_recovery(
@@ -345,9 +362,8 @@ pub fn start_recovery_background(
             &final_directory,
             &request.partial_vcf,
             &structured_output,
-            false,
         );
-        finish_background(result, &run_id, &staging_directory, &final_directory, false);
+        finish_background(result, &run_id, &staging_directory, &final_directory, true);
     });
     Ok(returned_id)
 }
@@ -390,7 +406,7 @@ pub fn resume_background(
     validate_request(&annotation, &resources)?;
     let partial_vcf = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
-    validate_recovery_files(&partial_vcf, &structured_output)?;
+    let recover_partial_output = validate_recovery_files(&partial_vcf, &structured_output).is_ok();
     begin_run_state(
         &annotation,
         &checkpoint.name,
@@ -400,20 +416,32 @@ pub fn resume_background(
         "Scanning the interrupted fastVEP output",
     )?;
     CANCEL.store(false, Ordering::SeqCst);
+    PAUSE_REQUESTED.store(false, Ordering::SeqCst);
     let returned_id = run_id.to_owned();
     let thread_run_id = returned_id.clone();
     std::thread::spawn(move || {
-        let result = execute_recovery(
-            &annotation,
-            &resources,
-            &checkpoint.name,
-            &thread_run_id,
-            &staging,
-            &final_directory,
-            &partial_vcf,
-            &structured_output,
-            true,
-        );
+        let result = if recover_partial_output {
+            execute_recovery(
+                &annotation,
+                &resources,
+                &checkpoint.name,
+                &thread_run_id,
+                &staging,
+                &final_directory,
+                &partial_vcf,
+                &structured_output,
+            )
+        } else {
+            let _ = fs::remove_dir_all(&staging);
+            execute(
+                &annotation,
+                &resources,
+                &checkpoint.name,
+                &thread_run_id,
+                &staging,
+                &final_directory,
+            )
+        };
         finish_background(result, &thread_run_id, &staging, &final_directory, true);
     });
     Ok(returned_id)
@@ -547,6 +575,7 @@ fn start_background_inner(
         "Validating the input VCF",
     )?;
     CANCEL.store(false, Ordering::SeqCst);
+    PAUSE_REQUESTED.store(false, Ordering::SeqCst);
     crate::terminal_log(
         "annotation",
         format!(
@@ -624,7 +653,9 @@ fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(),
             return Err("VCF review cannot select supplemental annotation sources".into());
         }
         if request.include_annotated_vcf && !request.add_local_consequences {
-            return Err("an annotated VCF is unavailable when local consequences are disabled".into());
+            return Err(
+                "an annotated VCF is unavailable when local consequences are disabled".into(),
+            );
         }
         match annocat_core::vcf::declared_assembly(&request.input)? {
             Some(assembly) if assembly == "GRCh38" => {}
@@ -738,24 +769,29 @@ fn finish_background(
             current.cancel_requested = false;
         }
         Err(error) if error == "cancelled" => {
-            crate::terminal_log("annotation", format!("{run_id} cancelled"));
-            let resumable = allow_resume && recovery_outputs_exist(staging);
-            current.state = if resumable {
-                "interrupted"
+            let paused = PAUSE_REQUESTED.swap(false, Ordering::SeqCst) && allow_resume;
+            CANCEL.store(false, Ordering::SeqCst);
+            if paused && staging.join("annotation-state.json").is_file() {
+                crate::terminal_log("annotation", format!("{run_id} paused"));
+                current.state = "interrupted";
+                current.phase = "interrupted";
+                current.detail = if recovery_outputs_exist(staging) {
+                    "Annotation paused; partial output retained for recovery".into()
+                } else {
+                    "Annotation paused; Resume will restart this run".into()
+                };
+                current.resumable = true;
             } else {
-                "cancelled"
-            };
-            current.phase = if resumable {
-                "interrupted"
-            } else {
-                "cancelled"
-            };
-            current.detail = if resumable {
-                "Annotation stopped; partial output retained for recovery".into()
-            } else {
-                "Annotation cancelled; partial result discarded".into()
-            };
-            current.resumable = resumable;
+                crate::terminal_log("annotation", format!("{run_id} cancelled and deleted"));
+                let _ = fs::remove_dir_all(staging);
+                let _ = fs::remove_dir_all(staging.with_extension("failed"));
+                current.state = "cancelled";
+                current.phase = "cancelled";
+                current.detail = "Annotation cancelled; partial result discarded".into();
+                current.resumable = false;
+                current.output = None;
+                current.percent = 0.0;
+            }
             current.cancel_requested = false;
             current.error = None;
         }
@@ -787,10 +823,7 @@ fn execute(
     }
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
     persist_current_checkpoint(staging, request, name, run_id)?;
-    if CANCEL.load(Ordering::SeqCst) {
-        let _ = fs::remove_dir_all(staging);
-        return Err("cancelled".into());
-    }
+    check_cancel(staging)?;
     if let Ok(mut current) = state().lock() {
         current.total_bytes = fs::metadata(&request.input)
             .map(|value| value.len())
@@ -811,7 +844,6 @@ fn execute(
         0,
         0,
         0,
-        false,
     )?;
     if input_summary.records == 0 {
         return fail_staging(staging, "input VCF contains no variant records".into());
@@ -885,7 +917,9 @@ fn execute_vcf_review(
             let _ = fs::remove_dir_all(staging);
             return Err(error);
         }
-        Err(error) => return fail_staging(staging, format!("VCF review conversion failed: {error}")),
+        Err(error) => {
+            return fail_staging(staging, format!("VCF review conversion failed: {error}"));
+        }
     };
 
     if let Ok(mut current) = state().lock() {
@@ -904,7 +938,7 @@ fn execute_vcf_review(
         return fail_staging(staging, error);
     }
 
-    set_phase("publishing", "Verifying and publishing the VCF review");
+    set_phase("publishing", "Verifying the VCF review");
     if let Err(error) = super::results::validate_report_tables_allow_empty_consequences(
         &parquet,
         &consequences,
@@ -914,6 +948,10 @@ fn execute_vcf_review(
     ) {
         return fail_staging(staging, format!("VCF review validation failed: {error}"));
     }
+
+    prepare_report_indexes(run_id, &parquet, &consequences, &evidence, &field_catalog)?;
+    check_cancel(staging)?;
+    set_phase("publishing", "Publishing the VCF review");
 
     let result_bytes = file_bytes(&parquet)?;
     let consequences_bytes = file_bytes(&consequences)?;
@@ -988,7 +1026,6 @@ fn execute_recovery(
     final_directory: &Path,
     partial_vcf: &Path,
     partial_structured: &Path,
-    preserve_on_cancel: bool,
 ) -> Result<(u64, u64), String> {
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
     persist_current_checkpoint(staging, request, name, run_id)?;
@@ -1012,7 +1049,7 @@ fn execute_recovery(
             format!("{run_id} recovery ignored {discarded_tail_bytes} incomplete trailing bytes"),
         );
     }
-    check_recovery_cancel(staging, preserve_on_cancel)?;
+    check_cancel(staging)?;
 
     set_phase(
         "recovery-scan",
@@ -1045,7 +1082,7 @@ fn execute_recovery(
             ),
         );
     }
-    check_recovery_cancel(staging, preserve_on_cancel)?;
+    check_cancel(staging)?;
 
     set_phase(
         "recovery-input",
@@ -1123,7 +1160,7 @@ fn execute_recovery(
     let continuation_vcf = staging.join("continuation.vcf");
     let continuation_structured = staging.join("continuation.ndjson");
     let source_bindings = if remaining_records > 0 {
-        check_recovery_cancel(staging, preserve_on_cancel)?;
+        check_cancel(staging)?;
         let (bindings, continuation_summary) = run_fastvep(
             request,
             resources,
@@ -1136,7 +1173,6 @@ fn execute_recovery(
             recovered_vcf.records,
             recovered_vcf.valid_bytes,
             input_summary.records,
-            preserve_on_cancel,
         )?;
         if continuation_summary.records != remaining_records {
             return Err(format!(
@@ -1198,7 +1234,7 @@ fn execute_recovery(
     let _ = fs::remove_file(&remaining_input);
     let _ = fs::remove_file(&continuation_vcf);
     let _ = fs::remove_file(&continuation_structured);
-    check_recovery_cancel(staging, true)?;
+    check_cancel(staging)?;
     finalize_outputs(
         request,
         name,
@@ -1225,7 +1261,6 @@ fn run_fastvep(
     baseline_records: u64,
     baseline_bytes: u64,
     total_records: u64,
-    preserve_on_cancel: bool,
 ) -> Result<(Vec<SourceBinding>, annocat_core::vcf::VcfSummary), String> {
     let executable = super::fastvep::readiness()
         .executable
@@ -1290,9 +1325,7 @@ fn run_fastvep(
             if let Some(directory) = provider_directory.as_ref() {
                 let _ = fs::remove_dir_all(directory);
             }
-            if !preserve_on_cancel {
-                let _ = fs::remove_dir_all(staging);
-            }
+            discard_cancelled_staging(staging);
             let _ = feeder.join();
             return Err("cancelled".into());
         }
@@ -1441,7 +1474,7 @@ fn finalize_outputs(
     ) {
         Ok(summary) => summary,
         Err(error) if error == "cancelled" => {
-            let _ = fs::remove_dir_all(staging);
+            discard_cancelled_staging(staging);
             return Err(error);
         }
         Err(error) => return fail_staging(staging, format!("result conversion failed: {error}")),
@@ -1486,7 +1519,7 @@ fn finalize_outputs(
     ) {
         Ok(summary) => summary,
         Err(error) if error == "cancelled" => {
-            let _ = fs::remove_dir_all(staging);
+            discard_cancelled_staging(staging);
             return Err(error);
         }
         Err(error) => {
@@ -1505,21 +1538,19 @@ fn finalize_outputs(
             ),
         );
     }
-    if let Err(error) = fs::remove_file(structured_output) {
-        return fail_staging(
-            staging,
-            format!("cannot remove temporary structured output: {error}"),
-        );
-    }
+    check_cancel(staging)?;
     update_indexing_progress(
         "publishing",
-        "Verifying and publishing result files",
+        "Preparing report indexes",
         input_summary.records,
         input_summary.records,
         90.0,
         10.0,
         0.0,
     );
+    prepare_report_indexes(run_id, &parquet, &consequences, &evidence, &field_catalog)?;
+    check_cancel(staging)?;
+    set_phase("publishing", "Publishing result files");
     let output_bytes = file_bytes(&parquet)?;
     let consequences_bytes = file_bytes(&consequences)?;
     let evidence_bytes = file_bytes(&evidence)?;
@@ -1602,6 +1633,12 @@ fn finalize_outputs(
         object.insert("annotatedVcfBytes".into(), bytes.into());
         object.insert("annotatedVcfSha256".into(), sha256.into());
     }
+    if let Err(error) = fs::remove_file(structured_output) {
+        return fail_staging(
+            staging,
+            format!("cannot remove temporary structured output: {error}"),
+        );
+    }
     let _ = fs::remove_file(staging.join("annotation-state.json"));
     let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
@@ -1618,6 +1655,37 @@ fn file_bytes(path: &Path) -> Result<u64, String> {
     fs::metadata(path)
         .map(|metadata| metadata.len())
         .map_err(|error| format!("cannot measure {}: {error}", path.display()))
+}
+
+fn prepare_report_indexes(
+    run_id: &str,
+    variants: &Path,
+    consequences: &Path,
+    evidence: &Path,
+    catalog: &Path,
+) -> Result<(), String> {
+    if CANCEL.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+    if let Err(error) = crate::detail_lookup::prepare(variants, consequences, evidence) {
+        crate::terminal_log(
+            "annotation",
+            format!("{run_id} completed without the optional fast variant lookup index: {error}"),
+        );
+    }
+    if CANCEL.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+    if let Err(error) = crate::evidence_resolution::prepare(variants, evidence, catalog) {
+        crate::terminal_log(
+            "annotation",
+            format!("{run_id} completed without the optional transcript evidence index: {error}"),
+        );
+    }
+    if CANCEL.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+    Ok(())
 }
 
 fn fail_staging<T>(staging: &Path, error: String) -> Result<T, String> {
@@ -1776,14 +1844,18 @@ fn update_parquet_output(output_bytes: u64, bytes_per_second: f64) {
     }
 }
 
-fn check_recovery_cancel(staging: &Path, preserve: bool) -> Result<(), String> {
+fn check_cancel(staging: &Path) -> Result<(), String> {
     if !CANCEL.load(Ordering::SeqCst) {
         return Ok(());
     }
-    if !preserve {
+    discard_cancelled_staging(staging);
+    Err("cancelled".into())
+}
+
+fn discard_cancelled_staging(staging: &Path) {
+    if !PAUSE_REQUESTED.load(Ordering::SeqCst) {
         let _ = fs::remove_dir_all(staging);
     }
-    Err("cancelled".into())
 }
 
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
@@ -2337,20 +2409,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rows, 1);
-        let manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(completed.join("manifest.json")).unwrap(),
-        )
-        .unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(completed.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest["reportKind"], "vcf-only");
         assert!(manifest.get("fastvepVersion").is_none());
+        assert!(completed.join("detail-row-groups.json").is_file());
 
         let package = root.join("review.zip");
         crate::report_package::create(&completed, &package).unwrap();
         let imported = crate::report_library::import(&package, &imported_runs).unwrap();
-        let imported_manifest: serde_json::Value = serde_json::from_slice(
-            &fs::read(imported.directory.join("manifest.json")).unwrap(),
-        )
-        .unwrap();
+        let imported_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(imported.directory.join("manifest.json")).unwrap())
+                .unwrap();
         assert_eq!(imported_manifest["reportKind"], "vcf-only");
         fs::remove_dir_all(root).unwrap();
     }
@@ -2382,7 +2452,11 @@ mod tests {
             add_local_consequences: false,
             confirm_grch38: false,
         };
-        assert!(validate_request(&request, &root).unwrap_err().contains("confirm"));
+        assert!(
+            validate_request(&request, &root)
+                .unwrap_err()
+                .contains("confirm")
+        );
         request.confirm_grch38 = true;
         validate_request(&request, &root).unwrap();
         fs::remove_dir_all(root).unwrap();

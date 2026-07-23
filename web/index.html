@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="astryx-visual-prototype">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="/resource-location.css">
   <link rel="stylesheet" href="/report-share.css">
   <link rel="stylesheet" href="/brand-theme.css">
-  <script>{const astryxPrototype=new URLSearchParams(location.search).get('ui')==='astryx';if(astryxPrototype){document.documentElement.classList.add('astryx-visual-prototype');addEventListener('DOMContentLoaded',()=>{if(matchMedia('(max-width: 850px)').matches&&!document.body.classList.contains('sidebar-collapsed'))document.querySelector('#sidebar-toggle')?.click()})}}</script>
+  <script>addEventListener('DOMContentLoaded',()=>{if(matchMedia('(max-width: 850px)').matches&&!document.body.classList.contains('sidebar-collapsed'))document.querySelector('#sidebar-toggle')?.click()})</script>
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -80,11 +80,11 @@
         </ol>
 
         <form id="run-form" class="run-card">
-          <section class="wizard-panel active-panel" data-step="1"><div class="section-title"><span>1</span><div><h2>Input VCFs</h2><p>Choose one file or select several to annotate in sequence.</p></div></div><input id="vcf-files" type="file" accept=".vcf,.vcf.gz,.vcf.bgz,.gz,.bgz" multiple hidden><button id="choose-vcfs" class="choice vcf-picker-card" type="button"><svg class="ui-icon file-icon"><use href="#icon-upload"/></svg><strong>Choose VCF files</strong><small>Select one or more VCF, VCF.GZ, or BGZ files</small></button><button id="recover-annotation" class="text-button" type="button">Recover an interrupted annotation</button><div id="recovery-selection" class="inline-note hidden"></div><div id="selected-files" class="batch-files hidden"></div><div class="inline-note"><span><svg class="ui-icon"><use href="#icon-info"/></svg></span><p><strong>Each file becomes a separate run.</strong> When you select multiple VCFs, AnnoCAT validates and annotates them one at a time in the order shown.</p></div></section>
-          <section class="wizard-panel" data-step="2"><div class="section-title"><span>2</span><div><h2>Annotation profile and sources</h2><p>Select a profile, then adjust its available sources if needed.</p></div></div><label class="profile-field"><span>Profile</span><select id="profile"><option value="">Loading profiles…</option></select></label><div class="source-option required-resource"><span><strong>Core annotation data</strong><small>GRCh38 reference and matching transcript cache</small></span><em data-reference-state>Not installed</em></div><div id="wizard-sources" class="wizard-sources"></div><div id="wizard-readiness" class="wizard-readiness"><span class="readiness-dot"></span><div><strong>Checking annotation resources…</strong><p>Please wait while AnnoCAT checks this computer.</p></div><button type="button" data-page-link="resources">Manage sources</button></div></section>
+          <section class="wizard-panel active-panel" data-step="1"><div class="section-title"><span>1</span><div><h2>Input VCFs</h2><p>Choose one file or select several to annotate in sequence.</p></div></div><input id="vcf-files" type="file" accept=".vcf,.vcf.gz,.vcf.bgz,.gz,.bgz" multiple hidden><button id="choose-vcfs" class="choice vcf-picker-card" type="button"><svg class="ui-icon file-icon"><use href="#icon-upload"/></svg><strong>Choose VCF files</strong><small>Select one or more VCF, VCF.GZ, or BGZ files</small></button><button id="recover-annotation" class="text-button" type="button">Recover an interrupted annotation</button><div id="recovery-selection" class="inline-note hidden"></div><div id="selected-files" class="batch-files hidden"></div></section>
+          <section class="wizard-panel" data-step="2"><div class="section-title"><span>2</span><div><h2>Annotation profile and sources</h2><p>Select a profile, then adjust its available sources if needed.</p></div></div><label class="profile-field"><span>Profile</span><select id="profile"><option value="">Loading profiles…</option></select></label><div class="source-option required-resource source-unavailable"><svg class="ui-icon source-option-icon" aria-hidden="true"><use href="#icon-database"/></svg><span><strong>Core annotation data</strong><small>GRCh38 reference and matching transcript cache</small></span><em data-reference-state>Not installed</em></div><div id="wizard-sources" class="wizard-sources"></div><div id="wizard-readiness" class="wizard-readiness"><span class="readiness-dot"></span><div><strong>Checking annotation resources…</strong><p>Please wait while AnnoCAT checks this computer.</p></div><button type="button" data-page-link="resources">Manage sources</button></div></section>
           <section class="wizard-panel" data-step="3"><div class="section-title"><span>3</span><div><h2>Output and run options</h2><p>Choose where AnnoCAT should place this run.</p></div></div><input id="output-directory-fallback" type="file" webkitdirectory directory hidden><label class="output-field"><span>Output folder</span><div class="path-field"><input id="output-folder" placeholder="Choose an output folder or enter its path"><button id="browse-output" type="button">Browse…</button></div><small id="folder-message">The selected folder remains on this computer.</small></label><details><summary><span>Advanced output</span><small>Optional compatibility file</small></summary><div class="advanced-grid"><fieldset><legend>Additional output</legend><label><input id="keep-annotated-vcf" type="checkbox"> Keep annotated VCF</label><small>AnnoCAT always creates the compact canonical result used by the viewer. Retaining VCF can substantially increase a WGS run's disk usage.</small></fieldset></div></details></section>
           <section class="wizard-panel" data-step="4"><div class="section-title"><span>4</span><div><h2>Review and start</h2><p>Confirm the input, output, and resources that will be used.</p></div></div><div id="annotation-notice" class="annotation-notice hidden" role="alert"></div><div id="review-summary" class="review-summary"></div><h3 class="review-subhead">Resources</h3><div id="resource-review" class="resource-review"></div><div id="review-readiness" class="wizard-readiness"><span class="readiness-dot"></span><div><strong>Checking readiness…</strong><p>Selected resources are being verified.</p></div><button type="button" data-page-link="resources">Manage sources</button></div></section>
-          <div class="run-actions"><button class="secondary hidden" id="back-step" type="button">← Back</button><p><strong>Nothing will download or run without review.</strong><br>Your file is not uploaded anywhere.</p><button class="primary" id="continue" type="button" disabled>Continue <span>→</span></button></div>
+          <div class="run-actions"><button class="secondary hidden" id="back-step" type="button">← Back</button><p>Annotation runs locally.</p><button class="primary" id="continue" type="button" disabled>Continue <span>→</span></button></div>
         </form>
       </div>
     </section>
@@ -118,9 +118,21 @@
     <section id="about-dialog" class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" tabindex="-1">
       <button id="about-close" class="about-close" type="button" aria-label="Close About AnnoCAT"><svg class="ui-icon"><use href="#icon-close"/></svg></button>
       <div class="about-scroll">
-        <div class="about-wordmark" aria-label="AnnoCAT">Anno<span>CAT</span></div>
-        <h1 id="about-title">About AnnoCAT</h1>
-        <p class="about-lead">AnnoCAT is a portable, local-first application for annotating, reviewing, and sharing human genetic variants. Annotation and result browsing run on this computer, and existing AnnoCAT report ZIPs can be opened without installing data sources. AnnoCAT is provided for research and professional review and is not independently validated as a diagnostic medical device.</p>
+        <h1 id="about-title" class="about-wordmark" aria-label="AnnoCAT">Anno<span>CAT</span></h1>
+        <p class="about-lead">A portable, local-first application for annotating, reviewing, and sharing genetic variants. Annotation and result browsing stay on this computer, and AnnoCAT report ZIPs can be opened without installing data sources.</p>
+        <section class="about-use-notice" aria-labelledby="about-use-title">
+          <header class="about-use-heading">
+            <span class="about-use-icon" aria-hidden="true"><svg class="ui-icon"><use href="#icon-info"/></svg></span>
+            <div>
+              <h2 id="about-use-title">Research use only</h2>
+              <p>Not for use in diagnostic procedures</p>
+            </div>
+          </header>
+          <div class="about-use-copy">
+            <p>AnnoCAT is intended solely for research and educational annotation, exploration, filtering, and visualization of genomic variants. It has not received regulatory clearance or approval for diagnostic or clinical use.</p>
+            <p>Do not use AnnoCAT or its outputs for diagnosis, screening, prognosis, treatment selection, or other patient-care decisions. Results may be incomplete or incorrect, depend on third-party data sources and computational predictions, and must not be treated as validated clinical findings.</p>
+          </div>
+        </section>
         <p class="about-version">Version <span id="about-version">0.1.0</span> · <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener noreferrer">Apache-2.0</a> · <a href="https://github.com/annocat-project/AnnoCAT" target="_blank" rel="noopener noreferrer">GitHub</a></p>
       </div>
     </section>

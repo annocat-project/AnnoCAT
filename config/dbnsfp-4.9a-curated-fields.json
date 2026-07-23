@@ -5,6 +5,21 @@
   "release": "4.9a",
   "assembly": "GRCh38",
   "description": "Transcript-linked coding prediction bundle. Dedicated AnnoCat ClinVar, dbSNP, gnomAD, CADD, SpliceAI, and genome-wide conservation sources remain independently namespaced and take precedence for their domains.",
+  "transcriptAlignment": {
+    "id": "dbnsfp-ensembl-transcripts-v1",
+    "kind": "parallelTranscriptVector",
+    "sourceId": "dbnsfp",
+    "scope": "allele",
+    "sourceTranscriptRelease": "dbNSFP 4.9a Ensembl transcript set",
+    "keyField": "Ensembl_transcriptid",
+    "proteinField": "Ensembl_proteinid",
+    "canonicalField": "VEP_canonical",
+    "separator": ";",
+    "missingValues": ["", ".", "-"],
+    "alignedGroups": ["linkage", "missense-prediction"],
+    "alignedFields": ["Interpro_domain"],
+    "excludedFields": ["chr", "pos(1-based)", "ref", "alt"]
+  },
   "recommendedFields": [
     "SIFT_score", "SIFT_pred",
     "Polyphen2_HDIV_score", "Polyphen2_HDIV_pred",

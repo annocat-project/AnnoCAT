@@ -61,17 +61,7 @@ fn dbnsfp_selection_path(resource_root: &Path) -> PathBuf {
 }
 
 fn dbnsfp_selection_locked(resource_root: &Path) -> Result<bool, String> {
-    for directory in [resource_root.join("shards"), resource_root.join("staging")] {
-        if directory.is_dir()
-            && fs::read_dir(&directory)
-                .map_err(|error| format!("cannot inspect existing dbNSFP data: {error}"))?
-                .next()
-                .is_some()
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    field_selection_locked(resource_root)
 }
 
 pub(super) fn full_dbnsfp_field_selection() -> Result<DbnsfpFieldSelection, String> {
@@ -172,12 +162,18 @@ pub fn save_dbnsfp_field_selection(
     selection: DbnsfpFieldSelection,
 ) -> Result<DbnsfpFieldSelection, String> {
     let selection = validate_dbnsfp_field_selection(selection)?;
-    if dbnsfp_selection_locked(resource_root)? {
+    let current = load_dbnsfp_field_selection(resource_root)?;
+    let path = dbnsfp_selection_path(resource_root);
+    let locked = dbnsfp_selection_locked(resource_root)?;
+    if current == selection && (path.is_file() || locked) {
+        return Ok(selection);
+    }
+    if locked {
         return Err("remove the installed dbNSFP cache before changing retained fields".into());
     }
+    discard_field_staging(resource_root, "dbNSFP")?;
     fs::create_dir_all(resource_root)
         .map_err(|error| format!("cannot create dbNSFP resource directory: {error}"))?;
-    let path = dbnsfp_selection_path(resource_root);
     let temporary = path.with_extension("json.tmp");
     fs::write(
         &temporary,
@@ -243,7 +239,7 @@ fn supplementary_field_catalog() -> Result<serde_json::Value, String> {
     .map_err(|error| format!("invalid bundled supplementary field catalog: {error}"))
 }
 
-fn supplementary_field_contract(resource_id: &str) -> Result<serde_json::Value, String> {
+pub(super) fn supplementary_field_contract(resource_id: &str) -> Result<serde_json::Value, String> {
     let catalog = supplementary_field_catalog()?;
     if catalog["schemaVersion"] != 1 {
         return Err("unsupported supplementary field catalog version".into());
@@ -302,7 +298,12 @@ pub fn default_supplementary_field_selection(
     resource_id: &str,
 ) -> Result<SupplementaryFieldSelection, String> {
     let contract = supplementary_field_contract(resource_id)?;
-    let (_, fields, _) = supplementary_contract_fields(&contract)?;
+    let (allowed, defaults, _) = supplementary_contract_fields(&contract)?;
+    let fields = if matches!(resource_id, "gnomad" | "gnomad-genomes") {
+        allowed
+    } else {
+        defaults
+    };
     Ok(SupplementaryFieldSelection {
         schema_version: 1,
         contract_id: contract["contractId"]
@@ -311,6 +312,12 @@ pub fn default_supplementary_field_selection(
             .into(),
         fields,
     })
+}
+
+fn contract_default_supplementary_fields(resource_id: &str) -> Result<Vec<String>, String> {
+    let contract = supplementary_field_contract(resource_id)?;
+    let (_, defaults, _) = supplementary_contract_fields(&contract)?;
+    Ok(defaults)
 }
 
 fn validate_supplementary_field_selection(
@@ -357,6 +364,11 @@ pub fn load_supplementary_field_selection(
 ) -> Result<SupplementaryFieldSelection, String> {
     let path = resource_root.join("field-selection.json");
     if !path.is_file() {
+        if field_selection_locked(resource_root)? {
+            let mut inferred = default_supplementary_field_selection(resource_id)?;
+            inferred.fields = contract_default_supplementary_fields(resource_id)?;
+            return Ok(inferred);
+        }
         return default_supplementary_field_selection(resource_id);
     }
     let selection = serde_json::from_slice(
@@ -376,7 +388,7 @@ fn directory_has_entries(directory: &Path) -> Result<bool, String> {
         .is_some())
 }
 
-fn supplementary_selection_locked(resource_root: &Path) -> Result<bool, String> {
+fn field_selection_locked(resource_root: &Path) -> Result<bool, String> {
     // Only promoted shards lock a schema. An interrupted staging directory is
     // not an installed cache and may be invalidated by an explicit field edit.
     if directory_has_entries(&resource_root.join("shards"))? {
@@ -399,23 +411,7 @@ fn supplementary_selection_locked(resource_root: &Path) -> Result<bool, String> 
     Ok(false)
 }
 
-pub fn save_supplementary_field_selection(
-    resource_id: &str,
-    resource_root: &Path,
-    selection: SupplementaryFieldSelection,
-) -> Result<SupplementaryFieldSelection, String> {
-    let selection = validate_supplementary_field_selection(resource_id, selection)?;
-    let current = load_supplementary_field_selection(resource_id, resource_root)?;
-    if current == selection {
-        return Ok(selection);
-    }
-    if supplementary_selection_locked(resource_root)? {
-        return Err(format!(
-            "remove the installed {resource_id} cache before changing retained fields"
-        ));
-    }
-    // A different field contract cannot safely resume an incomplete shard.
-    // Staging contains only disposable partial cache output, never source data.
+fn discard_field_staging(resource_root: &Path, resource_id: &str) -> Result<(), String> {
     for staging in std::iter::once(resource_root.join("staging")).chain(
         fs::read_dir(resource_root)
             .into_iter()
@@ -438,9 +434,31 @@ pub fn save_supplementary_field_selection(
             })?;
         }
     }
+    Ok(())
+}
+
+pub fn save_supplementary_field_selection(
+    resource_id: &str,
+    resource_root: &Path,
+    selection: SupplementaryFieldSelection,
+) -> Result<SupplementaryFieldSelection, String> {
+    let selection = validate_supplementary_field_selection(resource_id, selection)?;
+    let current = load_supplementary_field_selection(resource_id, resource_root)?;
+    let path = resource_root.join("field-selection.json");
+    let locked = field_selection_locked(resource_root)?;
+    if current == selection && (path.is_file() || locked) {
+        return Ok(selection);
+    }
+    if locked {
+        return Err(format!(
+            "remove the installed {resource_id} cache before changing retained fields"
+        ));
+    }
+    // A different field contract cannot safely resume an incomplete shard.
+    // Staging contains only disposable partial cache output, never source data.
+    discard_field_staging(resource_root, resource_id)?;
     fs::create_dir_all(resource_root)
         .map_err(|error| format!("cannot create {resource_id} resource directory: {error}"))?;
-    let path = resource_root.join("field-selection.json");
     let temporary = path.with_extension("json.tmp");
     fs::write(
         &temporary,
@@ -464,7 +482,7 @@ pub fn supplementary_field_configuration(
     Ok(FieldConfiguration {
         contract: supplementary_field_contract(resource_id)?,
         selection: load_supplementary_field_selection(resource_id, resource_root)?,
-        locked: supplementary_selection_locked(resource_root)?,
+        locked: field_selection_locked(resource_root)?,
     })
 }
 
@@ -473,7 +491,10 @@ pub fn supplementary_schema_identity(
     resource_id: &str,
     selection: &SupplementaryFieldSelection,
 ) -> Result<String, String> {
-    if default_supplementary_field_selection(resource_id)?.fields == selection.fields {
+    // The unqualified schema identity historically represented the field
+    // groups marked default in the contract. Keep that identity stable even
+    // when the UI chooses a broader default for a new installation.
+    if contract_default_supplementary_fields(resource_id)? == selection.fields {
         return Ok(base.into());
     }
     use sha2::{Digest, Sha256};

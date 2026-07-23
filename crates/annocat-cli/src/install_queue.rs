@@ -26,8 +26,14 @@ struct InstallQueueState {
     in_flight: HashSet<String>,
     scheduling_paused: bool,
     concurrency: usize,
+    #[serde(default = "default_resumable_source_parts")]
+    resumable_source_parts: bool,
     #[serde(skip)]
     worker_active: bool,
+}
+
+const fn default_resumable_source_parts() -> bool {
+    true
 }
 
 impl Default for InstallQueueState {
@@ -38,6 +44,7 @@ impl Default for InstallQueueState {
             in_flight: HashSet::new(),
             scheduling_paused: false,
             concurrency: 1,
+            resumable_source_parts: true,
             worker_active: false,
         }
     }
@@ -245,6 +252,21 @@ pub fn concurrency() -> usize {
     state().lock().map(|state| state.concurrency).unwrap_or(1)
 }
 
+pub fn set_resumable_source_parts(enabled: bool) -> Result<(), String> {
+    let mut state = state()
+        .lock()
+        .map_err(|_| "installation queue lock failed".to_string())?;
+    state.resumable_source_parts = enabled;
+    persist(&state)
+}
+
+pub fn resumable_source_parts() -> bool {
+    state()
+        .lock()
+        .map(|state| state.resumable_source_parts)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +340,7 @@ mod tests {
     fn persisted_queue_keeps_user_settings_but_not_worker_ownership() {
         let mut state = InstallQueueState {
             concurrency: 4,
+            resumable_source_parts: false,
             worker_active: true,
             ..InstallQueueState::default()
         };
@@ -327,9 +350,19 @@ mod tests {
         let encoded = serde_json::to_vec(&state).unwrap();
         let restored: InstallQueueState = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(restored.concurrency, 4);
+        assert!(!restored.resumable_source_parts);
         assert!(!restored.worker_active);
         assert!(restored.waiting.contains(&"cadd".into()));
         assert!(restored.paused.contains("dbsnp"));
         assert!(restored.in_flight.contains("spliceai"));
+    }
+
+    #[test]
+    fn legacy_queue_defaults_to_resumable_source_parts() {
+        let restored: InstallQueueState = serde_json::from_str(
+            r#"{"waiting":[],"paused":[],"inFlight":[],"schedulingPaused":false,"concurrency":1}"#,
+        )
+        .unwrap();
+        assert!(restored.resumable_source_parts);
     }
 }

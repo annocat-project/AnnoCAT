@@ -121,6 +121,18 @@ pub fn initialize_partial(paths: &ShardPaths, identity: PreparationIdentity) -> 
         ));
     }
     if paths.partial_directory.exists() {
+        if let Some(detail) = super::builder::discard_parts_from_previous_corruption(
+            &paths.partial_directory.join("fastvep.log"),
+            paths.source_part(),
+        ) {
+            crate::terminal_log(
+                "resources",
+                format!(
+                    "{} chromosome {}: discarded corrupt retained source data ({detail}); downloading this chromosome again",
+                    identity.resource_id, identity.chromosome
+                ),
+            );
+        }
         fs::remove_dir_all(&paths.partial_directory)
             .map_err(|error| format!("cannot clear incomplete shard: {error}"))?;
     }

@@ -3,19 +3,21 @@ use duckdb::arrow::array::{
 };
 use duckdb::arrow::record_batch::RecordBatch;
 use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-const INDEX_SCHEMA_VERSION: u32 = 1;
+const INDEX_SCHEMA_VERSION: u32 = 2;
 const INDEX_FILE: &str = "detail-row-groups.json";
 const MAX_INDEX_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ROW_GROUPS: usize = 100_000;
 const MAX_GROUPS_PER_LOOKUP: usize = 8;
+const LOGICAL_RANGE_ROWS: usize = 4_096;
+const BOUNDARY_CANDIDATES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -25,10 +27,12 @@ struct FileStamp {
     row_groups: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct RowGroupRange {
     row_group: usize,
+    row_offset: usize,
+    row_count: usize,
     first_record: i64,
     last_record: i64,
 }
@@ -51,7 +55,15 @@ struct DetailIndex {
 
 struct AlleleBoundaries {
     stamp: FileStamp,
-    groups: Vec<(usize, String, String)>,
+    groups: Vec<BoundaryRange>,
+}
+
+struct BoundaryRange {
+    row_group: usize,
+    row_offset: usize,
+    row_count: usize,
+    first: Vec<String>,
+    last: Vec<String>,
 }
 
 pub(crate) struct IndexedDetail {
@@ -173,6 +185,94 @@ fn row_group_ends(builder: &ParquetRecordBatchReaderBuilder<File>) -> Vec<usize>
         .collect()
 }
 
+struct BoundaryBuilder {
+    row_group: usize,
+    row_offset: usize,
+    row_count: usize,
+    first: Vec<String>,
+    last: VecDeque<String>,
+    last_allele: String,
+}
+
+struct RecordRangeBuilder {
+    row_group: usize,
+    row_offset: usize,
+    row_count: usize,
+    first_record: i64,
+    last_record: i64,
+}
+
+impl RecordRangeBuilder {
+    fn new(row_group: usize, row_offset: usize, record: i64) -> Self {
+        Self {
+            row_group,
+            row_offset,
+            row_count: 0,
+            first_record: record,
+            last_record: record,
+        }
+    }
+
+    fn add(&mut self, record: i64) -> Result<(), String> {
+        if record < self.last_record {
+            return Err("variants are not stored in input order".into());
+        }
+        self.last_record = record;
+        self.row_count += 1;
+        Ok(())
+    }
+
+    fn finish(self) -> RowGroupRange {
+        RowGroupRange {
+            row_group: self.row_group,
+            row_offset: self.row_offset,
+            row_count: self.row_count,
+            first_record: self.first_record,
+            last_record: self.last_record,
+        }
+    }
+}
+
+impl BoundaryBuilder {
+    fn new(row_group: usize, row_offset: usize, allele: &str) -> Self {
+        Self {
+            row_group,
+            row_offset,
+            row_count: 0,
+            first: Vec::new(),
+            last: VecDeque::new(),
+            last_allele: allele.to_owned(),
+        }
+    }
+
+    fn add(&mut self, allele: &str) {
+        if self.first.len() < BOUNDARY_CANDIDATES {
+            self.first.push(allele.to_owned());
+        }
+        if self.last.len() == BOUNDARY_CANDIDATES {
+            self.last.pop_front();
+        }
+        self.last.push_back(allele.to_owned());
+        self.last_allele.clear();
+        self.last_allele.push_str(allele);
+        self.row_count += 1;
+    }
+
+    fn should_split(&self, allele: &str) -> bool {
+        self.row_count >= LOGICAL_RANGE_ROWS && self.last_allele != allele
+    }
+
+    fn finish(self) -> BoundaryRange {
+        BoundaryRange {
+            row_group: self.row_group,
+            row_offset: self.row_offset,
+            row_count: self.row_count,
+            first: self.first,
+            last: self.last.into_iter().collect(),
+        }
+    }
+}
+
 fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
         File::open(path).map_err(|error| format!("cannot open report detail table: {error}"))?,
@@ -193,7 +293,8 @@ fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
         .with_batch_size(16_384)
         .build()
         .map_err(|error| format!("cannot scan report detail table: {error}"))?;
-    let mut groups = vec![(None::<String>, None::<String>); stamp.row_groups];
+    let mut groups = Vec::new();
+    let mut current = None::<BoundaryBuilder>;
     let mut global_row = 0usize;
     let mut group = 0usize;
     for batch in reader {
@@ -201,33 +302,37 @@ fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
         let alleles = string_array(&batch, "allele_id")?;
         for row in 0..batch.num_rows() {
             while group < ends.len() && global_row >= ends[group] {
+                if let Some(boundary) = current.take() {
+                    groups.push(boundary.finish());
+                }
                 group += 1;
             }
-            if group >= groups.len() || alleles.is_null(row) {
+            if group >= stamp.row_groups || alleles.is_null(row) {
                 return Err("report detail row groups are inconsistent".into());
             }
             let allele = alleles.value(row);
-            if groups[group].0.is_none() {
-                groups[group].0 = Some(allele.to_owned());
+            if current
+                .as_ref()
+                .is_some_and(|boundary| boundary.should_split(allele))
+                && let Some(boundary) = current.take()
+            {
+                groups.push(boundary.finish());
             }
-            groups[group].1 = Some(allele.to_owned());
+            let group_start = group.checked_sub(1).map_or(0, |previous| ends[previous]);
+            current
+                .get_or_insert_with(|| {
+                    BoundaryBuilder::new(group, global_row - group_start, allele)
+                })
+                .add(allele);
             global_row += 1;
         }
+    }
+    if let Some(boundary) = current {
+        groups.push(boundary.finish());
     }
     if global_row as i64 != stamp.rows {
         return Err("report detail row count changed while indexing".into());
     }
-    let groups = groups
-        .into_iter()
-        .enumerate()
-        .map(|(row_group, (first, last))| {
-            Ok((
-                row_group,
-                first.ok_or("report detail table contains an empty row group")?,
-                last.ok_or("report detail table contains an empty row group")?,
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
     Ok(AlleleBoundaries { stamp, groups })
 }
 
@@ -254,7 +359,8 @@ fn scan_variants(
         .with_batch_size(16_384)
         .build()
         .map_err(|error| format!("cannot scan variants table: {error}"))?;
-    let mut ranges = vec![(None::<i64>, None::<i64>); stamp.row_groups];
+    let mut ranges = Vec::new();
+    let mut current = None::<RecordRangeBuilder>;
     let mut records = HashMap::with_capacity(boundary_ids.len());
     let mut global_row = 0usize;
     let mut group = 0usize;
@@ -264,16 +370,28 @@ fn scan_variants(
         let record_numbers = i64_array(&batch, "record_number")?;
         for row in 0..batch.num_rows() {
             while group < ends.len() && global_row >= ends[group] {
+                if let Some(range) = current.take() {
+                    ranges.push(range.finish());
+                }
                 group += 1;
             }
-            if group >= ranges.len() || alleles.is_null(row) || record_numbers.is_null(row) {
+            if group >= stamp.row_groups || alleles.is_null(row) || record_numbers.is_null(row) {
                 return Err("variants row groups are inconsistent".into());
             }
             let record = record_numbers.value(row);
-            if ranges[group].0.is_none() {
-                ranges[group].0 = Some(record);
+            if current
+                .as_ref()
+                .is_some_and(|range| range.row_count >= LOGICAL_RANGE_ROWS)
+                && let Some(range) = current.take()
+            {
+                ranges.push(range.finish());
             }
-            ranges[group].1 = Some(record);
+            let group_start = group.checked_sub(1).map_or(0, |previous| ends[previous]);
+            current
+                .get_or_insert_with(|| {
+                    RecordRangeBuilder::new(group, global_row - group_start, record)
+                })
+                .add(record)?;
             let allele = alleles.value(row);
             if boundary_ids.contains(allele) {
                 records.insert(allele.to_owned(), record);
@@ -281,23 +399,19 @@ fn scan_variants(
             global_row += 1;
         }
     }
-    let groups = ranges
-        .into_iter()
-        .enumerate()
-        .map(|(row_group, (first, last))| {
-            let first_record = first.ok_or("variants table contains an empty row group")?;
-            let last_record = last.ok_or("variants table contains an empty row group")?;
-            if first_record > last_record {
-                return Err("variants are not stored in input order".into());
-            }
-            Ok(RowGroupRange {
-                row_group,
-                first_record,
-                last_record,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok((IndexedFile { stamp, groups }, records))
+    if let Some(range) = current {
+        ranges.push(range.finish());
+    }
+    if global_row as i64 != stamp.rows {
+        return Err("variants row count changed while indexing".into());
+    }
+    Ok((
+        IndexedFile {
+            stamp,
+            groups: ranges,
+        },
+        records,
+    ))
 }
 
 fn resolve_detail_file(
@@ -307,23 +421,35 @@ fn resolve_detail_file(
     let groups = boundaries
         .groups
         .into_iter()
-        .map(|(row_group, first, last)| {
-            let first_record = *records
-                .get(&first)
-                .ok_or("detail index boundary refers to an unknown allele")?;
-            let last_record = *records
-                .get(&last)
-                .ok_or("detail index boundary refers to an unknown allele")?;
-            if first_record > last_record {
-                return Err("detail rows are not stored in input order".into());
-            }
-            Ok(RowGroupRange {
-                row_group,
+        .filter_map(|group| {
+            let first_record = group
+                .first
+                .iter()
+                .find_map(|allele| records.get(allele))
+                .or_else(|| group.last.iter().find_map(|allele| records.get(allele)))
+                .copied()?;
+            let last_record = group
+                .last
+                .iter()
+                .rev()
+                .find_map(|allele| records.get(allele))
+                .or_else(|| {
+                    group
+                        .first
+                        .iter()
+                        .rev()
+                        .find_map(|allele| records.get(allele))
+                })
+                .copied()?;
+            (first_record <= last_record).then_some(RowGroupRange {
+                row_group: group.row_group,
+                row_offset: group.row_offset,
+                row_count: group.row_count,
                 first_record,
                 last_record,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect();
     Ok(IndexedFile {
         stamp: boundaries.stamp,
         groups,
@@ -341,7 +467,7 @@ fn build_index(
         .groups
         .iter()
         .chain(&evidence_bounds.groups)
-        .flat_map(|(_, first, last)| [first.clone(), last.clone()])
+        .flat_map(|group| group.first.iter().chain(&group.last).cloned())
         .collect::<HashSet<_>>();
     let (variants, records) = scan_variants(variants, &boundary_ids)?;
     Ok(DetailIndex {
@@ -368,14 +494,25 @@ fn index_is_valid(
     [&index.variants, &index.consequences, &index.evidence]
         .into_iter()
         .all(|file| {
-            file.groups.len() == file.stamp.row_groups
-                && file.groups.iter().enumerate().all(|(expected, group)| {
-                    group.row_group == expected
-                        && group.row_group < file.stamp.row_groups
+            let rows = usize::try_from(file.stamp.rows).unwrap_or(usize::MAX);
+            let maximum_ranges = rows
+                .div_ceil(LOGICAL_RANGE_ROWS)
+                .saturating_add(file.stamp.row_groups);
+            file.groups.len() <= maximum_ranges
+                && file.groups.iter().all(|group| {
+                    group.row_group < file.stamp.row_groups
+                        && group.row_count > 0
+                        && group
+                            .row_offset
+                            .checked_add(group.row_count)
+                            .is_some_and(|end| end <= rows)
                         && group.first_record <= group.last_record
                 })
                 && file.groups.windows(2).all(|groups| {
-                    groups[0].first_record <= groups[1].first_record
+                    (groups[0].row_group < groups[1].row_group
+                        || (groups[0].row_group == groups[1].row_group
+                            && groups[0].row_offset < groups[1].row_offset))
+                        && groups[0].first_record <= groups[1].first_record
                         && groups[0].last_record <= groups[1].last_record
                 })
         })
@@ -427,12 +564,19 @@ fn ensure_index(
     Ok(index)
 }
 
-fn groups_for_record(file: &IndexedFile, record_number: i64) -> Result<Vec<usize>, String> {
-    let groups = file
+pub(crate) fn prepare(variants: &Path, consequences: &Path, evidence: &Path) -> Result<(), String> {
+    ensure_index(variants, consequences, evidence).map(|_| ())
+}
+
+fn groups_for_record(file: &IndexedFile, record_number: i64) -> Result<Vec<RowGroupRange>, String> {
+    let first = file
         .groups
+        .partition_point(|group| group.last_record < record_number);
+    let groups = file.groups[first..]
         .iter()
-        .filter(|group| group.first_record <= record_number && record_number <= group.last_record)
-        .map(|group| group.row_group)
+        .take_while(|group| group.first_record <= record_number)
+        .filter(|group| record_number <= group.last_record)
+        .cloned()
         .take(MAX_GROUPS_PER_LOOKUP + 1)
         .collect::<Vec<_>>();
     if groups.len() > MAX_GROUPS_PER_LOOKUP {
@@ -443,7 +587,7 @@ fn groups_for_record(file: &IndexedFile, record_number: i64) -> Result<Vec<usize
 
 fn projected_reader(
     path: &Path,
-    groups: Vec<usize>,
+    ranges: Vec<RowGroupRange>,
     names: &[&str],
 ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
@@ -451,8 +595,43 @@ fn projected_reader(
     )
     .map_err(|error| format!("cannot read report table metadata: {error}"))?;
     let mask = projection(&builder, names)?;
+    let mut row_groups = Vec::new();
+    let mut selectors = Vec::new();
+    let mut range = 0usize;
+    while range < ranges.len() {
+        let row_group = ranges[range].row_group;
+        let row_group_rows = builder
+            .metadata()
+            .row_groups()
+            .get(row_group)
+            .ok_or("detail index refers to a missing row group")?
+            .num_rows() as usize;
+        row_groups.push(row_group);
+        let mut cursor = 0usize;
+        while range < ranges.len() && ranges[range].row_group == row_group {
+            let selected = &ranges[range];
+            if selected.row_offset < cursor {
+                return Err("detail index contains overlapping row ranges".into());
+            }
+            if selected.row_offset > cursor {
+                selectors.push(RowSelector::skip(selected.row_offset - cursor));
+            }
+            let end = selected
+                .row_offset
+                .checked_add(selected.row_count)
+                .filter(|end| *end <= row_group_rows)
+                .ok_or("detail index row range is invalid")?;
+            selectors.push(RowSelector::select(selected.row_count));
+            cursor = end;
+            range += 1;
+        }
+        if cursor < row_group_rows {
+            selectors.push(RowSelector::skip(row_group_rows - cursor));
+        }
+    }
     builder
-        .with_row_groups(groups)
+        .with_row_groups(row_groups)
+        .with_row_selection(RowSelection::from(selectors))
         .with_projection(mask)
         .with_batch_size(16_384)
         .build()
@@ -461,7 +640,7 @@ fn projected_reader(
 
 fn read_variant(
     path: &Path,
-    groups: Vec<usize>,
+    groups: Vec<RowGroupRange>,
     allele_id: &str,
     record_number: i64,
     alt_index: i32,
@@ -539,7 +718,7 @@ fn read_variant(
 
 fn read_consequences(
     path: &Path,
-    groups: Vec<usize>,
+    groups: Vec<RowGroupRange>,
     allele_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
     let mut rows = Vec::new();
@@ -572,7 +751,11 @@ fn read_consequences(
         .collect())
 }
 
-fn read_evidence(path: &Path, groups: Vec<usize>, allele_id: &str) -> Result<Vec<Value>, String> {
+fn read_evidence(
+    path: &Path,
+    groups: Vec<RowGroupRange>,
+    allele_id: &str,
+) -> Result<Vec<Value>, String> {
     const FIELDS: &[&str] = &[
         "allele_id",
         "consequence_id",
@@ -681,4 +864,43 @@ pub(crate) fn lookup(
             read_evidence(evidence, evidence_groups, allele_id)?
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(row_offset: usize, first_record: i64, last_record: i64) -> RowGroupRange {
+        RowGroupRange {
+            row_group: 0,
+            row_offset,
+            row_count: LOGICAL_RANGE_ROWS,
+            first_record,
+            last_record,
+        }
+    }
+
+    #[test]
+    fn record_lookup_returns_the_matching_logical_range() {
+        let file = IndexedFile {
+            stamp: FileStamp {
+                bytes: 1,
+                rows: 8_192,
+                row_groups: 1,
+            },
+            groups: vec![range(0, 1, 4_096), range(4_096, 4_097, 8_192)],
+        };
+        let selected = groups_for_record(&file, 6_000).unwrap();
+        assert_eq!(selected, vec![range(4_096, 4_097, 8_192)]);
+    }
+
+    #[test]
+    fn logical_ranges_do_not_split_repeated_allele_rows() {
+        let mut boundary = BoundaryBuilder::new(0, 0, "allele-a");
+        for _ in 0..LOGICAL_RANGE_ROWS {
+            boundary.add("allele-a");
+        }
+        assert!(!boundary.should_split("allele-a"));
+        assert!(boundary.should_split("allele-b"));
+    }
 }

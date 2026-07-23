@@ -35,6 +35,19 @@ pub fn is_ready(resources: &Path) -> bool {
     validate_installation(resources).is_ok()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptCacheVerification {
+    schema_version: u64,
+    cache_format: String,
+    cache_bytes: u64,
+    transcript_count: u64,
+    coding_transcript_count: u64,
+    coding_with_sequence_count: u64,
+    primary_coding_missing_sequence_count: u64,
+    non_primary_coding_missing_sequence_count: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
@@ -46,6 +59,9 @@ struct Manifest {
     fasta: PathBuf,
     cache: String,
     cache_bytes: u64,
+    cache_sha256: String,
+    verification: TranscriptCacheVerification,
+    builder_provenance: crate::cache_contract::BuilderProvenance,
 }
 
 fn validate_installation(resources: &Path) -> Result<(), String> {
@@ -57,12 +73,27 @@ fn validate_installation(resources: &Path) -> Result<(), String> {
     }
     let manifest: Manifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("transcript cache manifest is invalid: {error}"))?;
-    if manifest.schema_version != 1
+    if manifest.schema_version != 2
         || manifest.resource_id != "transcript-cache"
         || manifest.assembly != "GRCh38"
         || manifest.ensembl_release != "115"
         || manifest.cache != "ensembl-115.cache"
         || manifest.cache_bytes == 0
+        || manifest.cache_sha256.len() != 64
+        || !manifest
+            .cache_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || manifest.verification.schema_version != 1
+        || manifest.verification.cache_format != "FSTVEP02"
+        || manifest.verification.cache_bytes != manifest.cache_bytes
+        || manifest.verification.transcript_count == 0
+        || manifest.verification.coding_transcript_count == 0
+        || manifest.verification.coding_with_sequence_count == 0
+        || manifest.verification.primary_coding_missing_sequence_count != 0
+        || manifest.builder_provenance.repository.is_empty()
+        || manifest.builder_provenance.commit.is_empty()
+        || manifest.builder_provenance.binary_sha256.len() != 64
     {
         return Err("transcript cache manifest does not match Ensembl 115 on GRCh38".into());
     }
@@ -110,6 +141,13 @@ pub fn cancel_background() -> bool {
 }
 
 pub fn status(resources: &Path) -> TranscriptStatus {
+    let current = state()
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|_| idle_state());
+    if current.state == "running" {
+        return current;
+    }
     if is_ready(resources) {
         return TranscriptStatus {
             state: "ready",
@@ -118,8 +156,11 @@ pub fn status(resources: &Path) -> TranscriptStatus {
             error: None,
         };
     }
+    if matches!(current.state, "failed" | "cancelled") {
+        return current;
+    }
     let manifest = resources.join("transcript-cache").join("manifest.json");
-    if manifest.exists() && !is_running() {
+    if manifest.exists() {
         let error = validate_installation(resources)
             .err()
             .unwrap_or_else(|| "transcript cache validation failed".into());
@@ -130,10 +171,7 @@ pub fn status(resources: &Path) -> TranscriptStatus {
             error: Some(error),
         };
     }
-    state()
-        .lock()
-        .map(|value| value.clone())
-        .unwrap_or_else(|_| idle_state())
+    current
 }
 
 pub fn forget() {
@@ -248,8 +286,20 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
     if bytes == 0 {
         return Err("fastVEP produced an empty transcript cache".into());
     }
+    if let Ok(mut current) = state().lock() {
+        current.phase = "verifying-cache";
+        current.detail = "Verifying the completed Ensembl 115 transcript cache".into();
+    }
+    let verification = verify_staged_cache(fastvep, &cache)?;
+    if verification.cache_bytes != bytes {
+        return Err(format!(
+            "fastVEP verified {verified} cache bytes but the staged file contains {bytes}",
+            verified = verification.cache_bytes
+        ));
+    }
+    let cache_sha256 = crate::fastvep::sha256_file(&cache)?;
     let manifest = serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "resourceId": "transcript-cache",
         "assembly": "GRCh38",
         "ensemblRelease": "115",
@@ -257,15 +307,160 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
         "fasta": fasta,
         "cache": "ensembl-115.cache",
         "cacheBytes": bytes,
-        "validation": "fastVEP cache build succeeded and produced a non-empty binary cache"
+        "cacheSha256": cache_sha256,
+        "verification": verification,
+        "builderProvenance": crate::fastvep::pinned_builder_provenance(),
+        "validation": "fastVEP cache build succeeded; the staged cache was fully decoded and structurally verified before promotion"
     });
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    if target.exists() {
-        return Err("an existing transcript cache must be removed before replacement".into());
+    publish_replacement(resources, &staging, &target)
+}
+
+fn verify_staged_cache(
+    fastvep: &Path,
+    cache: &Path,
+) -> Result<TranscriptCacheVerification, String> {
+    let output = Command::new(fastvep)
+        .args(["cache-verify", "--input"])
+        .arg(cache)
+        .arg("--require-primary-coding-sequences")
+        .output()
+        .map_err(|error| format!("cannot start fastVEP transcript-cache verifier: {error}"))?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if error.is_empty() {
+            format!(
+                "fastVEP transcript-cache verification exited with {}",
+                output.status
+            )
+        } else {
+            format!("fastVEP transcript-cache verification failed: {error}")
+        });
     }
-    fs::rename(&staging, &target).map_err(|error| error.to_string())
+    if output.stdout.len() > 64 * 1024 {
+        return Err("fastVEP transcript-cache verification report is too large".into());
+    }
+    let report: TranscriptCacheVerification = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("fastVEP returned an invalid verification report: {error}"))?;
+    if report.schema_version != 1
+        || report.cache_format != "FSTVEP02"
+        || report.cache_bytes == 0
+        || report.transcript_count == 0
+        || report.coding_transcript_count == 0
+        || report.coding_with_sequence_count == 0
+        || report.primary_coding_missing_sequence_count != 0
+    {
+        return Err(
+            "fastVEP transcript-cache verification report failed AnnoCAT's contract".into(),
+        );
+    }
+    Ok(report)
+}
+
+fn publish_replacement(resources: &Path, staging: &Path, target: &Path) -> Result<(), String> {
+    let backup = resources.join("transcript-cache.replaced");
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("cannot remove stale transcript cache backup: {error}"))?;
+    }
+    let had_target = target.exists();
+    if had_target {
+        fs::rename(target, &backup).map_err(|error| {
+            format!("cannot stage the existing transcript cache for replacement: {error}")
+        })?;
+    }
+    if let Err(error) = fs::rename(staging, target) {
+        if had_target {
+            let _ = fs::rename(&backup, target);
+        }
+        return Err(format!(
+            "cannot publish the rebuilt transcript cache: {error}"
+        ));
+    }
+    if let Err(error) = validate_installation(resources) {
+        let _ = fs::remove_dir_all(target);
+        if had_target {
+            let _ = fs::rename(&backup, target);
+        }
+        return Err(format!(
+            "rebuilt transcript cache failed validation: {error}"
+        ));
+    }
+    if had_target {
+        fs::remove_dir_all(&backup)
+            .map_err(|error| format!("cannot remove replaced transcript cache: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn verified_rebuild_replaces_an_invalid_installed_cache() {
+        let resources = std::env::temp_dir().join(format!(
+            "annocat-transcript-replacement-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = resources.join("transcript-cache");
+        let staging = resources.join("transcript-cache.partial");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        let gff3 = resources.join("genes.gff3.gz");
+        let fasta = resources.join("reference.fna");
+        fs::write(&gff3, b"gff3").unwrap();
+        fs::write(&fasta, b"fasta").unwrap();
+        fs::write(target.join("ensembl-115.cache"), b"bad").unwrap();
+        fs::write(target.join("manifest.json"), b"{}").unwrap();
+        let rebuilt = b"verified rebuilt cache";
+        fs::write(staging.join("ensembl-115.cache"), rebuilt).unwrap();
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "resourceId": "transcript-cache",
+            "assembly": "GRCh38",
+            "ensemblRelease": "115",
+            "gff3": gff3,
+            "fasta": fasta,
+            "cache": "ensembl-115.cache",
+            "cacheBytes": rebuilt.len(),
+            "cacheSha256": "a".repeat(64),
+            "verification": {
+                "schemaVersion": 1,
+                "cacheFormat": "FSTVEP02",
+                "cacheBytes": rebuilt.len(),
+                "transcriptCount": 1,
+                "codingTranscriptCount": 1,
+                "codingWithSequenceCount": 1,
+                "primaryCodingMissingSequenceCount": 0,
+                "nonPrimaryCodingMissingSequenceCount": 0
+            },
+            "builderProvenance": {
+                "repository": "https://example.invalid/fastvep",
+                "commit": "test",
+                "binarySha256": "b".repeat(64)
+            }
+        });
+        fs::write(
+            staging.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        publish_replacement(&resources, &staging, &target).unwrap();
+
+        assert_eq!(fs::read(cache_path(&resources)).unwrap(), rebuilt);
+        assert!(validate_installation(&resources).is_ok());
+        assert!(!resources.join("transcript-cache.replaced").exists());
+        fs::remove_dir_all(resources).unwrap();
+    }
 }

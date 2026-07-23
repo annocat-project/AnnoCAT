@@ -300,6 +300,7 @@ mod cache_contract;
 mod csq;
 mod detail_lookup;
 mod downloader;
+mod evidence_resolution;
 mod fastvep;
 mod http_client;
 mod install_queue;
@@ -1168,8 +1169,17 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
         );
         downloader::restore_queue(&paths.downloads);
         match install_queue::restore(&paths.downloads) {
-            Ok(true) => start_preparation_queue_worker(),
-            Ok(false) => {}
+            Ok(start_worker) => {
+                let mode = if install_queue::resumable_source_parts() {
+                    "resumable"
+                } else {
+                    "pure-streaming"
+                };
+                let _ = preparation::set_source_input_mode(mode);
+                if start_worker {
+                    start_preparation_queue_worker();
+                }
+            }
             Err(error) => terminal_log(
                 "resources",
                 format!("installation queue could not be restored: {error}"),
@@ -1385,6 +1395,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             &format!("{{\"cancelRequested\":{}}}", annotation::cancel()),
         );
     }
+    if path == "/api/annotations/pause" {
+        return write_http_response(
+            stream,
+            "200 OK",
+            "application/json",
+            &format!("{{\"pauseRequested\":{}}}", annotation::pause()),
+        );
+    }
     if let Some(resource_id) = path
         .strip_prefix("/api/resources/")
         .and_then(|value| value.strip_suffix("/updates/check"))
@@ -1408,6 +1426,12 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                     serde_json::to_string(&configuration).map_err(|error| error.to_string())
                 })
             } else if method == "POST" {
+                if preparation::live_status("dbnsfp").state == "running" {
+                    return Err(
+                        "pause or cancel the active dbnsfp installation before changing fields"
+                            .into(),
+                    );
+                }
                 let selection =
                     serde_json::from_slice::<preparation::DbnsfpFieldSelection>(request_body)
                         .map_err(|error| format!("invalid dbNSFP field selection: {error}"))?;
@@ -1971,6 +1995,47 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         };
         return write_http_response(stream, status, "application/json", &body);
     }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/detail-index"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let variants = completed_run_result(&paths.runs, run_id)?;
+            let consequences = completed_run_file(
+                &paths.runs,
+                run_id,
+                "consequencesFile",
+                "consequences.parquet",
+                "parquet",
+            )?;
+            let evidence = completed_run_file(
+                &paths.runs,
+                run_id,
+                "evidenceFile",
+                "evidence.parquet",
+                "parquet",
+            )?;
+            let catalog = completed_run_file(
+                &paths.runs,
+                run_id,
+                "fieldCatalogFile",
+                "field-catalog.json",
+                "json",
+            )?;
+            detail_lookup::prepare(&variants, &consequences, &evidence)?;
+            evidence_resolution::prepare(&variants, &evidence, &catalog)?;
+            Ok(r#"{"ready":true}"#.to_owned())
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "404 Not Found",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
     if let Some((run_id, allele_id)) = path
         .strip_prefix("/api/runs/")
         .and_then(|value| value.split_once("/variants/"))
@@ -2001,8 +2066,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             .ok();
             let record_number = query_parameter_u64(query, "recordNumber")
                 .and_then(|value| i64::try_from(value).ok());
-            let alt_index = query_parameter_u64(query, "altIndex")
-                .and_then(|value| i32::try_from(value).ok());
+            let alt_index =
+                query_parameter_u64(query, "altIndex").and_then(|value| i32::try_from(value).ok());
             results::complete_detail_json_at(
                 &variants,
                 consequences.as_deref(),
@@ -2852,7 +2917,9 @@ fn set_source_input_mode(query: &str) -> Result<preparation::SourceInputMode, St
     let value = query_parameter(query, "sourceMode")
         .transpose()?
         .unwrap_or_else(|| "resumable".to_string());
-    preparation::set_source_input_mode(&value)
+    let mode = preparation::set_source_input_mode(&value)?;
+    install_queue::set_resumable_source_parts(mode == preparation::SourceInputMode::Resumable)?;
+    Ok(mode)
 }
 
 fn enqueue_preparation(resource_id: &str) -> Result<(), String> {
@@ -4331,6 +4398,9 @@ mod profile_status_tests {
         assert!(!html.contains("class=\"privacy\""));
         assert!(html.contains(">Apache-2.0</a>"));
         assert!(html.contains("portable, local-first application"));
+        assert!(html.contains("Research use only"));
+        assert!(html.contains("Not for use in diagnostic procedures"));
+        assert!(html.contains("has not received regulatory clearance or approval"));
         assert!(manifest.contains("license = \"Apache-2.0\""));
         assert_eq!(about["license"], "Apache-2.0");
         assert_eq!(about["version"], env!("CARGO_PKG_VERSION"));

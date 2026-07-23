@@ -38,6 +38,7 @@ pub struct TaskSnapshot {
 impl TaskSnapshot {
     pub fn is_meaningful(&self) -> bool {
         !matches!(self.state.as_str(), "idle" | "missing")
+            && !(self.kind == "annotation" && self.state == "cancelled")
     }
 
     pub fn is_active(&self) -> bool {
@@ -217,6 +218,7 @@ pub fn from_annotation(status: annotation::State) -> TaskSnapshot {
         eta_seconds: status.eta_seconds,
         error: status.error,
         available_actions: match state.as_str() {
+            "running" if status.resumable => vec!["pause", "cancel"],
             "running" => vec!["cancel"],
             "interrupted" | "failed" if status.resumable => vec!["resume"],
             _ => Vec::new(),
@@ -417,5 +419,35 @@ mod tests {
         assert_eq!(task.throughput_bytes_per_second, 1_100_000_000.0);
         assert_eq!(task.throughput_records_per_second, 25_000.0);
         assert_eq!(task.eta_seconds, Some(24));
+        assert_eq!(task.available_actions, vec!["pause", "cancel"]);
+    }
+
+    #[test]
+    fn cancelled_annotation_is_removed_from_the_task_list() {
+        let task = from_annotation(annotation::State {
+            state: "cancelled",
+            phase: "cancelled",
+            detail: "Annotation cancelled; partial result discarded".into(),
+            run_id: Some("run-test".into()),
+            name: Some("Cancelled run".into()),
+            input: None,
+            output: None,
+            records: None,
+            completed_records: 0,
+            total_records: 1_000,
+            output_bytes: 0,
+            valid_output_bytes: 0,
+            total_bytes: 2_000_000_000,
+            chromosome: None,
+            percent: 0.0,
+            throughput_bytes_per_second: 0.0,
+            throughput_records_per_second: 0.0,
+            eta_seconds: None,
+            resumable: false,
+            cancel_requested: false,
+            error: None,
+        });
+        assert!(!task.is_meaningful());
+        assert!(task.available_actions.is_empty());
     }
 }

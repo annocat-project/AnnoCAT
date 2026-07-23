@@ -171,10 +171,15 @@ transfer and storage; AnnoCAT shows available size information before installati
 
 ## Intended use
 
-AnnoCAT supports variant annotation and professional review. It has not been
-independently validated or authorized to establish a clinical diagnosis. Results
-should be reviewed by qualified professionals and confirmed through an appropriately
-validated workflow before patient-care decisions are made.
+AnnoCAT is intended solely for research and educational annotation, exploration,
+filtering, and visualization of genomic variants. It has not received regulatory
+clearance or approval for diagnostic or clinical use.
+
+**For research use only. Not for use in diagnostic procedures.** Do not use AnnoCAT
+or its outputs for diagnosis, screening, prognosis, treatment selection, or other
+patient-care decisions. Results may be incomplete or incorrect, depend on third-party
+data sources and computational predictions, and must not be treated as validated
+clinical findings.
 
 ## Development
 

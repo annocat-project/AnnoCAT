@@ -46,7 +46,7 @@ pub use fields::{
 use fields::{
     DBNSFP_FIELD_SELECTION_SCHEMA_VERSION, dbnsfp_contract, dbnsfp_contract_fields,
     default_dbnsfp_field_selection, default_supplementary_field_selection,
-    full_dbnsfp_field_selection,
+    full_dbnsfp_field_selection, supplementary_field_contract,
 };
 use indexed_catalog::{CaddArtifact, SpliceAiArtifact};
 use progress::{
@@ -94,7 +94,7 @@ fn format_decimal_bytes(bytes: u64) -> String {
     }
 }
 
-static RESUMABLE_SOURCE_PARTS: AtomicBool = AtomicBool::new(false);
+static RESUMABLE_SOURCE_PARTS: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -445,7 +445,11 @@ where
             let _ = child.kill();
             let _ = child.wait();
             remove_incomplete_outputs(request.paths);
-            return Err(error);
+            return Err(builder::recover_build_failure(
+                request.log_path,
+                error,
+                &[request.paths.source_part().to_path_buf()],
+            ));
         }
     };
     if compressed_bytes_read != request.identity.expected_compressed_bytes {
@@ -462,7 +466,11 @@ where
         .map_err(|error| format!("cannot wait for fastVEP preparation: {error}"))?;
     if !status.success() {
         remove_incomplete_outputs(request.paths);
-        return Err(format!("fastVEP preparation failed with status {status}"));
+        return Err(builder::recover_build_failure(
+            request.log_path,
+            format!("fastVEP preparation failed with status {status}"),
+            &[request.paths.source_part().to_path_buf()],
+        ));
     }
 
     Ok(StreamingBuildResult {
@@ -744,7 +752,11 @@ fn stream_revel_archive_to_partial_osa(
             let _ = child.kill();
             let _ = child.wait();
             remove_incomplete_outputs(request.paths);
-            return Err(error);
+            return Err(builder::recover_build_failure(
+                request.log_path,
+                error,
+                &[request.paths.source_part().to_path_buf()],
+            ));
         }
     };
     let status = child
@@ -752,8 +764,10 @@ fn stream_revel_archive_to_partial_osa(
         .map_err(|error| format!("cannot wait for fastVEP REVEL preparation: {error}"))?;
     if !status.success() {
         remove_incomplete_outputs(request.paths);
-        return Err(format!(
-            "fastVEP REVEL preparation failed with status {status}"
+        return Err(builder::recover_build_failure(
+            request.log_path,
+            format!("fastVEP REVEL preparation failed with status {status}"),
+            &[request.paths.source_part().to_path_buf()],
         ));
     }
     Ok(StreamingBuildResult {
@@ -1508,7 +1522,19 @@ pub fn status_with_storage(
         completed += 1;
     }
     let total = chromosomes.len() as u16;
-    let ready = completed == total;
+    let shards_ready = completed == total;
+    let manifest_path = resource_root.join(format!("{resource_id}.osa-shards.json"));
+    let manifest_error = if shards_ready && !manifest_path.is_file() {
+        write_osa_shard_manifest(
+            resource_root,
+            resource_id,
+            chromosomes.iter().map(String::as_str),
+        )
+        .err()
+    } else {
+        None
+    };
+    let ready = shards_ready && manifest_error.is_none();
     LivePreparationState {
         resource_id: Some(resource_id.into()),
         state: if ready { "ready" } else { "idle" }.into(),
@@ -1527,6 +1553,10 @@ pub fn status_with_storage(
         remaining_chromosomes: total.saturating_sub(completed),
         detail: if ready {
             format!("All {resource_id} chromosome shards are installed and verified")
+        } else if let Some(error) = manifest_error {
+            format!(
+                "All {resource_id} chromosome shards are verified, but the provider manifest could not be published: {error}"
+            )
         } else if completed > 0 {
             format!("{completed} verified {resource_id} chromosome shards are retained")
         } else {
@@ -1547,7 +1577,9 @@ fn load_selected_fields(
     resource_id: &str,
     resource_root: &Path,
 ) -> Result<SupplementaryFieldSelection, String> {
-    load_supplementary_field_selection(resource_id, resource_root.parent().unwrap_or(resource_root))
+    let configuration_root = resource_root.parent().unwrap_or(resource_root);
+    let selection = load_supplementary_field_selection(resource_id, configuration_root)?;
+    save_supplementary_field_selection(resource_id, configuration_root, selection)
 }
 
 pub fn start_live(mut request: LivePreparationRequest) -> Result<(), String> {
@@ -1598,7 +1630,10 @@ pub fn start_dbsnp_live(request: DbsnpLiveRequest) -> Result<(), String> {
 
 pub fn start_dbnsfp_live(request: DbnsfpLiveRequest) -> Result<(), String> {
     let manifest = pinned_dbnsfp_manifest()?;
-    let selection = load_dbnsfp_field_selection(&request.resource_root)?;
+    let selection = save_dbnsfp_field_selection(
+        &request.resource_root,
+        load_dbnsfp_field_selection(&request.resource_root)?,
+    )?;
     remove_legacy_dbnsfp_shards(&request.resource_root, &manifest)?;
     let expected = manifest
         .members
@@ -3847,6 +3882,7 @@ mod tests {
         assert_eq!(status.completed_chromosomes, 2);
         assert_eq!(status.remaining_chromosomes, 0);
         assert_eq!(status.percent, 100.0);
+        assert!(root.join("dbnsfp.osa-shards.json").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4045,6 +4081,21 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_dbnsfp_staging_does_not_lock_field_selection() {
+        let root = root("dbnsfp-field-selection-staging");
+        let staging = root.join("staging").join("chr1.partial");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("checkpoint.json"), b"incomplete").unwrap();
+
+        let saved =
+            save_dbnsfp_field_selection(&root, full_dbnsfp_field_selection().unwrap()).unwrap();
+        assert_eq!(saved, full_dbnsfp_field_selection().unwrap());
+        assert!(!root.join("staging").exists());
+        assert!(!dbnsfp_field_configuration(&root).unwrap().locked);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn supplementary_field_contracts_preserve_defaults_and_fingerprint_custom_sets() {
         for resource_id in [
             "clinvar",
@@ -4058,10 +4109,21 @@ mod tests {
         ] {
             let selection = default_supplementary_field_selection(resource_id).unwrap();
             assert!(!selection.fields.is_empty());
-            assert_eq!(
-                supplementary_schema_identity("base-schema", resource_id, &selection).unwrap(),
-                "base-schema"
-            );
+            let identity =
+                supplementary_schema_identity("base-schema", resource_id, &selection).unwrap();
+            if matches!(resource_id, "gnomad" | "gnomad-genomes") {
+                let contract = supplementary_field_contract(resource_id).unwrap();
+                let allowed_count = contract["groups"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|group| group["fields"].as_array().unwrap().len())
+                    .sum::<usize>();
+                assert_eq!(selection.fields.len(), allowed_count);
+                assert_ne!(identity, "base-schema");
+            } else {
+                assert_eq!(identity, "base-schema");
+            }
         }
 
         let root = root("cadd-field-selection");
@@ -4101,6 +4163,74 @@ mod tests {
                 .contains("remove the installed cadd cache")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gnomad_full_defaults_are_persisted_without_relabeling_legacy_caches() {
+        let legacy_root = root("gnomad-legacy-field-selection");
+        fs::create_dir_all(legacy_root.join("4.1").join("shards").join("chr1")).unwrap();
+        let legacy = load_supplementary_field_selection("gnomad", &legacy_root).unwrap();
+        let full = default_supplementary_field_selection("gnomad").unwrap();
+        assert!(legacy.fields.len() < full.fields.len());
+        assert_eq!(
+            supplementary_schema_identity("gnomad-v4.1", "gnomad", &legacy).unwrap(),
+            "gnomad-v4.1"
+        );
+        fs::remove_dir_all(legacy_root).unwrap();
+
+        let fresh_root = root("gnomad-full-field-selection");
+        let saved =
+            save_supplementary_field_selection("gnomad", &fresh_root, full.clone()).unwrap();
+        assert_eq!(saved, full);
+        assert!(fresh_root.join("field-selection.json").is_file());
+        fs::create_dir_all(fresh_root.join("4.1").join("shards").join("chr1")).unwrap();
+        assert_eq!(
+            load_supplementary_field_selection("gnomad", &fresh_root).unwrap(),
+            full
+        );
+        assert_ne!(
+            supplementary_schema_identity("gnomad-v4.1", "gnomad", &full).unwrap(),
+            "gnomad-v4.1"
+        );
+        fs::remove_dir_all(fresh_root).unwrap();
+    }
+
+    #[test]
+    fn gnomad_exome_and_genome_field_selections_are_independent() {
+        let base = root("gnomad-independent-field-selection");
+        let exomes_root = base.join("gnomad");
+        let genomes_root = base.join("gnomad-genomes");
+        let mut exomes = default_supplementary_field_selection("gnomad").unwrap();
+        let mut genomes = default_supplementary_field_selection("gnomad-genomes").unwrap();
+        exomes.fields.pop();
+        genomes.fields.remove(0);
+
+        save_supplementary_field_selection("gnomad", &exomes_root, exomes.clone()).unwrap();
+        save_supplementary_field_selection("gnomad-genomes", &genomes_root, genomes.clone())
+            .unwrap();
+        fs::create_dir_all(exomes_root.join("4.1.1-exomes/shards/chr1")).unwrap();
+
+        assert!(
+            supplementary_field_configuration("gnomad", &exomes_root)
+                .unwrap()
+                .locked
+        );
+        assert!(
+            !supplementary_field_configuration("gnomad-genomes", &genomes_root)
+                .unwrap()
+                .locked
+        );
+        genomes.fields.pop();
+        assert_eq!(
+            save_supplementary_field_selection("gnomad-genomes", &genomes_root, genomes.clone())
+                .unwrap(),
+            genomes
+        );
+        assert_eq!(
+            load_supplementary_field_selection("gnomad", &exomes_root).unwrap(),
+            exomes
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -4398,7 +4528,10 @@ mod tests {
             |_| {},
         )
         .unwrap_err();
-        assert!(error.contains("fastVEP preparation failed"));
+        assert!(error.contains("invalid gzip header"));
+        assert!(error.contains("Resume will redownload"));
+        assert!(!paths.source_part().exists());
+        assert!(!paths.source_part_identity().exists());
         assert!(!paths.partial_osa().exists());
         assert!(!paths.partial_index().exists());
         fs::remove_dir_all(root).unwrap();
