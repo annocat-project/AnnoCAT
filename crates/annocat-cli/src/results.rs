@@ -3671,12 +3671,19 @@ pub fn complete_detail_json_at(
             record_number,
             alt_index,
         ) {
-            let mut detail = detail_value(allele_id, indexed.consequences, indexed.evidence);
-            detail
-                .as_object_mut()
-                .ok_or("variant detail response is not an object")?
-                .insert("variant".into(), indexed.variant);
-            return serde_json::to_string(&detail).map_err(|error| error.to_string());
+            let embedded_consequences = indexed
+                .variant
+                .get("fallbackConsequences")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            if !indexed.consequences.is_empty() || !embedded_consequences {
+                let mut detail = detail_value(allele_id, indexed.consequences, indexed.evidence);
+                detail
+                    .as_object_mut()
+                    .ok_or("variant detail response is not an object")?
+                    .insert("variant".into(), indexed.variant);
+                return serde_json::to_string(&detail).map_err(|error| error.to_string());
+            }
         }
     }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
@@ -4550,6 +4557,27 @@ mod tests {
         assert_eq!(detail_index_value["schemaVersion"], 2);
         assert_eq!(detail_index_value["variants"]["groups"][0]["rowOffset"], 0);
         assert_eq!(detail_index_value["variants"]["groups"][0]["rowCount"], 1);
+        let mut incomplete_index = detail_index_value.clone();
+        incomplete_index["consequences"]["groups"] = json!([]);
+        fs::write(
+            &detail_index,
+            serde_json::to_vec(&incomplete_index).unwrap(),
+        )
+        .unwrap();
+        let fallback_detail: Value = serde_json::from_str(
+            &complete_detail_json_at(
+                &variants,
+                Some(&consequences),
+                Some(&evidence),
+                &id,
+                Some(record_number),
+                Some(alt_index),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fallback_detail["consequences"].as_array().unwrap().len(), 1);
+        assert_eq!(fallback_detail["evidence"].as_array().unwrap().len(), 7);
         fs::write(&detail_index, b"not a valid index").unwrap();
         assert!(
             complete_detail_json_at(
