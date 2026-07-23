@@ -4,4 +4,4 @@
 .settings-path > span { color: var(--muted); font-size:var(--font-size-sm); font-weight:var(--font-weight-bold); text-transform: uppercase; letter-spacing: .05em; }
 .settings-path > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size:var(--font-size-base); }
 .settings-path > small { color: var(--muted); }
-.settings-path > button { grid-column: 2; grid-row: 1 / 4; padding: 8px 12px; border: 1px solid #cbd2e5; border-radius: 8px; background: #fff; }
+.settings-path > button { grid-column: 2; grid-row: 1 / 4; padding: 8px 12px; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-surface); }

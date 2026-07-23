@@ -2581,10 +2581,7 @@ fn displayed_field_search_sql(
     if let (Some(evidence), Some(catalog)) = (evidence, catalog)
         && !request.evidence_columns.is_empty()
     {
-        let fields = selected_evidence_columns(catalog, &request.evidence_columns)?
-            .into_iter()
-            .filter(evidence_field_is_text_searchable)
-            .collect::<Vec<_>>();
+        let fields = selected_evidence_columns(catalog, &request.evidence_columns)?;
         if !fields.is_empty() {
             connection
                 .execute_batch(
@@ -2617,7 +2614,11 @@ fn displayed_field_search_sql(
                              FROM read_parquet(?) ev_search
                              WHERE ({conditions})
                                AND contains(replace(replace(lower(coalesce(
-                                   ev_search.string_value, ev_search.json_value, '')),
+                                   ev_search.string_value,
+                                   CAST(ev_search.integer_value AS VARCHAR),
+                                   CAST(ev_search.number_value AS VARCHAR),
+                                   CAST(ev_search.boolean_value AS VARCHAR),
+                                   ev_search.json_value, '')),
                                    '_', ' '), '-', ' '), lower(?))"
                         ),
                         params_from_iter(search_parameters.iter()),
@@ -2649,7 +2650,9 @@ fn displayed_field_search_sql(
                              WHERE ({conditions})
                                AND er_search.resolution_kind IN ('exact_transcript', 'uniform')
                                AND contains(replace(replace(lower(coalesce(
-                                   er_search.resolved_string, '')), '_', ' '), '-', ' '), lower(?))"
+                                   er_search.resolved_string,
+                                   CAST(er_search.resolved_number AS VARCHAR), '')),
+                                   '_', ' '), '-', ' '), lower(?))"
                         ),
                         params_from_iter(search_parameters.iter()),
                     )
@@ -2662,11 +2665,6 @@ fn displayed_field_search_sql(
     }
     sql.push(')');
     Ok((sql, parameters))
-}
-
-fn evidence_field_is_text_searchable(field: &SelectedEvidenceColumn) -> bool {
-    !matches!(field.value_type.as_str(), "integer" | "number" | "boolean")
-        && !evidence_field_is_numeric(field)
 }
 
 pub fn page_json_with_evidence(
@@ -4649,6 +4647,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(clinvar_search["total"], 1);
+        let text_search_with_numeric_field: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    search: "path".into(),
+                    evidence_columns: vec![clinvar_index, revel_index],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(text_search_with_numeric_field["total"], 1);
         let numeric_search: Value = serde_json::from_str(
             &page_json_with_evidence(
                 &variants,
@@ -4665,7 +4680,24 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(numeric_search["total"], 0);
+        assert_eq!(numeric_search["total"], 1);
+        let hidden_numeric_search: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    search: "0.31".into(),
+                    evidence_columns: vec![clinvar_index],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hidden_numeric_search["total"], 0);
         fs::remove_dir_all(root).unwrap();
     }
 
