@@ -55,3 +55,22 @@
 .table-wrap tbody tr:hover,.table-wrap tbody tr.selected-variant{background:var(--blue-soft)}
 .column-resizer{position:absolute;inset:0 -4px 0 auto;z-index:5;width:9px;cursor:col-resize}
 .column-menu{z-index:20}
+
+/* Shared card accordions for installation field choices and runtime settings. */
+[data-install-items]{display:grid;gap:8px}
+.profile-install-source,.install-runtime-help{width:100%;margin:0;overflow:hidden;border:1px solid var(--color-border);border-radius:8px;background:var(--color-surface)}
+.profile-install-source>summary,.install-runtime-help>summary{box-sizing:border-box;min-height:40px;margin:0;padding:8px 11px;border:0;background:var(--color-surface-subtle);color:var(--color-text-primary);cursor:pointer;list-style:none}
+.profile-install-source>summary{grid-template-columns:minmax(140px,.8fr) minmax(0,1.2fr) max-content}
+.install-runtime-help>summary{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.profile-install-source>summary::-webkit-details-marker,.install-runtime-help>summary::-webkit-details-marker{display:none}
+.profile-install-source>summary:hover,.install-runtime-help>summary:hover{background:var(--color-surface-hover)}
+.profile-install-source>summary:focus-visible,.install-runtime-help>summary:focus-visible{outline:3px solid var(--color-focus-ring);outline-offset:-3px}
+.profile-install-source>summary strong,.install-runtime-help>summary strong{font-size:var(--font-size-sm);font-weight:var(--font-weight-semibold)}
+.profile-install-source>summary>span{color:var(--color-text-muted);font-size:var(--font-size-xs);font-weight:var(--font-weight-normal)}
+.profile-install-source>summary>small,.install-runtime-help>summary>small{color:var(--color-text-muted);font-size:var(--font-size-xs);font-weight:var(--font-weight-medium)}
+.profile-install-source[open]>summary,.install-runtime-help[open]>summary{border-bottom:1px solid var(--color-border-subtle)}
+.profile-install-source>.dbnsfp-field-editor{margin:0;padding:13px;border:0;border-radius:0;background:var(--color-surface)}
+.install-runtime-help{margin-top:10px}
+.install-runtime-options{padding:13px 13px 0}
+.install-runtime-help .install-stream-note{margin:12px 13px 13px}
+@media(max-width:640px){.profile-install-source>summary{grid-template-columns:minmax(0,1fr) max-content}.profile-install-source>summary>span{grid-column:1/-1;grid-row:2}.profile-install-source>summary>small{grid-column:2;grid-row:1}}
