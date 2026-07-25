@@ -745,6 +745,11 @@ fn terminal_active_lines() -> Vec<String> {
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/src/app.js");
+const PHENOTYPES_JS: &str = include_str!("../../../web/src/app/phenotypes.js");
+const RESULT_FILTERS_JS: &str = include_str!("../../../web/src/app/result-filters.js");
+const UI_COMPONENTS_JS: &str = include_str!("../../../web/src/app/ui-components.js");
+const VARIANT_PRESENTATION_JS: &str = include_str!("../../../web/src/app/variant-presentation.js");
+const ANNOCAT_CSS: &str = include_str!("../../../web/src/annocat.css");
 const STYLE_CSS: &str = include_str!("../../../web/src/style.css");
 const WIZARD_CSS: &str = include_str!("../../../web/src/wizard.css");
 const BATCH_CSS: &str = include_str!("../../../web/src/batch.css");
@@ -753,6 +758,7 @@ const DOWNLOADS_UI_CSS: &str = include_str!("../../../web/src/downloads-ui.css")
 const RESOURCE_LOCATION_CSS: &str = include_str!("../../../web/src/resource-location.css");
 const REPORT_SHARE_CSS: &str = include_str!("../../../web/src/report-share.css");
 const BRAND_THEME_CSS: &str = include_str!("../../../web/src/brand-theme.css");
+const FLUENT_COMPONENTS_CSS: &str = include_str!("../../../web/src/fluent-components.css");
 
 fn web_asset(relative_path: &str, embedded: &str) -> String {
     std::env::var_os("ANNOCAT_WEB_ROOT")
@@ -2340,6 +2346,31 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "text/javascript; charset=utf-8",
             web_asset("src/app.js", APP_JS),
         ),
+        "/app/phenotypes.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/phenotypes.js", PHENOTYPES_JS),
+        ),
+        "/app/result-filters.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/result-filters.js", RESULT_FILTERS_JS),
+        ),
+        "/app/ui-components.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/ui-components.js", UI_COMPONENTS_JS),
+        ),
+        "/app/variant-presentation.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/variant-presentation.js", VARIANT_PRESENTATION_JS),
+        ),
+        "/annocat.css" => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            web_asset("src/annocat.css", ANNOCAT_CSS),
+        ),
         "/style.css" => (
             "200 OK",
             "text/css; charset=utf-8",
@@ -2379,6 +2410,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "200 OK",
             "text/css; charset=utf-8",
             web_asset("src/brand-theme.css", BRAND_THEME_CSS),
+        ),
+        "/fluent-components.css" => (
+            "200 OK",
+            "text/css; charset=utf-8",
+            web_asset("src/fluent-components.css", FLUENT_COMPONENTS_CSS),
         ),
         "/api/sources" => ("200 OK", "application/json", sources_json()),
         "/api/evidence-calibrations" => (
@@ -4576,6 +4612,140 @@ fn pick_result_file() -> Result<Option<String>, String> {
 mod profile_status_tests {
     use super::*;
 
+    fn web_app_source() -> String {
+        [
+            APP_JS,
+            PHENOTYPES_JS,
+            RESULT_FILTERS_JS,
+            UI_COMPONENTS_JS,
+            VARIANT_PRESENTATION_JS,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn web_entrypoint_imports_and_serves_feature_modules() {
+        let server = include_str!("main.rs");
+        assert!(INDEX_HTML.contains(r#"<script type="module" src="/app.js">"#));
+        for (import, route, source) in [
+            (
+                "./app/phenotypes.js",
+                r#""/app/phenotypes.js""#,
+                PHENOTYPES_JS,
+            ),
+            (
+                "./app/result-filters.js",
+                r#""/app/result-filters.js""#,
+                RESULT_FILTERS_JS,
+            ),
+            (
+                "./app/ui-components.js",
+                r#""/app/ui-components.js""#,
+                UI_COMPONENTS_JS,
+            ),
+            (
+                "./app/variant-presentation.js",
+                r#""/app/variant-presentation.js""#,
+                VARIANT_PRESENTATION_JS,
+            ),
+        ] {
+            assert!(APP_JS.contains(import), "missing browser import {import}");
+            assert!(server.contains(route), "missing server route {route}");
+            assert!(
+                !source.trim().is_empty(),
+                "embedded module {import} is empty"
+            );
+        }
+        assert!(INDEX_HTML.contains(r#"href="/annocat.css""#));
+        assert!(server.contains(r#""/annocat.css""#));
+        assert!(!ANNOCAT_CSS.trim().is_empty());
+        assert!(server.contains(r#""/fluent-components.css""#));
+        assert!(!FLUENT_COMPONENTS_CSS.trim().is_empty());
+    }
+
+    #[test]
+    fn fluent_component_contracts_are_explicit() {
+        for contract in [
+            "fui-button",
+            "fui-input",
+            "fui-select",
+            "fui-card",
+            "fui-dialog",
+            "fui-popover",
+            "fui-accordion",
+            "fui-data-grid",
+            "fui-page-header",
+            "fui-workspace-header",
+            "fui-panel__header",
+            "fui-choice-row",
+            "fui-status-message",
+            "fui-summary-grid",
+        ] {
+            assert!(
+                INDEX_HTML.contains(contract)
+                    || web_app_source().contains(contract)
+                    || FLUENT_COMPONENTS_CSS.contains(contract),
+                "missing Fluent component contract {contract}"
+            );
+        }
+        assert!(UI_COMPONENTS_JS.contains("findUnclassifiedInteractiveElements"));
+        assert!(UI_COMPONENTS_JS.contains("retainFluentModalFocus"));
+        assert!(UI_COMPONENTS_JS.contains("const target = focusTarget || dialog"));
+        assert!(UI_COMPONENTS_JS.contains("fui-keyboard-navigation"));
+        assert!(UI_COMPONENTS_JS.contains("region.scrollTop = 0"));
+        assert!(web_app_source().contains("aria-labelledby=\"profile-install-review-title\""));
+        assert!(web_app_source().contains("fui-dialog__surface"));
+        assert!(web_app_source().contains("fui-dialog__content--scrollable"));
+        assert!(web_app_source().contains("fui-list fui-list--divided"));
+        assert!(INDEX_HTML.contains("fui-navigation-rail"));
+        assert!(INDEX_HTML.contains("fui-toolbar fui-toolbar--results"));
+        assert!(INDEX_HTML.contains("result-view-tabs fui-tabs"));
+        assert!(!INDEX_HTML.contains("fui-tabs--compact"));
+        for legacy_selector in [
+            "body:not(:has(#results.active-page)) .sidebar>.brand",
+            "button:focus-visible, input:focus-visible",
+            ".profile-install-review>form",
+            ".install-runtime-footer",
+            ".dbnsfp-field-editor{",
+        ] {
+            assert!(
+                !STYLE_CSS.contains(legacy_selector) && !BRAND_THEME_CSS.contains(legacy_selector),
+                "legacy styles must not own migrated component {legacy_selector}"
+            );
+        }
+        for declaration in FLUENT_COMPONENTS_CSS
+            .lines()
+            .filter(|line| line.contains("font-size:") || line.contains("font-weight:"))
+        {
+            assert!(
+                declaration.contains("var("),
+                "component typography must use a design token: {declaration}"
+            );
+        }
+        assert!(!FLUENT_COMPONENTS_CSS.contains("html.annocat-results-ui #results .table-wrap th"));
+        assert!(
+            !FLUENT_COMPONENTS_CSS
+                .contains("html.annocat-results-ui #results .variant-detail-heading h2")
+        );
+
+        let compatibility = FLUENT_COMPONENTS_CSS
+            .split("@layer annocat-compat {")
+            .nth(1)
+            .expect("component stylesheet must retain a layout compatibility layer");
+        for visual_override in [
+            "border-radius:",
+            "box-shadow:",
+            "font-size:",
+            "color:",
+            "background:",
+        ] {
+            assert!(
+                !compatibility.contains(visual_override),
+                "layout compatibility must not own visual property {visual_override}"
+            );
+        }
+    }
+
     #[test]
     fn server_port_parser_rejects_zero_and_unknown_options() {
         assert_eq!(parse_port(&[]).unwrap(), 8787);
@@ -4605,7 +4775,7 @@ mod profile_status_tests {
     #[test]
     fn settings_owns_storage_locations_and_omits_removed_density_option() {
         let html = include_str!("../../../web/index.html");
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         assert!(html.contains("id=\"settings-resource-path\""));
         assert!(html.contains("id=\"settings-downloads-path\""));
         assert!(html.contains("id=\"settings-results-path\""));
@@ -4713,7 +4883,7 @@ mod profile_status_tests {
     #[test]
     fn data_sources_do_not_duplicate_download_tasks() {
         let html = include_str!("../../../web/index.html");
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         let theme = include_str!("../../../web/src/brand-theme.css");
         assert!(!html.contains("id=\"download-section\""));
         assert!(!html.contains("id=\"download-jobs\""));
@@ -4969,7 +5139,7 @@ mod profile_status_tests {
 
     #[test]
     fn browser_post_requests_include_the_local_csrf_header() {
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         let missing = app
             .lines()
             .filter(|line| line.contains("method:'POST'") && !line.contains("X-AnnoCat-CSRF"))
@@ -5003,14 +5173,14 @@ mod profile_status_tests {
         assert_eq!(input_picker.matches("rfd::FileDialog::new()").count(), 1);
         assert!(input_picker.contains(".pick_file()"));
         assert!(!input_picker.contains(".pick_files()"));
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         assert!(app.contains("'/api/pick-recovery-input'"));
         assert!(app.contains("recoveryFiles.input=paths[0]"));
     }
 
     #[test]
     fn annotation_start_failures_use_the_unified_status_surface() {
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         let html = include_str!("../../../web/index.html");
         assert!(!html.contains("id=\"global-status-button\""));
         assert!(html.contains("id=\"task-nav-status\""));
@@ -5023,7 +5193,7 @@ mod profile_status_tests {
 
     #[test]
     fn annotation_profiles_drive_selection_without_static_warning_cards() {
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         let html = include_str!("../../../web/index.html");
         assert!(html.contains("id=\"wizard-readiness\""));
         assert!(html.contains("id=\"review-readiness\""));
@@ -5036,7 +5206,7 @@ mod profile_status_tests {
 
     #[test]
     fn phenotype_knowledge_source_is_not_an_annotation_wizard_source() {
-        let app = include_str!("../../../web/src/app.js");
+        let app = web_app_source();
         let html = include_str!("../../../web/index.html");
         assert!(app.contains(
             "availableCatalog=orderedCatalogSources().filter(source=>source.fastvepSource&&"

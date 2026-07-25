@@ -1,0 +1,17 @@
+/*
+ * AnnoCAT stylesheet entry point.
+ *
+ * Legacy files retain page layout while the shared component layer owns
+ * typography, control sizing, shape, elevation, and interaction states.
+ */
+@layer annocat-legacy, annocat-compat, annocat-components, annocat-utilities;
+
+@import url("/style.css") layer(annocat-legacy);
+@import url("/wizard.css") layer(annocat-legacy);
+@import url("/batch.css") layer(annocat-legacy);
+@import url("/light-theme.css") layer(annocat-legacy);
+@import url("/downloads-ui.css") layer(annocat-legacy);
+@import url("/resource-location.css") layer(annocat-legacy);
+@import url("/report-share.css") layer(annocat-legacy);
+@import url("/brand-theme.css") layer(annocat-legacy);
+@import url("/fluent-components.css");

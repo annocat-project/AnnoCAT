@@ -4,14 +4,23 @@
   --font-family-code: ui-monospace, "SF Mono", Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 
   /* Fluent 2 web type ramp. */
-  --font-size-2xs: .625rem;
-  --font-size-xs: .75rem;
-  --font-size-sm: .75rem;
-  --font-size-base: .875rem;
-  --font-size-lg: 1rem;
-  --font-size-xl: 1.25rem;
-  --font-size-2xl: 1.5rem;
-  --font-size-3xl: 1.75rem;
+  --type-caption-2-size: .625rem;
+  --type-caption-1-size: .75rem;
+  --type-body-1-size: .875rem;
+  --type-subtitle-2-size: 1rem;
+  --type-subtitle-1-size: 1.25rem;
+  --type-title-3-size: 1.5rem;
+  --type-title-2-size: 1.75rem;
+  --type-title-1-size: 2rem;
+  --font-size-2xs: var(--type-caption-2-size);
+  --font-size-xs: var(--type-caption-1-size);
+  --font-size-sm: var(--type-caption-1-size);
+  --font-size-base: var(--type-body-1-size);
+  --font-size-lg: var(--type-subtitle-2-size);
+  --font-size-xl: var(--type-subtitle-1-size);
+  --font-size-2xl: var(--type-title-3-size);
+  --font-size-3xl: var(--type-title-2-size);
+  --font-size-4xl: var(--type-title-1-size);
   --font-weight-normal: 400;
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
@@ -37,48 +46,68 @@
   --text-title-leading: var(--line-height-subtitle-1);
 
   /* Fluent 2 component dimensions and layout rhythm. */
+  --space-0: 0;
+  --space-half: .125rem;
   --space-1: .25rem;
+  --space-1-half: .375rem;
   --space-2: .5rem;
+  --space-2-half: .625rem;
   --space-3: .75rem;
   --space-4: 1rem;
+  --space-5: 1.25rem;
   --space-6: 1.5rem;
+  --space-7: 1.75rem;
   --space-8: 2rem;
-  --control-height-small: 2rem;
-  --control-height-medium: 2.5rem;
-  --control-height-large: 3rem;
+  --space-9: 2.25rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-13: 3.25rem;
+  --space-14: 3.5rem;
+  --control-height-small: 1.5rem;
+  --control-height-medium: 2rem;
+  --control-height-large: 2.5rem;
   --control-padding-inline-small: .625rem;
   --control-padding-inline-medium: .75rem;
-  --control-radius-small: .375rem;
-  --control-radius-medium: .5rem;
-  --table-row-height: var(--control-height-medium);
+  --radius-small: .25rem;
+  --radius-medium: .375rem;
+  --radius-large: .75rem;
+  --radius-xlarge: 1rem;
+  --control-radius-small: var(--radius-medium);
+  --control-radius-medium: var(--radius-medium);
+  --table-row-height: var(--control-height-large);
   --option-row-height: var(--control-height-medium);
   --option-row-min-height-with-description: 3.25rem;
-  --accordion-header-height: var(--control-height-medium);
+  --accordion-header-height: var(--control-height-large);
   font-family: var(--font-family-body);
   font-synthesis: auto;
   /* Semantic colors. Components should consume roles, not literal colors. */
-  --color-canvas: #f6f8fc;
+  --color-canvas: #f5f7fb;
   --color-surface: #ffffff;
-  --color-surface-subtle: #fafbfe;
-  --color-surface-muted: #f7f8fb;
-  --color-surface-hover: #f3f5fa;
-  --color-surface-accent: #f7f8ff;
+  --color-surface-subtle: #f8f9fc;
+  --color-surface-muted: #f1f3f8;
+  --color-surface-hover: #eef1f8;
+  --color-surface-accent: #f2f4ff;
   --color-surface-translucent: rgba(255, 255, 255, .64);
   --color-surface-translucent-strong: rgba(255, 255, 255, .78);
-  --color-selection: #edf0ff;
-  --color-sidebar-start: #f4f6fb;
-  --color-sidebar-end: #edf1f8;
+  --color-control-hover: #f3f5f9;
+  --color-control-pressed: #e9ecf2;
+  --color-navigation-selected: #e9edff;
+  --color-navigation-selected-hover: #e3e8ff;
+  --color-panel-header: #f6f7fc;
+  --color-selection: #e9edff;
+  --color-sidebar-start: #f8f9fd;
+  --color-sidebar-end: #f1f4fb;
 
-  --color-text-primary: #202534;
-  --color-text-secondary: #596174;
-  --color-text-muted: #667085;
-  --color-text-subtle: #7c8392;
-  --color-text-disabled: #969dab;
+  --color-text-primary: #202533;
+  --color-text-secondary: #41495b;
+  --color-text-muted: #626c80;
+  --color-text-subtle: #778196;
+  --color-text-disabled: #a8afbd;
   --color-text-on-accent: #ffffff;
 
-  --color-border-subtle: #eceef3;
-  --color-border: #dfe4ee;
-  --color-border-strong: #d7ddea;
+  --color-border-subtle: #e8ebf3;
+  --color-border: #dce1ec;
+  --color-border-strong: #c8cfdd;
   --color-border-accent: #aeb7ea;
 
   --color-accent: #4057d6;
@@ -88,6 +117,8 @@
   --color-accent-hover: #e9edff;
   --color-focus-ring: rgba(113, 130, 245, .3);
   --color-accent-ring: rgba(64, 87, 214, .13);
+  --color-focus-inner: #ffffff;
+  --color-focus-outer: #202533;
 
   --color-status-danger: #a62f45;
   --color-status-danger-emphasis: #c24156;
@@ -127,6 +158,11 @@
   --color-shadow-medium: rgba(25, 31, 45, .14);
   --color-shadow-strong: rgba(24, 31, 51, .24);
   --color-shadow-overlay: rgba(15, 23, 42, .28);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, .14), 0 0 2px rgba(0, 0, 0, .12);
+  --shadow-4: 0 2px 4px rgba(0, 0, 0, .14), 0 0 2px rgba(0, 0, 0, .12);
+  --shadow-8: 0 4px 8px rgba(0, 0, 0, .14), 0 0 2px rgba(0, 0, 0, .12);
+  --shadow-16: 0 8px 16px rgba(0, 0, 0, .14), 0 0 2px rgba(0, 0, 0, .12);
+  --shadow-64: 0 32px 64px rgba(0, 0, 0, .24), 0 0 8px rgba(0, 0, 0, .12);
 
   /* Transitional aliases for existing component rules. */
   --ink: var(--color-text-primary);
@@ -189,115 +225,17 @@ h4 { font-size: var(--font-size-base); font-weight: var(--font-weight-semibold);
 h5 { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); line-height: var(--line-height-caption-1); }
 h6 { font-size: var(--font-size-2xs); font-weight: var(--font-weight-semibold); line-height: var(--line-height-caption-2); }
 code, kbd, samp, pre { font-family: var(--font-family-code); }
-.install-review {
-  color: var(--ink);
-  font-family: var(--font-family-body);
-  font-size: var(--text-body-size);
-  font-weight: var(--text-body-weight);
-  line-height: var(--text-body-leading);
-}
-.install-review h2 {
-  color: var(--ink);
-  font-size: var(--font-size-2xl);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-title-3);
-}
-.profile-install-review [data-install-summary] {
-  margin: 7px 0 12px;
-  font-size: var(--text-body-size);
-  font-weight: var(--text-body-weight);
-  line-height: var(--text-body-leading);
-}
-.install-review button, .install-review select {
-  font-size: var(--text-body-size);
-  font-weight: var(--font-weight-semibold);
-}
-.install-review .kicker {
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  line-height: 1.6;
-}
-.install-review-row strong,
-.profile-install-source>summary strong {
-  font-size: var(--text-body-size);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--text-body-leading);
-}
-.install-review-row span,
-.profile-install-source>summary>span {
-  font-size: var(--text-body-size);
-  font-weight: var(--text-body-weight);
-  line-height: var(--text-body-leading);
-}
-.profile-install-source>summary>small,
-.install-runtime-help>summary small {
-  font-size: var(--text-supporting-size);
-  font-weight: var(--text-supporting-weight);
-  line-height: var(--text-supporting-leading);
-}
-.install-runtime-help>summary,
-.install-runtime-help>summary strong,
-.install-runtime-options label>span {
-  font-size: var(--text-label-size);
-  font-weight: var(--text-label-weight);
-  line-height: var(--text-label-leading);
-}
-.dbnsfp-editor-head small,
-.dbnsfp-field-editor>p,
-.dbnsfp-group-heading small,
-.dbnsfp-field-list label,
-.dbnsfp-field-list label>span,
-.source-field-copy small,
-.source-field-copy code {
-  font-size: var(--text-supporting-size);
-  line-height: var(--text-supporting-leading);
-}
 .icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .ui-icon { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .prototype-action-icon { display: none; }
 
-.sidebar {
-  width: 248px;
-  padding: 25px 15px 18px;
-  border-right: 1px solid var(--color-border);
-  background: linear-gradient(180deg, var(--color-sidebar-start) 0%, var(--color-sidebar-end) 100%);
-  color: var(--ink);
-}
-.brand { justify-content: flex-start; padding: 0 12px 28px; text-align: left; }
-.brand strong, .setup-wordmark {
+.setup-wordmark {
   color: var(--ink);
   font-size:var(--font-size-xl);
   font-weight:var(--font-weight-semibold);
   letter-spacing: -.035em;
 }
-.brand strong span, .setup-wordmark span { color: var(--blue); }
-@media(min-width:851px) {
-  /* Align the wordmark with regular page headings without moving the navigation. */
-  body:not(:has(#results.active-page)) .sidebar>.brand { transform: translateY(24px); }
-}
-.sidebar nav { gap: 6px; }
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-height: var(--control-height-medium);
-  padding: 8px 12px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  color: var(--ink);
-  font-size:var(--font-size-base);
-  font-weight:var(--font-weight-normal);
-}
-.nav-item .ui-icon { flex: 0 0 19px; width: 19px; height: 19px; color: inherit; }
-.nav-item:hover { border-color: var(--color-border); background: var(--color-surface-translucent); color: var(--ink); }
-.nav-item.active {
-  border-color: var(--color-border);
-  background: var(--surface);
-  color: var(--blue-strong);
-  font-weight:var(--font-weight-semibold);
-  box-shadow: var(--shadow-sm);
-}
-.nav-item.active .ui-icon { color: var(--blue); stroke-width: 2; }
+.setup-wordmark span { color: var(--blue); }
 main { margin-left: 248px; }
 .topbar { border-color: var(--color-border); box-shadow: 0 1px 8px var(--color-shadow-subtle); }
 body:not(:has(#results.active-page)) .topbar { display: none; }
@@ -393,10 +331,6 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 
 button { color: var(--ink); }
 button:not(:disabled) { cursor: pointer; }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
-  outline: 3px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
 .primary, .source-list button.install, .install-review-actions .primary {
   border-color: var(--blue) !important;
   background: var(--blue) !important;
@@ -443,12 +377,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .source-card-meta { display: grid; min-width: 220px; justify-items: end; gap: 12px; }
 .source-card-meta .source-actions { max-width: 380px; flex-wrap: wrap; justify-content: flex-end; white-space: normal; }
 .source-state { justify-self: end; background: var(--color-border-subtle); color: var(--color-text-secondary); font-weight:var(--font-weight-semibold); }
-.confirmation-dialog { width: min(480px, calc(100% - 32px)); padding: 0; border: 1px solid var(--color-border); background: var(--color-surface); }
-.confirmation-dialog>form { padding: 24px; }
-.confirmation-dialog .kicker { margin-bottom: 6px; }
-.confirmation-dialog [data-confirm-action-message] { margin: 10px 0 0; color: var(--color-text-secondary); line-height: 1.55; white-space: pre-line; }
-.confirmation-dialog [data-confirm-action-confirm] { border-color: var(--color-status-danger-emphasis) !important; background: var(--color-status-danger-emphasis); color: var(--color-text-on-accent); }
-.confirmation-dialog [data-confirm-action-confirm]:hover { background: var(--color-status-danger); }
+.confirmation-dialog { width: min(480px, calc(100% - 32px)); }
+.confirmation-dialog [data-confirm-action-message] { white-space: pre-line; }
 .progress-fill { background: linear-gradient(90deg, var(--blue), var(--periwinkle)); }
 .impact-high { color: var(--color-status-danger); background: var(--color-status-danger-soft); }
 .impact-moderate { color: var(--color-status-warning); background: var(--color-status-warning-soft); }
@@ -849,13 +779,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
  */
 .annocat-results-ui body:has(#results.active-page) { height: 100vh; overflow: hidden; }
 .annocat-results-ui body:has(#results.active-page) .topbar { display: none; }
-.annocat-results-ui body:has(#results.active-page) .sidebar {
-  width: var(--annocat-sidebar-width);
-  padding: 25px 15px 18px;
-  border-right: 1px solid var(--color-border);
-  background: linear-gradient(180deg, var(--color-sidebar-start) 0%, var(--color-sidebar-end) 100%);
-}
-.annocat-results-ui body:has(#results.active-page) .brand { padding: 0 12px 28px; }
 .annocat-results-ui body:has(#results.active-page) main { margin-left: var(--annocat-sidebar-width); }
 .annocat-results-ui #results.active-page {
   display: flex;
@@ -1776,7 +1699,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   place-items: center;
   padding: 24px;
   background: var(--color-scrim);
-  backdrop-filter: blur(3px);
 }
 .about-overlay.hidden { display: none; }
 .about-dialog {
@@ -2025,115 +1947,4 @@ main { margin-left: var(--annocat-sidebar-width); transition: margin-left .2s ea
 
 @media(prefers-reduced-motion:reduce) {
   .sidebar, main, .annocat-results-ui #results .variant-detail { transition: none !important; }
-}
-
-/*
- * Fluent 2 component roles.
- *
- * These selectors map existing controls to a small set of intentional variants
- * without changing their behavior or requiring a framework dependency.
- */
-:is(
-  .primary,
-  .secondary,
-  .path-field>button,
-  .settings-grid button,
-  .source-actions button,
-  .profile-install-actions button,
-  .install-review-actions button,
-  .resource-review button,
-  .wizard-readiness button,
-  .case-notes-actions button,
-  .phenotype-actions>button,
-  .phenotype-more
-) {
-  display: inline-flex;
-  min-height: var(--control-height-medium);
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  padding: 0 var(--control-padding-inline-medium);
-  border-radius: var(--control-radius-medium);
-  font-size: var(--text-body-size);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--text-body-leading);
-}
-
-:is(
-  .download-job-actions button,
-  .download-job-actions a,
-  .source-actions a,
-  .batch-heading button,
-  .batch-file>button
-) {
-  display: inline-flex;
-  min-width: var(--control-height-small);
-  min-height: var(--control-height-small);
-  align-items: center;
-  justify-content: center;
-  padding: 0 var(--control-padding-inline-small);
-  font-size: var(--text-supporting-size);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--text-supporting-leading);
-}
-
-.download-job-head strong,
-.download-progress-meta strong,
-.download-speed,
-.batch-heading strong,
-.batch-file strong,
-.phenotype-chips b,
-.phenotype-evidence-summary strong,
-details>summary>strong,
-details>summary>span {
-  font-weight: var(--font-weight-semibold);
-}
-
-.table-value:is(.tone-adverse, .tone-caution, .tone-reassuring, .tone-informative),
-.annotation-row:is(.tone-adverse, .tone-caution, .tone-reassuring, .tone-informative)>b {
-  font-weight: var(--font-weight-normal);
-}
-
-.phenotype-dialog-heading>button,
-.about-close {
-  width: var(--control-height-medium);
-  height: var(--control-height-medium);
-}
-
-.phenotype-ranking-heading select {
-  height: var(--control-height-medium);
-}
-
-.phenotype-search-results>button {
-  min-height: var(--option-row-min-height-with-description);
-  padding: 6px var(--control-padding-inline-medium);
-  font-size: var(--text-body-size);
-  font-weight: var(--font-weight-normal);
-  line-height: var(--text-body-leading);
-}
-
-.phenotype-search-results>button strong {
-  font-size: var(--text-body-size);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--text-body-leading);
-}
-
-.phenotype-search-results>button :is(small, em) {
-  font-size: var(--text-supporting-size);
-  font-weight: var(--font-weight-normal);
-  line-height: var(--text-supporting-leading);
-}
-
-.phenotype-sample-picker>span,
-.review-subhead,
-.settings-path>span {
-  font-weight: var(--font-weight-semibold);
-}
-
-.batch-file>span,
-.field-lock,
-.phenotype-candidate-rank,
-.phenotype-results-kicker,
-.phenotype-source-badge {
-  font-weight: var(--font-weight-semibold);
 }
