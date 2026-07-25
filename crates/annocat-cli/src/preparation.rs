@@ -1485,6 +1485,31 @@ pub fn status_with_storage(
     if live.state != "idle" || chromosomes.is_empty() {
         return live;
     }
+    storage_status(resource_id, resource_root, chromosomes, live)
+}
+
+pub fn verified_storage_status(
+    resource_id: &str,
+    resource_root: &Path,
+    chromosomes: &[String],
+) -> LivePreparationState {
+    if chromosomes.is_empty() {
+        return LivePreparationState::default();
+    }
+    storage_status(
+        resource_id,
+        resource_root,
+        chromosomes,
+        LivePreparationState::default(),
+    )
+}
+
+fn storage_status(
+    resource_id: &str,
+    resource_root: &Path,
+    chromosomes: &[String],
+    live: LivePreparationState,
+) -> LivePreparationState {
     let expected_dbnsfp_schema = (resource_id == "dbnsfp")
         .then(|| {
             load_dbnsfp_field_selection(resource_root)
@@ -1679,6 +1704,25 @@ pub struct SpliceAiLiveRequest {
 pub struct RevelLiveRequest {
     pub fastvep_executable: PathBuf,
     pub resource_root: PathBuf,
+}
+
+pub struct HpoLiveRequest {
+    pub resource_root: PathBuf,
+    pub manifest: crate::phenotype::HpoAssetManifest,
+}
+
+pub fn start_hpo_live(request: HpoLiveRequest) -> Result<(), String> {
+    let expected_network_bytes = request.manifest.expected_bytes();
+    let job = register_live_job(LivePreparationState {
+        resource_id: Some("hpo".into()),
+        state: "running".into(),
+        phase: "starting".into(),
+        expected_network_bytes,
+        remaining_chromosomes: 1,
+        detail: "Starting the Human Phenotype Ontology installation".into(),
+        ..LivePreparationState::default()
+    })?;
+    spawn_live_job(job, move || run_hpo_live(request))
 }
 
 pub fn start_revel_live(request: RevelLiveRequest) -> Result<(), String> {
@@ -1936,6 +1980,66 @@ fn finish_sharded_preparation(
                 state.phase = "failed".into();
                 state.error = Some(error);
                 state.detail = failed_detail.into();
+            }
+        }
+    }
+}
+
+fn run_hpo_live(request: HpoLiveRequest) {
+    let cancelled = live_cancel();
+    let started = Instant::now();
+    let result = crate::phenotype::install_hpo(
+        &request.resource_root,
+        &request.manifest,
+        cancelled.as_ref(),
+        |progress| {
+            if let Ok(mut state) = live_state().lock() {
+                state.phase = progress.phase;
+                state.detail = progress.detail;
+                state.network_bytes = progress.network_bytes;
+                state.expected_network_bytes = progress.expected_network_bytes;
+                state.parsed_records = progress.parsed_records;
+                state.prepared_bytes = progress.prepared_bytes;
+                state.percent = if progress.expected_network_bytes == 0 {
+                    0.0
+                } else {
+                    progress.network_bytes as f64 * 100.0 / progress.expected_network_bytes as f64
+                };
+                state.throughput_bytes_per_second =
+                    progress.network_bytes as f64 / started.elapsed().as_secs_f64().max(0.001);
+            }
+        },
+    );
+    if let Ok(mut state) = live_state().lock() {
+        match result {
+            Ok(ready) => {
+                state.state = "ready".into();
+                state.phase = "ready".into();
+                state.network_bytes = ready.asset_bytes;
+                state.expected_network_bytes = ready.asset_bytes;
+                state.parsed_records = ready.disease_count as u64;
+                state.completed_chromosomes = 1;
+                state.remaining_chromosomes = 0;
+                state.percent = 100.0;
+                state.throughput_bytes_per_second = 0.0;
+                state.detail = format!(
+                    "Indexed {} HPO terms and {} disease profiles",
+                    ready.term_count, ready.disease_count
+                );
+            }
+            Err(_) if cancelled.load(Ordering::SeqCst) => {
+                state.state = "cancelled".into();
+                state.phase = "cancelled".into();
+                state.detail =
+                    "HPO installation paused; verified assets and partial downloads were retained"
+                        .into();
+            }
+            Err(error) => {
+                state.state = "failed".into();
+                state.phase = "failed".into();
+                state.error = Some(error);
+                state.detail =
+                    "HPO installation failed; incomplete assets were not promoted".into();
             }
         }
     }
@@ -4034,7 +4138,8 @@ mod tests {
                 .iter()
                 .all(|field| default.fields.contains(field))
         );
-        assert!(default.fields.contains(&"CADD_phred".into()));
+        assert!(!default.fields.contains(&"CADD_phred".into()));
+        assert!(!default.fields.contains(&"phyloP100way_vertebrate".into()));
         assert!(!default.fields.contains(&"CADD_raw".into()));
         assert!(!default.fields.contains(&"REVEL_rankscore".into()));
         let optional = default

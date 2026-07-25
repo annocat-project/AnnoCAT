@@ -11,7 +11,9 @@ const CATALOG_JSON: &str = include_str!(concat!(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceCatalog {
     schema_version: u16,
+    evidence_calibration_ref: String,
     pub sources: Vec<Source>,
+    pub services: Vec<Service>,
     pub profiles: Vec<Profile>,
     pub resources: Vec<Resource>,
 }
@@ -31,6 +33,18 @@ pub struct Source {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Service {
+    pub id: String,
+    pub provider: String,
+    pub purpose: String,
+    pub api_url: String,
+    pub provider_url: String,
+    pub timeout_seconds: u64,
+    pub max_results: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
     pub name: String,
@@ -46,6 +60,7 @@ pub struct Resource {
     pub delivery: String,
     pub adapter_contract: Option<String>,
     pub manifest_ref: Option<String>,
+    pub manifest_role: Option<String>,
     pub field_contract: Option<FieldContract>,
     pub release: Release,
 }
@@ -71,6 +86,7 @@ pub struct Release {
     pub size_checked_at: String,
     pub checksum: Option<Checksum>,
     pub resolver: Option<String>,
+    pub resolver_api_url: Option<String>,
     pub resolver_directory_url: Option<String>,
     pub resolver_notes_url: Option<String>,
 }
@@ -104,8 +120,19 @@ pub fn source(id: &str) -> Option<&'static Source> {
     catalog().sources.iter().find(|source| source.id == id)
 }
 
+pub fn service(id: &str) -> Option<&'static Service> {
+    catalog().services.iter().find(|service| service.id == id)
+}
+
 pub fn sources_json() -> String {
     serde_json::to_string(&catalog().sources).expect("validated sources must serialize")
+}
+
+pub fn evidence_calibrations_json() -> &'static str {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/evidence-calibrations.json"
+    ))
 }
 
 pub fn profile(id: &str) -> Option<&'static Profile> {
@@ -172,8 +199,22 @@ pub fn resolver_directory_url(id: &str) -> Option<&'static str> {
     resource(id)?.release.resolver_directory_url.as_deref()
 }
 
+pub fn resolver_api_url(id: &str) -> Option<&'static str> {
+    resource(id)?.release.resolver_api_url.as_deref()
+}
+
 pub fn resolver_notes_url(id: &str) -> Option<&'static str> {
     resource(id)?.release.resolver_notes_url.as_deref()
+}
+
+pub fn resource_manifest_json(id: &str) -> Result<&'static str, String> {
+    let resource = resource(id).ok_or_else(|| format!("unknown resource '{id}'"))?;
+    let path = resource
+        .manifest_ref
+        .as_deref()
+        .ok_or_else(|| format!("resource '{id}' has no asset manifest"))?;
+    embedded_manifest(path)
+        .ok_or_else(|| format!("resource '{id}' references unavailable manifest '{path}'"))
 }
 
 pub fn artifact_identity(
@@ -195,6 +236,10 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             catalog.schema_version
         ));
     }
+    if catalog.evidence_calibration_ref != "config/evidence-calibrations.json" {
+        return Err("source catalog must reference config/evidence-calibrations.json".into());
+    }
+    validate_evidence_calibrations()?;
     let mut catalog_source_ids = HashSet::new();
     for source in &catalog.sources {
         if !safe_id(&source.id) || !catalog_source_ids.insert(source.id.as_str()) {
@@ -226,6 +271,20 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 .is_some_and(|id| !safe_id(id))
         {
             return Err(format!("source {} has invalid metadata", source.id));
+        }
+    }
+    let mut service_ids = HashSet::new();
+    for service in &catalog.services {
+        if !safe_id(&service.id)
+            || !service_ids.insert(service.id.as_str())
+            || service.provider.trim().is_empty()
+            || service.purpose.trim().is_empty()
+            || !service.api_url.starts_with("https://")
+            || !service.provider_url.starts_with("https://")
+            || !(1..=120).contains(&service.timeout_seconds)
+            || !(1..=10_000).contains(&service.max_results)
+        {
+            return Err(format!("service {} has invalid metadata", service.id));
         }
     }
     let mut ids = HashSet::new();
@@ -281,6 +340,7 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             }
         }
         for url in [
+            resource.release.resolver_api_url.as_deref(),
             resource.release.resolver_directory_url.as_deref(),
             resource.release.resolver_notes_url.as_deref(),
         ]
@@ -346,6 +406,25 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             ));
         }
     }
+    if let Some(hpo) = catalog
+        .resources
+        .iter()
+        .find(|resource| resource.id == "hpo")
+    {
+        validate_hpo_manifest_contract(hpo)?;
+    }
+    for resource_id in ["cadd", "spliceai"] {
+        let resource = catalog
+            .resources
+            .iter()
+            .find(|resource| resource.id == resource_id)
+            .ok_or_else(|| format!("catalog is missing resource {resource_id}"))?;
+        if resource.manifest_ref.as_deref() != Some("config/indexed-sources.json") {
+            return Err(format!(
+                "resource {resource_id} must reference config/indexed-sources.json"
+            ));
+        }
+    }
     let mut profile_ids = HashSet::new();
     for profile in &catalog.profiles {
         if !safe_id(&profile.id)
@@ -372,13 +451,383 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_evidence_calibrations() -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(evidence_calibrations_json())
+        .map_err(|error| format!("invalid evidence calibration manifest: {error}"))?;
+    if value["schemaVersion"] != 2 {
+        return Err("unsupported evidence calibration schema".into());
+    }
+    let policy = value["interpretationPolicy"]
+        .as_object()
+        .ok_or("evidence calibration manifest has no interpretation policy")?;
+    if policy.get("mode").and_then(serde_json::Value::as_str) != Some("display-only")
+        || policy
+            .get("automaticClassification")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || policy
+            .get("unregisteredPredictors")
+            .and_then(serde_json::Value::as_str)
+            != Some("contextual-only")
+    {
+        return Err("evidence calibration policy must remain display-only".into());
+    }
+    let calibrations = value["calibrations"]
+        .as_array()
+        .ok_or("evidence calibration manifest has no calibrations")?;
+    let mut ids = HashSet::new();
+    for calibration in calibrations {
+        let id = calibration["id"]
+            .as_str()
+            .filter(|id| safe_id(id))
+            .ok_or("evidence calibration has an invalid ID")?;
+        let reference_url = calibration["referenceUrl"]
+            .as_str()
+            .filter(|url| url.starts_with("https://"))
+            .ok_or_else(|| format!("evidence calibration {id} has an invalid reference URL"))?;
+        if !calibration["reference"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            || !calibration["scope"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+            || !calibration["geneSpecific"].is_boolean()
+            || !calibration["singlePredictorOnly"].is_boolean()
+        {
+            return Err(format!(
+                "evidence calibration {id} has incomplete provenance"
+            ));
+        }
+        let bands = calibration["bands"]
+            .as_array()
+            .filter(|bands| !bands.is_empty())
+            .ok_or_else(|| format!("evidence calibration {id} has no bands"))?;
+        if !ids.insert(id) || reference_url.len() > 2048 {
+            return Err(format!("evidence calibration {id} has invalid metadata"));
+        }
+        let range = calibration
+            .get("scoreRange")
+            .and_then(serde_json::Value::as_object);
+        let range_minimum = range
+            .and_then(|range| range.get("minimumInclusive"))
+            .and_then(serde_json::Value::as_f64);
+        let range_maximum = range
+            .and_then(|range| range.get("maximumInclusive"))
+            .and_then(serde_json::Value::as_f64);
+        if range.is_some()
+            && (!range_minimum.is_some_and(f64::is_finite)
+                || !range_maximum.is_some_and(f64::is_finite)
+                || range_minimum >= range_maximum)
+        {
+            return Err(format!(
+                "evidence calibration {id} has an invalid score range"
+            ));
+        }
+        let mut previous_maximum: Option<(f64, bool)> = None;
+        for (index, band) in bands.iter().enumerate() {
+            if !band["label"].is_string()
+                || !band["direction"]
+                    .as_str()
+                    .is_some_and(|direction| matches!(direction, "benign" | "pathogenic" | "none"))
+                || !band["strength"].as_str().is_some_and(|strength| {
+                    matches!(
+                        strength,
+                        "none"
+                            | "supporting"
+                            | "moderate"
+                            | "moderate-to-strong"
+                            | "strong"
+                            | "very strong"
+                    )
+                })
+                || !band["tone"].as_str().is_some_and(|tone| {
+                    matches!(
+                        tone,
+                        "neutral" | "informative" | "reassuring" | "caution" | "adverse"
+                    )
+                })
+            {
+                return Err(format!("evidence calibration {id} has an invalid band"));
+            }
+            let minimum_inclusive = band
+                .get("minimumInclusive")
+                .and_then(serde_json::Value::as_f64);
+            let minimum_exclusive = band
+                .get("minimumExclusive")
+                .and_then(serde_json::Value::as_f64);
+            let maximum_inclusive = band
+                .get("maximumInclusive")
+                .and_then(serde_json::Value::as_f64);
+            let maximum_exclusive = band
+                .get("maximumExclusive")
+                .and_then(serde_json::Value::as_f64);
+            if minimum_inclusive.is_some() && minimum_exclusive.is_some()
+                || maximum_inclusive.is_some() && maximum_exclusive.is_some()
+            {
+                return Err(format!(
+                    "evidence calibration {id} has ambiguous band boundaries"
+                ));
+            }
+            let minimum = minimum_inclusive
+                .map(|value| (value, true))
+                .or_else(|| minimum_exclusive.map(|value| (value, false)))
+                .or_else(|| {
+                    (index == 0)
+                        .then_some(range_minimum)
+                        .flatten()
+                        .map(|value| (value, true))
+                });
+            let maximum = maximum_inclusive
+                .map(|value| (value, true))
+                .or_else(|| maximum_exclusive.map(|value| (value, false)))
+                .or_else(|| {
+                    (index + 1 == bands.len())
+                        .then_some(range_maximum)
+                        .flatten()
+                        .map(|value| (value, true))
+                });
+            if index == 0 && range_minimum.is_none() && minimum.is_some()
+                || index + 1 == bands.len() && range_maximum.is_none() && maximum.is_some()
+                || index > 0 && minimum.is_none()
+                || index + 1 < bands.len() && maximum.is_none()
+            {
+                return Err(format!(
+                    "evidence calibration {id} does not cover its declared score domain"
+                ));
+            }
+            if let Some((minimum, minimum_inclusive)) = minimum {
+                if !minimum.is_finite()
+                    || range_minimum.is_some_and(|range_minimum| minimum < range_minimum)
+                    || index > 0
+                        && previous_maximum.is_none_or(|(previous, previous_inclusive)| {
+                            previous != minimum || previous_inclusive == minimum_inclusive
+                        })
+                {
+                    return Err(format!(
+                        "evidence calibration {id} has a gap, overlap, or out-of-range band"
+                    ));
+                }
+            } else if index > 0 {
+                return Err(format!(
+                    "evidence calibration {id} has a gap, overlap, or out-of-range band"
+                ));
+            }
+            if let Some((maximum, maximum_inclusive)) = maximum {
+                if !maximum.is_finite()
+                    || range_maximum.is_some_and(|range_maximum| maximum > range_maximum)
+                    || minimum.is_some_and(|(minimum, minimum_inclusive)| {
+                        minimum > maximum
+                            || minimum == maximum && (!minimum_inclusive || !maximum_inclusive)
+                    })
+                {
+                    return Err(format!(
+                        "evidence calibration {id} has a gap, overlap, or out-of-range band"
+                    ));
+                }
+                previous_maximum = Some((maximum, maximum_inclusive));
+            } else {
+                previous_maximum = None;
+            }
+        }
+    }
+    let predictors = value["predictors"]
+        .as_array()
+        .filter(|predictors| !predictors.is_empty())
+        .ok_or("evidence calibration manifest has no predictor registry")?;
+    let mut predictor_ids = HashSet::new();
+    let mut field_matches: HashSet<(String, String)> = HashSet::new();
+    for predictor in predictors {
+        let id = predictor["id"]
+            .as_str()
+            .filter(|id| safe_id(id))
+            .ok_or("evidence predictor has an invalid ID")?;
+        let status = predictor["calibrationStatus"]
+            .as_str()
+            .filter(|status| matches!(*status, "published" | "unverified" | "none"))
+            .ok_or_else(|| format!("evidence predictor {id} has an invalid calibration status"))?;
+        if !predictor_ids.insert(id)
+            || !predictor["label"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+            || !predictor["scoreIdentity"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+            || !predictor["evidenceGroup"]
+                .as_str()
+                .is_some_and(|value| matches!(value, "missense-protein-effect" | "splicing"))
+            || !predictor["role"]
+                .as_str()
+                .is_some_and(|value| matches!(value, "primary" | "alternate" | "contextual"))
+            || !predictor["variantClasses"]
+                .as_array()
+                .is_some_and(|values| {
+                    !values.is_empty() && values.iter().all(serde_json::Value::is_string)
+                })
+            || predictor
+                .get("excludedVariantClasses")
+                .is_some_and(|values| {
+                    !values.as_array().is_some_and(|values| {
+                        !values.is_empty() && values.iter().all(serde_json::Value::is_string)
+                    })
+                })
+        {
+            return Err(format!("evidence predictor {id} has invalid metadata"));
+        }
+        match (
+            status,
+            predictor
+                .get("calibrationId")
+                .and_then(serde_json::Value::as_str),
+        ) {
+            ("published", Some(calibration_id)) if ids.contains(calibration_id) => {}
+            ("published", _) => {
+                return Err(format!(
+                    "published evidence predictor {id} has no known calibration"
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(format!(
+                    "uncalibrated evidence predictor {id} references a calibration"
+                ));
+            }
+            _ => {}
+        }
+        let matches = predictor["matches"]
+            .as_array()
+            .filter(|matches| !matches.is_empty())
+            .ok_or_else(|| format!("evidence predictor {id} has no field matches"))?;
+        for field_match in matches {
+            let source_ids = field_match["sourceIds"]
+                .as_array()
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| format!("evidence predictor {id} has invalid source matches"))?;
+            let field_names = field_match["fieldNames"]
+                .as_array()
+                .filter(|values| !values.is_empty())
+                .ok_or_else(|| format!("evidence predictor {id} has invalid field matches"))?;
+            for source_id in source_ids {
+                let source_id = source_id
+                    .as_str()
+                    .filter(|value| safe_id(value))
+                    .ok_or_else(|| format!("evidence predictor {id} has an invalid source ID"))?;
+                for field_name in field_names {
+                    let field_name = field_name
+                        .as_str()
+                        .filter(|value| !value.is_empty() && value.len() <= 128)
+                        .ok_or_else(|| {
+                            format!("evidence predictor {id} has an invalid field name")
+                        })?;
+                    if !field_matches
+                        .insert((source_id.to_ascii_lowercase(), field_name.to_owned()))
+                    {
+                        return Err(format!(
+                            "evidence predictor field match {source_id}.{field_name} is duplicated"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let missense_policy = &value["interpretationPolicy"]["missenseProteinEffect"];
+    let splicing_policy = &value["interpretationPolicy"]["splicing"];
+    if missense_policy["primaryPredictorId"] != "revel"
+        || missense_policy["fallback"] != "none"
+        || missense_policy["aggregation"] != "single-predeclared-predictor"
+        || splicing_policy["primaryPredictorId"] != "spliceai-max-delta"
+        || splicing_policy["aggregation"] != "maximum-delta-score"
+    {
+        return Err("evidence calibration predictor selection policy is unsafe".into());
+    }
+    Ok(())
+}
+
+fn validate_hpo_manifest_contract(resource: &Resource) -> Result<(), String> {
+    if resource.manifest_ref.as_deref() != Some("config/hpo-assets.json")
+        || resource.manifest_role.as_deref() != Some("bootstrap-fallback")
+        || resource.release.policy != "rolling"
+        || resource.release.version != "latest"
+        || resource.release.resolver.as_deref() != Some("github-hpo-release-assets")
+        || resource.release.resolver_api_url.as_deref()
+            != Some(
+                "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest",
+            )
+    {
+        return Err("HPO must use the cataloged rolling resolver and bootstrap manifest".into());
+    }
+    let contents = resource
+        .manifest_ref
+        .as_deref()
+        .and_then(embedded_manifest)
+        .ok_or("HPO resource has no embedded asset manifest")?;
+    let manifest: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| format!("invalid HPO asset manifest: {error}"))?;
+    manifest
+        .get("release")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("HPO asset manifest has no release")?;
+    manifest
+        .get("releaseUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("HPO asset manifest has no release URL")?;
+    let assets = manifest
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("HPO asset manifest has no assets")?;
+    let required_kinds = ["ontology", "disease-annotations", "disease-genes"];
+    for kind in required_kinds {
+        let asset = assets
+            .iter()
+            .find(|asset| asset.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+            .ok_or_else(|| format!("HPO bootstrap manifest is missing {kind}"))?;
+        let valid = asset
+            .get("bytes")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|bytes| bytes > 0)
+            && asset
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|url| url.starts_with("https://"))
+            && asset
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(valid_sha256);
+        if !valid {
+            return Err(format!(
+                "HPO bootstrap manifest has invalid {kind} metadata"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn embedded_manifest_exists(path: &str) -> bool {
-    matches!(
-        path,
-        "config/dbnsfp-4.9a-members.json"
-            | "config/revel-1.3-archives.json"
-            | "config/wgs-streams.json"
-    )
+    embedded_manifest(path).is_some()
+}
+
+fn embedded_manifest(path: &str) -> Option<&'static str> {
+    match path {
+        "config/dbnsfp-4.9a-members.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/dbnsfp-4.9a-members.json"
+        ))),
+        "config/hpo-assets.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/hpo-assets.json"
+        ))),
+        "config/indexed-sources.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/indexed-sources.json"
+        ))),
+        "config/revel-1.3-archives.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/revel-1.3-archives.json"
+        ))),
+        "config/wgs-streams.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/wgs-streams.json"
+        ))),
+        _ => None,
+    }
 }
 
 fn embedded_field_contract_exists(path: &str, resource_id: &str, contract_id: &str) -> bool {
@@ -414,6 +863,10 @@ fn safe_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +897,212 @@ mod tests {
             assert_eq!(projected.size_checked_at, current.release.size_checked_at);
         }
     }
+
+    #[test]
+    fn hpo_projects_as_one_source_card_and_one_managed_resource() {
+        let hpo_sources = catalog()
+            .sources
+            .iter()
+            .filter(|source| source.id == "hpo")
+            .collect::<Vec<_>>();
+        let hpo_resources = catalog()
+            .resources
+            .iter()
+            .filter(|resource| resource.id == "hpo")
+            .collect::<Vec<_>>();
+
+        assert_eq!(hpo_sources.len(), 1);
+        assert_eq!(hpo_sources[0].name, "Human Phenotype Ontology");
+        assert_eq!(hpo_sources[0].fastvep_source, None);
+        assert_eq!(hpo_resources.len(), 1);
+        assert_eq!(hpo_resources[0].delivery, "knowledge-cache");
+        assert_eq!(
+            hpo_resources[0].manifest_ref.as_deref(),
+            Some("config/hpo-assets.json")
+        );
+        assert_eq!(
+            hpo_resources[0].manifest_role.as_deref(),
+            Some("bootstrap-fallback")
+        );
+        assert_eq!(hpo_resources[0].release.version, "latest");
+        assert_eq!(hpo_resources[0].release.policy, "rolling");
+    }
+
+    #[test]
+    fn every_asset_manifest_is_reached_through_its_resource() {
+        for resource_id in [
+            "dbnsfp",
+            "gnomad",
+            "gnomad-genomes",
+            "phylop",
+            "cadd",
+            "spliceai",
+            "revel",
+            "hpo",
+        ] {
+            assert!(
+                resource_manifest_json(resource_id).is_ok(),
+                "{resource_id} asset manifest is not catalog-reachable"
+            );
+        }
+        assert_eq!(
+            resource("cadd").unwrap().manifest_ref.as_deref(),
+            Some("config/indexed-sources.json")
+        );
+        assert_eq!(
+            resource("spliceai").unwrap().manifest_ref.as_deref(),
+            Some("config/indexed-sources.json")
+        );
+    }
+
+    #[test]
+    fn evidence_calibrations_have_one_catalog_entry_point() {
+        assert_eq!(
+            catalog().evidence_calibration_ref,
+            "config/evidence-calibrations.json"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(evidence_calibrations_json()).unwrap();
+        assert_eq!(manifest["schemaVersion"], 2);
+        assert_eq!(manifest["interpretationPolicy"]["mode"], "display-only");
+        assert_eq!(
+            manifest["interpretationPolicy"]["automaticClassification"],
+            false
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["missenseProteinEffect"]["primaryPredictorId"],
+            "revel"
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["missenseProteinEffect"]["fallback"],
+            "none"
+        );
+        let revel = manifest["calibrations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|calibration| calibration["id"] == "revel-clingen-svi-2022-global")
+            .unwrap();
+        assert_eq!(revel["id"], "revel-clingen-svi-2022-global");
+        assert_eq!(revel["scoreRange"]["minimumInclusive"], 0.0);
+        assert_eq!(revel["scoreRange"]["maximumInclusive"], 1.0);
+        assert_eq!(revel["bands"].as_array().unwrap().len(), 8);
+        let predictors = manifest["predictors"].as_array().unwrap();
+        let primate_ai = predictors
+            .iter()
+            .find(|predictor| predictor["id"] == "primateai")
+            .unwrap();
+        assert_eq!(
+            primate_ai["calibrationId"],
+            "primateai-clingen-svi-2022-global"
+        );
+        let splice_ai = predictors
+            .iter()
+            .find(|predictor| predictor["id"] == "spliceai-max-delta")
+            .unwrap();
+        assert_eq!(splice_ai["role"], "primary");
+        assert_eq!(
+            splice_ai["excludedVariantClasses"],
+            serde_json::json!(["splice_acceptor_variant", "splice_donor_variant"])
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["splicing"]["aggregation"],
+            "maximum-delta-score"
+        );
+    }
+
+    #[test]
+    fn evidence_calibration_boundaries_preserve_published_intervals() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(evidence_calibrations_json()).unwrap();
+        let calibration = |id: &str| {
+            manifest["calibrations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|calibration| calibration["id"] == id)
+                .unwrap()
+        };
+        let label_at = |calibration: &serde_json::Value, score: f64| {
+            calibration["bands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|band| {
+                    band.get("minimumInclusive")
+                        .and_then(serde_json::Value::as_f64)
+                        .is_none_or(|minimum| score >= minimum)
+                        && band
+                            .get("minimumExclusive")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_none_or(|minimum| score > minimum)
+                        && band
+                            .get("maximumInclusive")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_none_or(|maximum| score <= maximum)
+                        && band
+                            .get("maximumExclusive")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_none_or(|maximum| score < maximum)
+                })
+                .and_then(|band| band["label"].as_str())
+                .unwrap()
+                .to_owned()
+        };
+
+        let revel = calibration("revel-clingen-svi-2022-global");
+        assert_eq!(
+            label_at(revel, 0.290),
+            "Supporting benign computational evidence"
+        );
+        assert_eq!(label_at(revel, 0.291), "Indeterminate calibrated range");
+        assert_eq!(
+            label_at(revel, 0.644),
+            "Supporting pathogenic computational evidence"
+        );
+        assert_eq!(
+            label_at(revel, 0.932),
+            "Strong pathogenic computational evidence"
+        );
+
+        let alpha_missense = calibration("alphamissense-clingen-svi-2025-global");
+        assert_eq!(
+            label_at(alpha_missense, 0.791),
+            "Indeterminate calibrated range"
+        );
+        assert_eq!(
+            label_at(alpha_missense, 0.792),
+            "Supporting pathogenic computational evidence"
+        );
+        assert_eq!(
+            label_at(alpha_missense, 0.990),
+            "Strong pathogenic computational evidence"
+        );
+
+        let splice_ai = calibration("spliceai-clingen-svi-2023-global");
+        assert_eq!(
+            label_at(splice_ai, 0.100),
+            "Supporting benign splice-effect evidence"
+        );
+        assert_eq!(label_at(splice_ai, 0.101), "Indeterminate calibrated range");
+        assert_eq!(
+            label_at(splice_ai, 0.200),
+            "Supporting pathogenic splice-effect evidence"
+        );
+    }
+
+    #[test]
+    fn online_services_are_centralized_in_the_catalog() {
+        let monarch = service("monarch-phenotype-gene-ranking").unwrap();
+        assert_eq!(monarch.provider, "Monarch Initiative");
+        assert_eq!(
+            monarch.api_url,
+            "https://api.monarchinitiative.org/v3/api/semsim/search"
+        );
+        assert_eq!(monarch.timeout_seconds, 45);
+        assert_eq!(monarch.max_results, 50);
+    }
+
     #[test]
     fn every_streamed_resource_has_a_stable_adapter_and_artifact_identity() {
         for resource in &catalog().resources {
@@ -458,6 +1117,13 @@ mod tests {
     fn rolling_sources_require_named_resolvers() {
         assert_eq!(resource("clinvar").unwrap().release.policy, "rolling");
         assert_eq!(resource("dbsnp").unwrap().release.policy, "rolling");
+        assert_eq!(resource("hpo").unwrap().release.policy, "rolling");
+        assert_eq!(
+            resolver_api_url("hpo"),
+            Some(
+                "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest"
+            )
+        );
         assert!(catalog().resources.iter().all(|resource| {
             resource.release.policy != "rolling" || resource.release.resolver.is_some()
         }));

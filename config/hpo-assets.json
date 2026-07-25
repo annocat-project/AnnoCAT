@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "release": "2026-06-23",
+  "releaseUrl": "https://github.com/obophenotype/human-phenotype-ontology/releases/tag/v2026-06-23",
+  "assets": [
+    {
+      "kind": "ontology",
+      "filename": "hp.obo",
+      "url": "https://github.com/obophenotype/human-phenotype-ontology/releases/download/v2026-06-23/hp.obo",
+      "bytes": 11222341,
+      "sha256": "a5092cbdf605f568403cf7380d9173014015692433b2cc631bc5c1b053876b1b"
+    },
+    {
+      "kind": "disease-annotations",
+      "filename": "phenotype.hpoa",
+      "url": "https://github.com/obophenotype/human-phenotype-ontology/releases/download/v2026-06-23/phenotype.hpoa",
+      "bytes": 35672303,
+      "sha256": "89004f85b253f980ffe84218d2c080665cbf67a57bbb322111d6a2db5eb31dff"
+    },
+    {
+      "kind": "disease-genes",
+      "filename": "genes_to_disease.txt",
+      "url": "https://github.com/obophenotype/human-phenotype-ontology/releases/download/v2026-06-23/genes_to_disease.txt",
+      "bytes": 1477762,
+      "sha256": "a247027ae9944e34545e0a91060243ff6c118681c06379b9721af1ee4f39286a"
+    }
+  ]
+}

@@ -58,7 +58,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     };
     if manifest.package_format != "annocat-report"
         || manifest.package_version != 1
-        || manifest.schema_version != 1
+        || !(1..=annocat_core::RESULT_SCHEMA_VERSION as u32).contains(&manifest.schema_version)
         || manifest.display_name.trim().is_empty()
         || manifest.display_name.len() > 256
         || manifest.completed_at.is_empty()

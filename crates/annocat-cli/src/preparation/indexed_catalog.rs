@@ -45,11 +45,12 @@ static CATALOG: OnceLock<Result<IndexedCatalog, String>> = OnceLock::new();
 fn load() -> Result<&'static IndexedCatalog, String> {
     CATALOG
         .get_or_init(|| {
-            let catalog: IndexedCatalog = serde_json::from_str(include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../config/indexed-sources.json"
-            )))
-            .map_err(|error| format!("invalid indexed source catalog: {error}"))?;
+            let manifest = annocat_core::source_catalog::resource_manifest_json("cadd")?;
+            if annocat_core::source_catalog::resource_manifest_json("spliceai")? != manifest {
+                return Err("CADD and SpliceAI must share the indexed source manifest".into());
+            }
+            let catalog: IndexedCatalog = serde_json::from_str(manifest)
+                .map_err(|error| format!("invalid indexed source catalog: {error}"))?;
             validate(&catalog)?;
             Ok(catalog)
         })

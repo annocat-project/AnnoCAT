@@ -4,6 +4,8 @@ cd /d "%~dp0"
 set "ANNOCAT_HOME=%~dp0"
 if exist "annocat.exe" (
   "annocat.exe" launch
+) else if exist "target\release\annocat.exe" (
+  "target\release\annocat.exe" launch
 ) else if exist "target\debug\annocat.exe" (
   "target\debug\annocat.exe" launch
 ) else (

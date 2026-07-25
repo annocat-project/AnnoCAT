@@ -1,7 +1,10 @@
 pub mod normalization;
+pub mod sample_call;
 pub mod source_catalog;
 pub mod source_overrides;
 pub mod vcf;
+
+pub const RESULT_SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceRelease {
@@ -23,16 +26,17 @@ pub fn practical_resource_plan_json() -> String {
         .resources
         .iter()
         .map(|resource| {
+            let rolling = resource.release.policy == "rolling";
             serde_json::json!({
                 "id": resource.id,
-                "version": resource.release.version,
+                "version": if rolling { None } else { Some(resource.release.version.as_str()) },
                 "filename": resource.release.filename,
-                "downloadBytes": resource.release.download_bytes,
+                "downloadBytes": if rolling { None } else { Some(resource.release.download_bytes) },
                 "installedBytes": null,
                 "rangeResume": resource.release.range_resume,
-                "installMode": if resource.delivery == "stream-cache" { "stream" } else { "download" },
+                "installMode": if matches!(resource.delivery.as_str(), "stream-cache" | "knowledge-cache") { "stream" } else { "download" },
                 "state": "missing",
-                "sizeCheckedAt": resource.release.size_checked_at,
+                "sizeCheckedAt": if rolling { None } else { Some(resource.release.size_checked_at.as_str()) },
             })
         })
         .collect::<Vec<_>>();
@@ -126,6 +130,10 @@ pub fn sources_json() -> String {
 
 pub fn profiles_json() -> String {
     source_catalog::profiles_json()
+}
+
+pub fn evidence_calibrations_json() -> &'static str {
+    source_catalog::evidence_calibrations_json()
 }
 
 pub fn demo_variants_json() -> String {
@@ -222,6 +230,22 @@ mod tests {
         let release = source_catalog::download_release("dbnsfp").unwrap();
         assert_eq!(release.download_bytes, Some(38_969_753_349));
         assert!(release.range_resume);
+    }
+
+    #[test]
+    fn rolling_resources_do_not_publish_stale_plan_versions_or_sizes() {
+        let plan: serde_json::Value =
+            serde_json::from_str(&practical_resource_plan_json()).unwrap();
+        let resources = plan["resources"].as_array().unwrap();
+        for resource_id in ["clinvar", "dbsnp", "hpo"] {
+            let resource = resources
+                .iter()
+                .find(|resource| resource["id"] == resource_id)
+                .unwrap();
+            assert!(resource["version"].is_null());
+            assert!(resource["downloadBytes"].is_null());
+            assert!(resource["sizeCheckedAt"].is_null());
+        }
     }
 
     #[test]

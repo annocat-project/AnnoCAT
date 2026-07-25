@@ -890,7 +890,7 @@ fn send_cancellable(
     }
 }
 
-fn validate_response(
+pub(crate) fn validate_response(
     response: &reqwest::blocking::Response,
     start: u64,
     expected: u64,

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "1654a63b3d7b19908a1d1fb6fe7abf8280b52a65",
+  "commit": "f5a8500dd4d12717c89dea44acc52a826388f945",
   "branch": "annocat/cache-build-performance",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
@@ -88,16 +88,20 @@
     {
       "commit": "1654a63b3d7b19908a1d1fb6fe7abf8280b52a65",
       "purpose": "Memory-map indexed FASTA files during transcript-cache construction instead of loading the complete genome into RAM"
+    },
+    {
+      "commit": "f5a8500dd4d12717c89dea44acc52a826388f945",
+      "purpose": "Query supplementary providers in genomic order while processing independent sources in parallel"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 6589440,
-    "sha256": "59d6c48c7ab07577ce78d987977e5335b1bb850c8d25b41ead2c5cf253b7f6a2",
+    "sizeBytes": 6605312,
+    "sha256": "e36de644f32e2fb2709deccd81e21abcac68b5958407f29ceeba89649eee97b2",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-07-22",
+  "reviewedOn": "2026-07-24",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact keeps explicit transcript caches read-only during annotation, memory-maps indexed FASTA files during transcript-cache construction, and fully verifies staged transcript caches before installation. It also owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, and single-pass structured output beside annotated VCF."
+  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact keeps explicit transcript caches read-only during annotation, memory-maps indexed FASTA files during transcript-cache construction, and fully verifies staged transcript caches before installation. It also owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, single-pass structured output beside annotated VCF, and genomic-order supplementary queries parallelized across independent sources."
 }

@@ -87,6 +87,7 @@ mod appcontainer {
 
     const PROFILE_NAME: &str = "OpenAI.AnnoCat.ReportWorker";
     const LAUNCH_MUTEX_NAME: &str = "Local\\OpenAI.AnnoCat.ReportWorker.Launch";
+    const HRESULT_ALREADY_EXISTS: i32 = 0x8007_00b7_u32 as i32;
 
     pub fn validate_report(path: &Path) -> Result<String, String> {
         let application = std::env::current_exe()
@@ -279,15 +280,25 @@ mod appcontainer {
                     &mut sid,
                 )
             };
-            if created < 0 {
+            if created == HRESULT_ALREADY_EXISTS {
                 let retry =
                     unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
                 if retry < 0 {
                     return Err(format!(
-                        "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
-                        created as u32
+                        "cannot resolve the existing AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
+                        retry as u32
                     ));
                 }
+            } else if created < 0 {
+                return Err(format!(
+                    "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
+                    created as u32
+                ));
+            }
+            if sid.is_null() {
+                return Err(
+                    "Windows returned no SID for the AnnoCAT report AppContainer profile".into(),
+                );
             }
             Ok(Self(sid))
         }

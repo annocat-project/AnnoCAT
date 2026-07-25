@@ -84,9 +84,10 @@ impl RevelArchiveManifest {
 }
 
 pub fn pinned_revel_manifest() -> Result<RevelArchiveManifest, String> {
-    let manifest: RevelArchiveManifest =
-        serde_json::from_str(include_str!("../../../../config/revel-1.3-archives.json"))
-            .map_err(|error| format!("invalid pinned REVEL archive manifest: {error}"))?;
+    let manifest: RevelArchiveManifest = serde_json::from_str(
+        annocat_core::source_catalog::resource_manifest_json("revel")?,
+    )
+    .map_err(|error| format!("invalid pinned REVEL archive manifest: {error}"))?;
     let expected = canonical_chromosomes(false);
     if manifest.schema_version != 1
         || manifest.resource_id != "revel"
@@ -114,9 +115,10 @@ pub fn pinned_revel_manifest() -> Result<RevelArchiveManifest, String> {
 }
 
 pub fn pinned_sharded_source(resource_id: &str) -> Result<PinnedShardedSource, String> {
-    let catalog: PinnedStreamCatalog =
-        serde_json::from_str(include_str!("../../../../config/wgs-streams.json"))
-            .map_err(|error| format!("invalid pinned WGS stream catalog: {error}"))?;
+    let catalog: PinnedStreamCatalog = serde_json::from_str(
+        annocat_core::source_catalog::resource_manifest_json(resource_id)?,
+    )
+    .map_err(|error| format!("invalid pinned WGS stream catalog: {error}"))?;
     if catalog.schema_version != 1 || catalog.sources.len() != 3 {
         return Err("pinned WGS stream catalog identity is invalid".into());
     }
@@ -155,9 +157,10 @@ pub fn pinned_sharded_source(resource_id: &str) -> Result<PinnedShardedSource, S
 }
 
 pub fn pinned_dbnsfp_manifest() -> Result<DbnsfpPinnedManifest, String> {
-    let manifest: DbnsfpPinnedManifest =
-        serde_json::from_str(include_str!("../../../../config/dbnsfp-4.9a-members.json"))
-            .map_err(|error| format!("invalid pinned dbNSFP member manifest: {error}"))?;
+    let manifest: DbnsfpPinnedManifest = serde_json::from_str(
+        annocat_core::source_catalog::resource_manifest_json("dbnsfp")?,
+    )
+    .map_err(|error| format!("invalid pinned dbNSFP member manifest: {error}"))?;
     if manifest.schema_version != 1
         || manifest.resource_id != "dbnsfp"
         || manifest.release != "4.9a"

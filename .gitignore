@@ -15,6 +15,7 @@
 /data/
 /downloads/
 /runs/
+/tmp/
 /tools/
 /docs/
 /dist/
@@ -30,6 +31,8 @@
 !/config/fastvep-pin.json
 !/config/dbnsfp-4.9a-members.json
 !/config/dbnsfp-4.9a-curated-fields.json
+!/config/evidence-calibrations.json
+!/config/hpo-assets.json
 !/config/wgs-streams.json
 !/config/source-catalog.json
 !/config/source-overrides.example.json

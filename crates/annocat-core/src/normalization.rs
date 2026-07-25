@@ -16,6 +16,13 @@ pub struct CanonicalAllele {
     pub alternate: String,
 }
 
+pub fn canonical_chromosome(chromosome: &str) -> String {
+    match chromosome.strip_prefix("chr").unwrap_or(chromosome) {
+        "M" => "MT".into(),
+        value => value.into(),
+    }
+}
+
 pub trait ReferenceSequence {
     fn base(&mut self, chromosome: &str, position: u64) -> Result<u8, NormalizeError>;
     fn sequence(
@@ -157,10 +164,10 @@ pub fn canonicalize<R: ReferenceSequence>(
     if position == 0 {
         return Err(NormalizeError::InvalidPosition);
     }
-    let chromosome = chromosome.strip_prefix("chr").unwrap_or(chromosome);
+    let chromosome = canonical_chromosome(chromosome);
     let mut ref_bases = allele_bytes(reference)?;
     let mut alt_bases = allele_bytes(alternate)?;
-    let observed = reference_source.sequence(chromosome, position, ref_bases.len())?;
+    let observed = reference_source.sequence(&chromosome, position, ref_bases.len())?;
     if !ref_bases.eq_ignore_ascii_case(&observed) {
         return Err(NormalizeError::ReferenceMismatch {
             expected: String::from_utf8_lossy(&observed).into_owned(),
@@ -181,13 +188,13 @@ pub fn canonicalize<R: ReferenceSequence>(
         if ref_bases.is_empty() || alt_bases.is_empty() {
             if position == 1 {
                 return Err(NormalizeError::ReferenceOutOfRange {
-                    chromosome: chromosome.into(),
+                    chromosome: chromosome.clone(),
                     position: 0,
                 });
             }
             position -= 1;
             let preceding = reference_source
-                .base(chromosome, position)?
+                .base(&chromosome, position)?
                 .to_ascii_uppercase();
             ref_bases.insert(0, preceding);
             alt_bases.insert(0, preceding);
@@ -201,7 +208,7 @@ pub fn canonicalize<R: ReferenceSequence>(
     }
 
     Ok(CanonicalAllele {
-        chromosome: chromosome.into(),
+        chromosome,
         position,
         reference: String::from_utf8(ref_bases).expect("validated ASCII allele"),
         alternate: String::from_utf8(alt_bases).expect("validated ASCII allele"),

@@ -10,6 +10,19 @@ use std::time::Instant;
 const BUFFER_BYTES: usize = 1024 * 1024;
 const REPORT_BYTES: u64 = 8 * 1024 * 1024;
 
+pub fn validate_declared_assembly(assembly: Option<&str>) -> Result<(), String> {
+    match assembly {
+        None | Some("GRCh38") => Ok(()),
+        Some("GRCh37") => Err(
+            "AnnoCAT does not support GRCh37, b37, or hg19 inputs in this release; select a GRCh38 VCF"
+                .into(),
+        ),
+        Some(assembly) => Err(format!(
+            "AnnoCAT supports GRCh38 inputs only; this file declares {assembly}"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Progress {
     pub completed_bytes: u64,
@@ -60,12 +73,7 @@ pub fn stream_variants_after(
         .map_err(|error| format!("cannot measure input VCF: {error}"))?
         .len();
     let assembly = annocat_core::vcf::declared_assembly(path)?;
-    if assembly.as_deref().is_some_and(|value| value != "GRCh38") {
-        return Err(format!(
-            "input declares {}; AnnoCAT currently requires GRCh38",
-            assembly.as_deref().unwrap_or_default()
-        ));
-    }
+    validate_declared_assembly(assembly.as_deref())?;
     let compressed = is_gzip(path)?;
     let compressed_bytes = Arc::new(AtomicU64::new(0));
     let file = File::open(path).map_err(|error| format!("cannot open input VCF: {error}"))?;
@@ -158,7 +166,11 @@ pub fn stream_variants_after(
         let reference = std::str::from_utf8(columns[3])
             .map_err(|_| "input VCF reference allele is not UTF-8")?;
         let skipped = summary.records < skip_records;
-        for alternate in alternate_field.split(',') {
+        let real_alternates = alternate_field
+            .split(',')
+            .filter(|alternate| annocat_core::vcf::is_variant_alternate(alternate))
+            .collect::<Vec<_>>();
+        for alternate in &real_alternates {
             annocat_core::vcf::update_identity_digest(
                 &mut identity,
                 chromosome_value,
@@ -188,7 +200,7 @@ pub fn stream_variants_after(
                 summary.other_alleles += 1;
             }
         }
-        if alternate_field.contains(',') {
+        if real_alternates.len() > 1 {
             summary.multiallelic_records += 1;
         }
         summary.records += 1;
@@ -310,6 +322,8 @@ mod tests {
         assert_eq!(summary.source_records, 4);
         assert_eq!(summary.skipped_non_variant_records, 2);
         assert_eq!(summary.records, 2);
+        assert_eq!(summary.alleles, 2);
+        assert_eq!(summary.multiallelic_records, 0);
         assert!(!output.contains("\t10\t"));
         assert!(!output.contains("\t11\t"));
         assert!(output.contains("\t12\t"));

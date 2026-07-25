@@ -206,7 +206,7 @@ mod tests {
         let error = recover_build_failure(
             &log,
             "fastVEP preparation failed with status exit code: 1".into(),
-            &[part.clone()],
+            std::slice::from_ref(&part),
         );
         assert_eq!(error, "VCF row has fewer than eight columns");
         assert!(part.exists());

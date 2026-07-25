@@ -26,8 +26,6 @@
     "REVEL_score",
     "AlphaMissense_score", "AlphaMissense_pred",
     "PrimateAI_score", "PrimateAI_pred",
-    "CADD_phred",
-    "phyloP100way_vertebrate",
     "GERP++_RS"
   ],
   "groups": [

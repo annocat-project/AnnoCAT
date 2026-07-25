@@ -2,10 +2,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 const MAX_NAME_BYTES: usize = 256;
 const MAX_NOTES_BYTES: usize = 1_000_000;
 const MAX_CANDIDATES: usize = 10_000;
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -213,7 +223,7 @@ fn validate_allele_id(allele_id: &str) -> Result<(), String> {
     }
 }
 
-fn validate_run_id(run_id: &str) -> Result<(), String> {
+pub(crate) fn validate_run_id(run_id: &str) -> Result<(), String> {
     if run_id.is_empty()
         || run_id.len() > 128
         || !run_id
@@ -226,20 +236,28 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let _publish_guard = atomic_write_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let parent = path.parent().ok_or("local metadata path has no parent")?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create local metadata directory: {error}"))?;
     let temporary = parent.join(format!(
-        ".{}.{}.partial",
+        ".{}.{}.{}.partial",
         path.file_name()
             .and_then(|v| v.to_str())
             .unwrap_or("metadata"),
-        std::process::id()
+        std::process::id(),
+        ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::write(&temporary, bytes)
         .map_err(|error| format!("cannot write local metadata: {error}"))?;
-    replace_file(&temporary, path)
+    if let Err(error) = replace_file(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -284,6 +302,7 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -327,6 +346,46 @@ mod tests {
             )
             .unwrap()["name"],
             "Original"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_use_distinct_temporary_files() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-atomic-write-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("profile.json");
+        let barrier = Arc::new(Barrier::new(12));
+        let handles = (0..12)
+            .map(|index| {
+                let target = target.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let value = format!("value-{index}");
+                    barrier.wait();
+                    atomic_write(&target, value.as_bytes()).unwrap();
+                    value
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        let actual = fs::read_to_string(&target).unwrap();
+        assert!(expected.contains(&actual));
+        assert!(
+            fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".partial"))
         );
         fs::remove_dir_all(root).unwrap();
     }

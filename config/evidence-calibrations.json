@@ -1,0 +1,451 @@
+{
+  "schemaVersion": 2,
+  "interpretationPolicy": {
+    "mode": "display-only",
+    "automaticClassification": false,
+    "unregisteredPredictors": "contextual-only",
+    "developerCategories": "display-only",
+    "missenseProteinEffect": {
+      "primaryPredictorId": "revel",
+      "fallback": "none",
+      "aggregation": "single-predeclared-predictor",
+      "alternatives": "display-without-stacking"
+    },
+    "splicing": {
+      "primaryPredictorId": "spliceai-max-delta",
+      "aggregation": "maximum-delta-score",
+      "classificationUse": "none"
+    }
+  },
+  "predictors": [
+    {
+      "id": "revel",
+      "label": "REVEL",
+      "calibrationStatus": "published",
+      "calibrationId": "revel-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "primary",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original REVEL score; rank scores are excluded",
+      "matches": [
+        {"sourceIds": ["revel"], "fieldNames": ["score"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["REVEL_score"]}
+      ]
+    },
+    {
+      "id": "alphamissense",
+      "label": "AlphaMissense",
+      "calibrationStatus": "published",
+      "calibrationId": "alphamissense-clingen-svi-2025-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original AlphaMissense pathogenicity score; developer categories and rank scores are excluded",
+      "matches": [
+        {"sourceIds": ["alphamissense"], "fieldNames": ["score", "pathogenicity"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["AlphaMissense_score"]}
+      ]
+    },
+    {
+      "id": "bayesdel-noaf",
+      "label": "BayesDel without allele frequency",
+      "calibrationStatus": "published",
+      "calibrationId": "bayesdel-noaf-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "BayesDel no-AF score; allele-frequency and rank-score models are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"]}
+      ]
+    },
+    {
+      "id": "vest4",
+      "label": "VEST4",
+      "calibrationStatus": "published",
+      "calibrationId": "vest4-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original VEST4 score; rank scores are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VEST4_score"]}
+      ]
+    },
+    {
+      "id": "primateai",
+      "label": "PrimateAI",
+      "calibrationStatus": "published",
+      "calibrationId": "primateai-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original PrimateAI score; categorical and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["primateai"], "fieldNames": ["score"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"]}
+      ]
+    },
+    {
+      "id": "polyphen2-hdiv",
+      "label": "PolyPhen-2 HDIV",
+      "calibrationStatus": "published",
+      "calibrationId": "polyphen2-hdiv-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original PolyPhen-2 HumDiv score; HumVar, categorical, and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HDIV_score"]}
+      ]
+    },
+    {
+      "id": "sift",
+      "label": "SIFT",
+      "calibrationStatus": "published",
+      "calibrationId": "sift-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original SIFT score; SIFT4G, categorical, converted, and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"]}
+      ]
+    },
+    {
+      "id": "cadd-phred",
+      "label": "CADD PHRED",
+      "calibrationStatus": "published",
+      "calibrationId": "cadd-phred-clingen-svi-2022-missense",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "CADD PHRED score; raw and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["cadd"], "fieldNames": ["phred"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["CADD_phred"]}
+      ]
+    },
+    {
+      "id": "mpc",
+      "label": "MPC",
+      "calibrationStatus": "published",
+      "calibrationId": "mpc-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original MPC score; rank scores are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["MPC_score"]}
+      ]
+    },
+    {
+      "id": "varity-r",
+      "label": "VARITY_R",
+      "calibrationStatus": "published",
+      "calibrationId": "varity-r-clingen-svi-2025-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original VARITY_R rare-variant model score; VARITY_ER and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VARITY_R_score"]}
+      ]
+    },
+    {
+      "id": "phylop-100way-vertebrate",
+      "label": "phyloP 100-way",
+      "calibrationStatus": "published",
+      "calibrationId": "phylop-100way-clingen-svi-2022-missense",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "contextual",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "phyloP 100-way vertebrate score for the variant position; rank scores are excluded",
+      "matches": [
+        {"sourceIds": ["phylop"], "fieldNames": ["score"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"]}
+      ]
+    },
+    {
+      "id": "gerp-rs",
+      "label": "GERP++ RS",
+      "calibrationStatus": "published",
+      "calibrationId": "gerp-rs-clingen-svi-2022-missense",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "contextual",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "GERP++ rejected-substitution score; neutral-rate and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["gerp"], "fieldNames": ["score"]},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["GERP++_RS"]}
+      ]
+    },
+    {
+      "id": "spliceai-max-delta",
+      "label": "SpliceAI maximum delta",
+      "calibrationStatus": "published",
+      "calibrationId": "spliceai-clingen-svi-2023-global",
+      "evidenceGroup": "splicing",
+      "role": "primary",
+      "variantClasses": ["any"],
+      "excludedVariantClasses": ["splice_acceptor_variant", "splice_donor_variant"],
+      "scoreIdentity": "Maximum of DS_AG, DS_AL, DS_DG, and DS_DL for the selected allele; the generic calibration excludes canonical splice-site variants",
+      "matches": [
+        {"sourceIds": ["spliceai"], "fieldNames": ["maxDeltaScore"]}
+      ]
+    },
+    {
+      "id": "esm1b",
+      "label": "ESM1b",
+      "calibrationStatus": "unverified",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "contextual",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "dbNSFP ESM1b score identity and precision have not been verified against the 2025 calibration inputs",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"]}
+      ]
+    },
+    {
+      "id": "mutpred",
+      "label": "MutPred",
+      "calibrationStatus": "unverified",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "contextual",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "The dbNSFP MutPred field has not been verified as the exact MutPred2 score calibrated by ClinGen SVI",
+      "matches": [
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["MutPred_score"]}
+      ]
+    }
+  ],
+  "calibrations": [
+    {
+      "id": "revel-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.003, "label": "Very strong benign computational evidence", "direction": "benign", "strength": "very strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.003, "maximumInclusive": 0.016, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.016, "maximumInclusive": 0.183, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.183, "maximumInclusive": 0.29, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.29, "maximumExclusive": 0.644, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.644, "maximumExclusive": 0.773, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.773, "maximumExclusive": 0.932, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.932, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "alphamissense-clingen-svi-2025-global",
+      "reference": "Bergquist et al. 2025, DOI 10.1016/j.gim.2025.101402",
+      "referenceUrl": "https://doi.org/10.1016/j.gim.2025.101402",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.07, "label": "Between moderate and strong benign computational evidence", "direction": "benign", "strength": "moderate-to-strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.07, "maximumInclusive": 0.099, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.099, "maximumInclusive": 0.169, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.169, "maximumExclusive": 0.792, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.792, "maximumExclusive": 0.906, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.906, "maximumExclusive": 0.972, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.972, "maximumExclusive": 0.99, "label": "Between moderate and strong pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate-to-strong", "tone": "adverse"},
+        {"minimumInclusive": 0.99, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "bayesdel-noaf-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumInclusive": -0.36, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": -0.36, "maximumInclusive": -0.18, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": -0.18, "maximumExclusive": 0.13, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.13, "maximumExclusive": 0.27, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.27, "maximumExclusive": 0.5, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.5, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "vest4-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.302, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.302, "maximumInclusive": 0.449, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.449, "maximumExclusive": 0.764, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.764, "maximumExclusive": 0.861, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.861, "maximumExclusive": 0.965, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.965, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "primateai-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.362, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.362, "maximumInclusive": 0.483, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.483, "maximumExclusive": 0.79, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.79, "maximumExclusive": 0.867, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.867, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "polyphen2-hdiv-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.009, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.009, "maximumInclusive": 0.113, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.113, "maximumExclusive": 0.978, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.978, "maximumExclusive": 0.999, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.999, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "sift-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.0, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumExclusive": 0.0, "maximumInclusive": 0.001, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumExclusive": 0.001, "maximumExclusive": 0.08, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.08, "maximumExclusive": 0.327, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumInclusive": 0.327, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"}
+      ]
+    },
+    {
+      "id": "cadd-phred-clingen-svi-2022-missense",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration of CADD PHRED",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumInclusive": 0.15, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.15, "maximumInclusive": 17.3, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 17.3, "maximumInclusive": 22.7, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 22.7, "maximumExclusive": 25.3, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 25.3, "maximumExclusive": 28.1, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 28.1, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "mpc-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumExclusive": 1.36, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 1.36, "maximumExclusive": 1.828, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 1.828, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "varity-r-clingen-svi-2025-global",
+      "reference": "Bergquist et al. 2025, DOI 10.1016/j.gim.2025.101402",
+      "referenceUrl": "https://doi.org/10.1016/j.gim.2025.101402",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.036, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.036, "maximumInclusive": 0.063, "label": "Between moderate and strong benign computational evidence", "direction": "benign", "strength": "moderate-to-strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.063, "maximumInclusive": 0.116, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.116, "maximumInclusive": 0.251, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.251, "maximumExclusive": 0.675, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.675, "maximumExclusive": 0.842, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.842, "maximumExclusive": 0.915, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.915, "maximumExclusive": 0.965, "label": "Between moderate and strong pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate-to-strong", "tone": "adverse"},
+        {"minimumInclusive": 0.965, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "phylop-100way-clingen-svi-2022-missense",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration of phyloP 100-way",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumInclusive": 0.021, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.021, "maximumInclusive": 1.879, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 1.879, "maximumExclusive": 7.367, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 7.367, "maximumExclusive": 9.741, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 9.741, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "gerp-rs-clingen-svi-2022-missense",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration of GERP++ RS",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumInclusive": -4.54, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": -4.54, "maximumInclusive": 2.7, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 2.7, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"}
+      ]
+    },
+    {
+      "id": "spliceai-clingen-svi-2023-global",
+      "reference": "Walker et al. 2023, PMID 37352859",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/37352859/",
+      "scope": "generic maximum-delta splice-effect calibration for non-canonical splice-site variants",
+      "geneSpecific": false,
+      "singlePredictorOnly": false,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.1, "label": "Supporting benign splice-effect evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.1, "maximumExclusive": 0.2, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.2, "label": "Supporting pathogenic splice-effect evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"}
+      ]
+    }
+  ],
+  "displayPolicies": {
+    "alleleFrequency": {
+      "interpretation": "Population frequency is context, not an independent pathogenic or benign classification.",
+      "rareTone": "informative",
+      "commonTone": "neutral"
+    },
+    "cadd": {
+      "interpretation": "CADD is rank-scaled. Its published clinical calibration applies only to missense variants and is not the primary AnnoCat missense interpretation.",
+      "tone": "informative"
+    },
+    "conservation": {
+      "interpretation": "Conservation is contextual. Published missense calibration is shown when applicable but is not stacked with REVEL.",
+      "conservedTone": "informative",
+      "acceleratedTone": "caution",
+      "neutralTone": "neutral"
+    }
+  }
+}

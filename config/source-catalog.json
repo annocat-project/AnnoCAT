@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "evidenceCalibrationRef": "config/evidence-calibrations.json",
   "sources": [
     {
       "id": "fastvep",
@@ -14,7 +15,7 @@
     {
       "id": "dbnsfp",
       "name": "dbNSFP 4.9a",
-      "purpose": "Missense/deleteriousness predictors, conservation, frequencies, and compiled functional fields",
+      "purpose": "Transcript-linked missense predictors, protein context, and selected functional fields",
       "defaultEnabled": true,
       "fastvepSource": "dbnsfp",
       "delivery": "managed-public",
@@ -182,6 +183,16 @@
       "licensePolicy": "user-supplied-license"
     },
     {
+      "id": "hpo",
+      "name": "Human Phenotype Ontology",
+      "purpose": "Local phenotype terminology, disease profiles, and disease-gene associations for experimental phenotype similarity",
+      "defaultEnabled": false,
+      "fastvepSource": null,
+      "delivery": "managed-public",
+      "assembly": "Assembly independent",
+      "licensePolicy": "publisher-terms"
+    },
+    {
       "id": "cosmic",
       "name": "COSMIC",
       "purpose": "Licensed user-supplied somatic variant evidence",
@@ -190,6 +201,17 @@
       "delivery": "user-supplied-licensed",
       "assembly": "GRCh38",
       "licensePolicy": "user-supplied-license"
+    }
+  ],
+  "services": [
+    {
+      "id": "monarch-phenotype-gene-ranking",
+      "provider": "Monarch Initiative",
+      "purpose": "Consent-gated online phenotype-to-gene semantic-similarity ranking",
+      "apiUrl": "https://api.monarchinitiative.org/v3/api/semsim/search",
+      "providerUrl": "https://monarchinitiative.org/",
+      "timeoutSeconds": 45,
+      "maxResults": 50
     }
   ],
   "profiles": [
@@ -375,7 +397,7 @@
       "assembly": "GRCh38",
       "delivery": "stream-cache",
       "adapterContract": "annocat-cadd-v1",
-      "manifestRef": null,
+      "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
         "manifestRef": "config/supplementary-source-fields.json",
         "contractId": "cadd-fastvep-fields-v1"
@@ -423,7 +445,7 @@
       "assembly": "GRCh38",
       "delivery": "stream-cache",
       "adapterContract": "annocat-spliceai-v1",
-      "manifestRef": null,
+      "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
         "manifestRef": "config/supplementary-source-fields.json",
         "contractId": "spliceai-fastvep-fields-v1"
@@ -464,6 +486,28 @@
         "sizeCheckedAt": "2026-07-16T20:00:00-04:00",
         "checksum": null,
         "resolver": null
+      }
+    },
+    {
+      "id": "hpo",
+      "assembly": "Assembly independent",
+      "delivery": "knowledge-cache",
+      "adapterContract": "annocat-hpo-phenotype-v1",
+      "manifestRef": "config/hpo-assets.json",
+      "manifestRole": "bootstrap-fallback",
+      "release": {
+        "version": "latest",
+        "policy": "rolling",
+        "artifactId": "human-phenotype-ontology:latest",
+        "primaryUrl": "https://github.com/obophenotype/human-phenotype-ontology/releases/latest",
+        "filename": "hpo-assets",
+        "downloadBytes": 48372406,
+        "archiveFormat": "release-assets",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-23T00:00:00-04:00",
+        "checksum": null,
+        "resolver": "github-hpo-release-assets",
+        "resolverApiUrl": "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest"
       }
     }
   ]

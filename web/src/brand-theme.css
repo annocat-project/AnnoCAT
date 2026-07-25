@@ -223,6 +223,10 @@ code, kbd, samp, pre { font-family: var(--font-family-code); }
   letter-spacing: -.035em;
 }
 .brand strong span, .setup-wordmark span { color: var(--blue); }
+@media(min-width:851px) {
+  /* Align the wordmark with regular page headings without moving the navigation. */
+  body:not(:has(#results.active-page)) .sidebar>.brand { transform: translateY(24px); }
+}
 .sidebar nav { gap: 6px; }
 .nav-item {
   display: flex;
@@ -827,7 +831,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   grid-template-columns: auto minmax(0, 1fr);
   grid-template-rows: 16px 24px;
   min-width: 0;
-  align-items: center;
+  align-items: baseline;
   column-gap: 12px;
   row-gap: 4px;
   overflow: hidden;
@@ -1202,17 +1206,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.annocat-results-ui #results .population-af-summary dd b {
+.annocat-results-ui #results .population-af-summary .population-af-value {
   overflow: hidden;
   font-size: 11px;
+  font-weight: var(--font-weight-medium);
   text-overflow: ellipsis;
 }
-.annocat-results-ui #results .population-af-summary dd b.tone-reassuring { color: var(--color-status-success); }
-.annocat-results-ui #results .population-af-summary dd b.tone-informative { color: var(--color-status-info); }
-.annocat-results-ui #results .population-af-summary dd b.tone-missing { color: var(--color-status-missing); }
-.annocat-results-ui #results .population-af-summary dd strong.tone-reassuring { color: var(--color-status-success); }
-.annocat-results-ui #results .population-af-summary dd strong.tone-informative { color: var(--color-status-info); }
-.annocat-results-ui #results .population-af-summary dd strong.tone-missing { color: var(--color-status-missing); }
+.annocat-results-ui #results .population-af-summary .population-af-group-value { font-weight: inherit; }
+.annocat-results-ui #results .population-af-summary .tone-reassuring { color: var(--color-status-success); }
+.annocat-results-ui #results .population-af-summary .tone-informative { color: var(--color-status-info); }
+.annocat-results-ui #results .population-af-summary .tone-missing { color: var(--color-status-missing); }
 .annocat-results-ui #results .prediction-summary { padding: 7px 9px; }
 .annocat-results-ui #results .prediction-summary dd { margin-top: 4px; }
 .annocat-results-ui #results .prediction-summary-bar {
@@ -1355,6 +1358,49 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   gap: 0 24px;
   margin: 0;
   padding: 0 11px 9px;
+}
+.annocat-results-ui #results .clinical-population-section [data-evidence-group="population"] .population-summary-list {
+  display: block;
+  padding: 0 11px 8px;
+  background: var(--color-surface);
+}
+.annocat-results-ui #results .population-summary-row {
+  width: 100%;
+  cursor: help;
+  background: var(--color-surface);
+}
+.annocat-results-ui #results .population-breakdown {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--color-border-subtle);
+  border-radius: 0;
+  background: var(--color-surface);
+}
+.annocat-results-ui #results .population-breakdown>summary {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 11px;
+  background: var(--color-surface-subtle);
+}
+.annocat-results-ui #results .population-breakdown>summary strong {
+  color: var(--color-text-primary);
+  font-size: 11px;
+  font-weight: var(--font-weight-medium);
+}
+.annocat-results-ui #results .population-breakdown[open]>summary { border-bottom: 1px solid var(--color-border-subtle); }
+.annocat-results-ui #results .population-breakdown .annotation-field {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+.annocat-results-ui #results .population-breakdown .annotation-field small {
+  color: var(--color-status-info);
+  font-size: 9px;
+  font-weight: var(--font-weight-medium);
 }
 .annocat-results-ui #results .key-evidence-empty { padding: 5px 0 4px; }
 .annocat-results-ui #results .transcript-context-body { padding: 10px 11px; }
@@ -1830,6 +1876,7 @@ main { margin-left: var(--annocat-sidebar-width); transition: margin-left .2s ea
 
 @media(max-width:850px) {
   .about-nav-button { margin-top: auto; }
+  .sidebar nav { grid-template-columns: minmax(0, 1fr); }
   .sidebar, .annocat-results-ui body:has(#results.active-page) .sidebar {
     position: fixed;
     inset: 0 auto 0 0;

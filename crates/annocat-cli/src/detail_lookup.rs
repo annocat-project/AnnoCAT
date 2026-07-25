@@ -576,8 +576,8 @@ fn groups_for_record(file: &IndexedFile, record_number: i64) -> Result<Vec<RowGr
         .iter()
         .take_while(|group| group.first_record <= record_number)
         .filter(|group| record_number <= group.last_record)
-        .cloned()
         .take(MAX_GROUPS_PER_LOOKUP + 1)
+        .cloned()
         .collect::<Vec<_>>();
     if groups.len() > MAX_GROUPS_PER_LOOKUP {
         return Err("detail locator matched too many row groups".into());

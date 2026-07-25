@@ -57,7 +57,9 @@ pub fn create_with_display_name(
     let manifest = read_run_manifest(run_directory)?;
     let report_kind = manifest.report_kind.as_deref().unwrap_or("annotation");
     if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
-        return Err(format!("completed run has unsupported report kind: {report_kind}"));
+        return Err(format!(
+            "completed run has unsupported report kind: {report_kind}"
+        ));
     }
     let display_name = display_name.unwrap_or(&manifest.name).trim();
     if display_name.is_empty()
@@ -176,7 +178,8 @@ fn read_run_manifest(run_directory: &Path) -> Result<RunManifest, String> {
     )
     .map_err(|error| format!("invalid completed run manifest: {error}"))?;
     if manifest.schema_version != 1
-        || manifest.canonical_schema_version != 1
+        || !(1..=annocat_core::RESULT_SCHEMA_VERSION as u32)
+            .contains(&manifest.canonical_schema_version)
         || manifest.state != "completed"
     {
         return Err("run is not a supported completed AnnoCAT result".into());

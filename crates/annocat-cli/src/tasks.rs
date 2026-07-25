@@ -37,8 +37,8 @@ pub struct TaskSnapshot {
 
 impl TaskSnapshot {
     pub fn is_meaningful(&self) -> bool {
-        !matches!(self.state.as_str(), "idle" | "missing")
-            && !(self.kind == "annotation" && self.state == "cancelled")
+        !(matches!(self.state.as_str(), "idle" | "missing")
+            || self.kind == "annotation" && self.state == "cancelled")
     }
 
     pub fn is_active(&self) -> bool {

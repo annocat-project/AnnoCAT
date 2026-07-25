@@ -71,6 +71,9 @@ pub fn check_normalization(
             .get() as u64;
         let reference_bases = record.reference_bases();
         for alternate in record.alternate_bases().as_ref().split(',') {
+            if !is_variant_alternate(alternate) {
+                continue;
+            }
             if limit.is_some_and(|value| summary.alleles_scanned >= value) {
                 return Ok(summary);
             }
@@ -156,11 +159,12 @@ pub fn inspect(path: &Path) -> Result<VcfSummary, String> {
             .get() as u64;
         let reference = record.reference_bases();
         let alternate_bases = record.alternate_bases();
-        let alt_values: Vec<&str> = alternate_bases.as_ref().split(',').collect();
-        if !alt_values
-            .iter()
-            .any(|alternate| is_variant_alternate(alternate))
-        {
+        let alt_values = alternate_bases
+            .as_ref()
+            .split(',')
+            .filter(|alternate| is_variant_alternate(alternate))
+            .collect::<Vec<_>>();
+        if alt_values.is_empty() {
             summary.skipped_non_variant_records += 1;
             continue;
         }
@@ -221,9 +225,9 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
             assembly = assembly_name(value).or_else(|| Some(value.to_string()));
         }
         if line.starts_with("##contig=<")
-            && let Some(value) = assembly_name(&line)
+            && let Some(value) = structured_header_attribute(&line, "assembly")
         {
-            assembly = Some(value);
+            assembly = assembly_name(value).or_else(|| Some(value.to_string()));
         }
         if line.starts_with("#CHROM\t") {
             let columns = line.split('\t').collect::<Vec<_>>();
@@ -238,7 +242,10 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
             });
         }
     }
-    Err(format!("VCF header is missing #CHROM in {}", path.display()))
+    Err(format!(
+        "VCF header is missing #CHROM in {}",
+        path.display()
+    ))
 }
 
 pub fn is_variant_alternate(value: &str) -> bool {
@@ -258,13 +265,45 @@ fn is_sequence(value: &str) -> bool {
 
 fn assembly_name(value: &str) -> Option<String> {
     let uppercase = value.to_ascii_uppercase();
-    if uppercase.contains("GRCH38") || uppercase.contains("HG38") {
+    let has_token = |candidate: &str| {
+        uppercase
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .any(|token| token == candidate)
+    };
+    if uppercase.contains("GRCH38")
+        || uppercase.contains("HG38")
+        || uppercase.contains("GCF_000001405.40")
+        || uppercase.contains("HUMAN_G1K_V38")
+        || has_token("B38")
+        || has_token("HS38")
+        || has_token("HS38DH")
+        || uppercase.trim() == "38"
+    {
         Some("GRCh38".into())
-    } else if uppercase.contains("GRCH37") || uppercase.contains("HG19") {
+    } else if uppercase.contains("GRCH37")
+        || uppercase.contains("HG19")
+        || uppercase.contains("GCF_000001405.25")
+        || uppercase.contains("HUMAN_G1K_V37")
+        || has_token("B37")
+        || has_token("HS37D5")
+        || has_token("NCBI37")
+        || uppercase.trim() == "37"
+    {
         Some("GRCh37".into())
     } else {
         None
     }
+}
+
+fn structured_header_attribute<'a>(line: &'a str, wanted: &str) -> Option<&'a str> {
+    let attributes = line.strip_prefix("##contig=<")?.strip_suffix('>')?;
+    attributes.split(',').find_map(|attribute| {
+        let (key, value) = attribute.split_once('=')?;
+        key.trim()
+            .eq_ignore_ascii_case(wanted)
+            .then(|| value.trim().trim_matches('"'))
+            .filter(|value| !value.is_empty())
+    })
 }
 
 #[cfg(test)]
@@ -292,6 +331,62 @@ mod tests {
         assert_eq!(summary.source_records, 4);
         assert_eq!(summary.skipped_non_variant_records, 2);
         assert_eq!(summary.records, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn header_inspection_recognizes_common_human_assembly_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-assembly-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let cases = [
+            ("##contig=<ID=1,assembly=b37,length=249250621>", "GRCh37"),
+            ("##reference=hs37d5.fa", "GRCh37"),
+            ("##reference=human_g1k_v37.fasta", "GRCh37"),
+            ("##contig=<ID=1,assembly=b38,length=248956422>", "GRCh38"),
+            ("##reference=GRCh38.p14", "GRCh38"),
+        ];
+        for (index, (declaration, expected)) in cases.into_iter().enumerate() {
+            let path = root.join(format!("input-{index}.vcf"));
+            std::fs::write(
+                &path,
+                format!(
+                    "##fileformat=VCFv4.2\n{declaration}\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                inspect_header(&path).unwrap().assembly.as_deref(),
+                Some(expected)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn contig_metadata_does_not_treat_unrelated_b37_text_as_an_assembly() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-metadata-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input.vcf");
+        std::fs::write(
+            &path,
+            b"##fileformat=VCFv4.2\n##contig=<ID=1,length=249250621,md5=aaab37ccc>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+        .unwrap();
+        assert_eq!(inspect_header(&path).unwrap().assembly, None);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

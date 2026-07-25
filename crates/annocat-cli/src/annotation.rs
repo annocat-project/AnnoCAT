@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static BATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+const PERFORMANCE_FILE: &str = "annotation-performance.json";
+const PERFORMANCE_PROFILE_ENV: &str = "ANNOCAT_PROFILE_ANNOTATION";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -87,6 +89,8 @@ pub struct RecoveryRequest {
     pub source_ids: Vec<String>,
     #[serde(default)]
     pub include_annotated_vcf: bool,
+    #[serde(default)]
+    pub confirm_grch38: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +127,249 @@ struct SourceBinding {
     assembly: String,
     selected_schema: String,
     chromosomes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StagePerformance {
+    stage: String,
+    wall_time_ms: f64,
+    records: u64,
+    input_bytes: u64,
+    output_bytes: u64,
+    records_per_second: f64,
+    input_mib_per_second: f64,
+    output_mib_per_second: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_time_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    average_cpu_cores: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_read_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_write_bytes: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PipelinePerformance {
+    run_id: String,
+    diagnostic_profiling: bool,
+    stages: Vec<StagePerformance>,
+}
+
+impl PipelinePerformance {
+    fn new(run_id: &str) -> Self {
+        Self {
+            run_id: run_id.into(),
+            diagnostic_profiling: diagnostic_profiling_enabled(),
+            stages: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, stage: StagePerformance) {
+        let process_usage = stage.cpu_time_ms.map_or_else(String::new, |cpu_time_ms| {
+            format!(
+                ", CPU {cpu_time_ms:.1} ms ({:.2} average cores), process I/O {} read / {} written",
+                stage.average_cpu_cores.unwrap_or(0.0),
+                stage.process_read_bytes.unwrap_or(0),
+                stage.process_write_bytes.unwrap_or(0)
+            )
+        });
+        crate::terminal_log(
+            "performance",
+            format!(
+                "{} {}: {:.1} ms, {:.1} records/s, {:.1} MiB/s output{}",
+                self.run_id,
+                stage.stage,
+                stage.wall_time_ms,
+                stage.records_per_second,
+                stage.output_mib_per_second,
+                process_usage
+            ),
+        );
+        self.stages.push(stage);
+    }
+
+    fn persist(&self, directory: &Path) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1,
+            "runId": self.run_id,
+            "generatedAt": current_timestamp(),
+            "diagnosticProfiling": self.diagnostic_profiling,
+            "metricSemantics": {
+                "wallTime": "Elapsed wall-clock time measured by AnnoCAT",
+                "processIo": "Process I/O transfer counters; bytes may be served by the operating-system cache",
+                "averageCpuCores": "CPU time divided by wall time; values can exceed 1 for parallel work"
+            },
+            "stages": self.stages
+        }))
+        .map_err(|error| format!("cannot serialize annotation performance data: {error}"))?;
+        super::library_metadata::atomic_write(&directory.join(PERFORMANCE_FILE), &bytes)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessUsageSnapshot {
+    cpu_100ns: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
+struct StageMeasurement {
+    started_at: Instant,
+    usage: Option<ProcessUsageSnapshot>,
+}
+
+impl StageMeasurement {
+    fn current(diagnostic_profiling: bool) -> Self {
+        Self {
+            started_at: Instant::now(),
+            usage: diagnostic_profiling.then(current_process_usage).flatten(),
+        }
+    }
+
+    fn child(started_at: Instant, diagnostic_profiling: bool, child: &std::process::Child) -> Self {
+        Self {
+            started_at,
+            usage: diagnostic_profiling
+                .then(|| child_process_usage(child))
+                .flatten(),
+        }
+    }
+
+    fn finish_current(
+        self,
+        stage: &str,
+        records: u64,
+        input_bytes: u64,
+        output_bytes: u64,
+    ) -> StagePerformance {
+        let end_usage = self.usage.and_then(|_| current_process_usage());
+        self.finish(stage, records, input_bytes, output_bytes, end_usage)
+    }
+
+    fn finish_child(
+        self,
+        stage: &str,
+        records: u64,
+        input_bytes: u64,
+        output_bytes: u64,
+        child: &std::process::Child,
+    ) -> StagePerformance {
+        let end_usage = self.usage.and_then(|_| child_process_usage(child));
+        self.finish(stage, records, input_bytes, output_bytes, end_usage)
+    }
+
+    fn finish(
+        self,
+        stage: &str,
+        records: u64,
+        input_bytes: u64,
+        output_bytes: u64,
+        end_usage: Option<ProcessUsageSnapshot>,
+    ) -> StagePerformance {
+        let elapsed = self.started_at.elapsed();
+        let seconds = elapsed.as_secs_f64();
+        let usage_delta = self.usage.zip(end_usage).map(|(start, end)| {
+            (
+                end.cpu_100ns.saturating_sub(start.cpu_100ns),
+                end.read_bytes.saturating_sub(start.read_bytes),
+                end.write_bytes.saturating_sub(start.write_bytes),
+            )
+        });
+        let cpu_time_ms = usage_delta.map(|(cpu_100ns, _, _)| cpu_100ns as f64 / 10_000.0);
+        StagePerformance {
+            stage: stage.into(),
+            wall_time_ms: seconds * 1_000.0,
+            records,
+            input_bytes,
+            output_bytes,
+            records_per_second: rate(records, seconds),
+            input_mib_per_second: mib_rate(input_bytes, seconds),
+            output_mib_per_second: mib_rate(output_bytes, seconds),
+            cpu_time_ms,
+            average_cpu_cores: cpu_time_ms
+                .filter(|_| seconds > 0.0)
+                .map(|milliseconds| milliseconds / 1_000.0 / seconds),
+            process_read_bytes: usage_delta.map(|(_, read_bytes, _)| read_bytes),
+            process_write_bytes: usage_delta.map(|(_, _, write_bytes)| write_bytes),
+        }
+    }
+}
+
+fn rate(value: u64, seconds: f64) -> f64 {
+    if seconds > 0.0 {
+        value as f64 / seconds
+    } else {
+        0.0
+    }
+}
+
+fn mib_rate(bytes: u64, seconds: f64) -> f64 {
+    rate(bytes, seconds) / (1024.0 * 1024.0)
+}
+
+fn diagnostic_profiling_enabled() -> bool {
+    std::env::var(PERFORMANCE_PROFILE_ENV).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+#[cfg(windows)]
+fn current_process_usage() -> Option<ProcessUsageSnapshot> {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    process_usage(unsafe { GetCurrentProcess() })
+}
+
+#[cfg(not(windows))]
+fn current_process_usage() -> Option<ProcessUsageSnapshot> {
+    None
+}
+
+#[cfg(windows)]
+fn child_process_usage(child: &std::process::Child) -> Option<ProcessUsageSnapshot> {
+    use std::os::windows::io::AsRawHandle;
+
+    process_usage(child.as_raw_handle())
+}
+
+#[cfg(not(windows))]
+fn child_process_usage(_child: &std::process::Child) -> Option<ProcessUsageSnapshot> {
+    None
+}
+
+#[cfg(windows)]
+fn process_usage(handle: std::os::windows::io::RawHandle) -> Option<ProcessUsageSnapshot> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{
+        GetProcessIoCounters, GetProcessTimes, IO_COUNTERS,
+    };
+
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let mut io = IO_COUNTERS::default();
+    let has_times =
+        unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0 };
+    let has_io = unsafe { GetProcessIoCounters(handle, &mut io) != 0 };
+    if !has_times || !has_io {
+        return None;
+    }
+    Some(ProcessUsageSnapshot {
+        cpu_100ns: filetime_100ns(kernel).saturating_add(filetime_100ns(user)),
+        read_bytes: io.ReadTransferCount,
+        write_bytes: io.WriteTransferCount,
+    })
+}
+
+#[cfg(windows)]
+fn filetime_100ns(value: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,7 +566,7 @@ pub fn start_recovery_background(
         include_annotated_vcf: request.include_annotated_vcf,
         run_mode: RunMode::Annotation,
         add_local_consequences: false,
-        confirm_grch38: false,
+        confirm_grch38: request.confirm_grch38,
     };
     validate_request(&annotation, &resources)?;
     validate_recovery_files(&request.partial_vcf, &structured_output)?;
@@ -648,6 +895,13 @@ fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(),
         return Err(format!("input VCF is missing: {}", request.input.display()));
     }
     validate_source_ids(&request.source_ids)?;
+    let assembly = annocat_core::vcf::declared_assembly(&request.input)?;
+    super::annotation_input::validate_declared_assembly(assembly.as_deref())?;
+    if assembly.is_none() && !request.confirm_grch38 {
+        return Err(
+            "the VCF header does not identify its genome build; confirm that it uses GRCh38".into(),
+        );
+    }
     if request.run_mode == RunMode::VcfReview {
         if !request.source_ids.is_empty() {
             return Err("VCF review cannot select supplemental annotation sources".into());
@@ -656,21 +910,6 @@ fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(),
             return Err(
                 "an annotated VCF is unavailable when local consequences are disabled".into(),
             );
-        }
-        match annocat_core::vcf::declared_assembly(&request.input)? {
-            Some(assembly) if assembly == "GRCh38" => {}
-            Some(assembly) => {
-                return Err(format!(
-                    "AnnoCAT supports GRCh38 VCF review; this file declares {assembly}"
-                ));
-            }
-            None if request.confirm_grch38 => {}
-            None => {
-                return Err(
-                    "the VCF header does not identify its genome build; confirm that it uses GRCh38"
-                        .into(),
-                );
-            }
         }
         if !request.add_local_consequences {
             return Ok(());
@@ -832,7 +1071,8 @@ fn execute(
     persist_current_checkpoint(staging, request, name, run_id)?;
     let output = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
-    let (source_bindings, input_summary) = run_fastvep(
+    let mut performance = PipelinePerformance::new(run_id);
+    let (source_bindings, input_summary, fastvep_performance) = run_fastvep(
         request,
         resources,
         name,
@@ -844,7 +1084,9 @@ fn execute(
         0,
         0,
         0,
+        performance.diagnostic_profiling,
     )?;
+    performance.record(fastvep_performance);
     if input_summary.records == 0 {
         return fail_staging(staging, "input VCF contains no variant records".into());
     }
@@ -862,15 +1104,19 @@ fn execute(
         current.total_records = input_summary.records;
     }
     finalize_outputs(
-        request,
-        name,
-        run_id,
-        staging,
-        final_directory,
-        &input_summary,
-        &output,
-        &structured_output,
+        FinalizeContext {
+            request,
+            name,
+            run_id,
+            staging,
+            resources,
+            final_directory,
+            input_summary: &input_summary,
+            output: &output,
+            structured_output: &structured_output,
+        },
         source_bindings,
+        performance,
     )
 }
 
@@ -1029,6 +1275,7 @@ fn execute_recovery(
 ) -> Result<(u64, u64), String> {
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
     persist_current_checkpoint(staging, request, name, run_id)?;
+    let mut performance = PipelinePerformance::new(run_id);
 
     set_phase("recovery-scan", "Scanning the interrupted annotated VCF");
     let mut recovered_vcf = crate::annotation_recovery::scan_vcf(partial_vcf, |progress| {
@@ -1161,7 +1408,7 @@ fn execute_recovery(
     let continuation_structured = staging.join("continuation.ndjson");
     let source_bindings = if remaining_records > 0 {
         check_cancel(staging)?;
-        let (bindings, continuation_summary) = run_fastvep(
+        let (bindings, continuation_summary, fastvep_performance) = run_fastvep(
             request,
             resources,
             name,
@@ -1173,7 +1420,9 @@ fn execute_recovery(
             recovered_vcf.records,
             recovered_vcf.valid_bytes,
             input_summary.records,
+            performance.diagnostic_profiling,
         )?;
+        performance.record(fastvep_performance);
         if continuation_summary.records != remaining_records {
             return Err(format!(
                 "recovery streamed {} remaining variants but expected {remaining_records}",
@@ -1236,15 +1485,19 @@ fn execute_recovery(
     let _ = fs::remove_file(&continuation_structured);
     check_cancel(staging)?;
     finalize_outputs(
-        request,
-        name,
-        run_id,
-        staging,
-        final_directory,
-        &input_summary,
-        &output,
-        &structured_output,
+        FinalizeContext {
+            request,
+            name,
+            run_id,
+            staging,
+            resources,
+            final_directory,
+            input_summary: &input_summary,
+            output: &output,
+            structured_output: &structured_output,
+        },
         source_bindings,
+        performance,
     )
 }
 
@@ -1261,7 +1514,15 @@ fn run_fastvep(
     baseline_records: u64,
     baseline_bytes: u64,
     total_records: u64,
-) -> Result<(Vec<SourceBinding>, annocat_core::vcf::VcfSummary), String> {
+    diagnostic_profiling: bool,
+) -> Result<
+    (
+        Vec<SourceBinding>,
+        annocat_core::vcf::VcfSummary,
+        StagePerformance,
+    ),
+    String,
+> {
     let executable = super::fastvep::readiness()
         .executable
         .ok_or("fastVEP executable disappeared")?;
@@ -1272,6 +1533,7 @@ fn run_fastvep(
     let (provider_directory, source_bindings) =
         compose_provider_set(resources, run_id, &request.source_ids)?;
     set_phase("annotating", "fastVEP is annotating variants");
+    let fastvep_started_at = Instant::now();
     let mut command = Command::new(executable);
     command
         .arg("annotate")
@@ -1306,6 +1568,8 @@ fn run_fastvep(
             return Err(format!("cannot start fastVEP annotation: {error}"));
         }
     };
+    let fastvep_measurement =
+        StageMeasurement::child(fastvep_started_at, diagnostic_profiling, &child);
     let stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
     let input_path = input.to_path_buf();
     let feeder = std::thread::spawn(move || {
@@ -1377,20 +1641,55 @@ fn run_fastvep(
         );
     }
     let input_summary = input_summary?;
-    Ok((source_bindings, input_summary))
+    let input_bytes = fs::metadata(input).map(|value| value.len()).unwrap_or(0);
+    let output_bytes = fs::metadata(output)
+        .map(|value| value.len())
+        .unwrap_or(0)
+        .saturating_add(
+            fs::metadata(structured_output)
+                .map(|value| value.len())
+                .unwrap_or(0),
+        );
+    let performance = fastvep_measurement.finish_child(
+        "fastvep",
+        input_summary.records,
+        input_bytes,
+        output_bytes,
+        &child,
+    );
+    Ok((source_bindings, input_summary, performance))
+}
+
+struct FinalizeContext<'a> {
+    request: &'a AnnotationRequest,
+    name: &'a str,
+    run_id: &'a str,
+    staging: &'a Path,
+    resources: &'a Path,
+    final_directory: &'a Path,
+    input_summary: &'a annocat_core::vcf::VcfSummary,
+    output: &'a Path,
+    structured_output: &'a Path,
 }
 
 fn finalize_outputs(
-    request: &AnnotationRequest,
-    name: &str,
-    run_id: &str,
-    staging: &Path,
-    final_directory: &Path,
-    input_summary: &annocat_core::vcf::VcfSummary,
-    output: &Path,
-    structured_output: &Path,
+    context: FinalizeContext<'_>,
     source_bindings: Vec<SourceBinding>,
+    mut performance: PipelinePerformance,
 ) -> Result<(u64, u64), String> {
+    let FinalizeContext {
+        request,
+        name,
+        run_id,
+        staging,
+        resources,
+        final_directory,
+        input_summary,
+        output,
+        structured_output,
+    } = context;
+    let annotated_vcf_bytes = file_bytes(output)?;
+    let verification_measurement = StageMeasurement::current(performance.diagnostic_profiling);
     set_phase(
         "verifying",
         "Checking record counts and the dynamic CSQ schema",
@@ -1443,6 +1742,12 @@ fn finalize_outputs(
             ),
         );
     }
+    performance.record(verification_measurement.finish_current(
+        "verification",
+        input_summary.records,
+        annotated_vcf_bytes,
+        0,
+    ));
     update_indexing_progress(
         "indexing-variants",
         "Indexing variants",
@@ -1453,9 +1758,12 @@ fn finalize_outputs(
         0.0,
     );
     let parquet = staging.join("variants.parquet");
-    let canonical = match super::results::convert_vcf(
+    let variant_conversion_measurement =
+        StageMeasurement::current(performance.diagnostic_profiling);
+    let canonical = match super::results::convert_vcf_with_reference(
         output,
         &parquet,
+        &super::reference::fasta_path(resources),
         || CANCEL.load(Ordering::SeqCst),
         |records, _writing, output_bytes, bytes_per_second, records_per_second| {
             update_indexing_progress(
@@ -1479,6 +1787,13 @@ fn finalize_outputs(
         }
         Err(error) => return fail_staging(staging, format!("result conversion failed: {error}")),
     };
+    let output_bytes = file_bytes(&parquet)?;
+    performance.record(variant_conversion_measurement.finish_current(
+        "variant-parquet",
+        canonical.rows,
+        annotated_vcf_bytes,
+        output_bytes,
+    ));
     let consequences = staging.join("consequences.parquet");
     let evidence = staging.join("evidence.parquet");
     let field_catalog = staging.join("field-catalog.json");
@@ -1491,11 +1806,15 @@ fn finalize_outputs(
         45.0,
         0.0,
     );
-    let structured = match super::results::convert_structured(
+    let structured_input_bytes = file_bytes(structured_output)?;
+    let structured_conversion_measurement =
+        StageMeasurement::current(performance.diagnostic_profiling);
+    let structured = match super::results::convert_structured_with_reference(
         structured_output,
         &consequences,
         &evidence,
         &field_catalog,
+        &super::reference::fasta_path(resources),
         || CANCEL.load(Ordering::SeqCst),
         |records, writing, output_bytes, bytes_per_second, records_per_second| {
             let detail = if writing {
@@ -1529,6 +1848,18 @@ fn finalize_outputs(
             );
         }
     };
+    let consequences_bytes = file_bytes(&consequences)?;
+    let evidence_bytes = file_bytes(&evidence)?;
+    let field_catalog_bytes = file_bytes(&field_catalog)?;
+    let structured_result_bytes = consequences_bytes
+        .saturating_add(evidence_bytes)
+        .saturating_add(field_catalog_bytes);
+    performance.record(structured_conversion_measurement.finish_current(
+        "structured-parquet",
+        structured.records,
+        structured_input_bytes,
+        structured_result_bytes,
+    ));
     if structured.records != input_summary.records {
         return fail_staging(
             staging,
@@ -1548,13 +1879,20 @@ fn finalize_outputs(
         10.0,
         0.0,
     );
+    let indexing_measurement = StageMeasurement::current(performance.diagnostic_profiling);
     prepare_report_indexes(run_id, &parquet, &consequences, &evidence, &field_catalog)?;
+    let detail_index_bytes = fs::metadata(staging.join("detail-row-groups.json"))
+        .map(|value| value.len())
+        .unwrap_or(0);
+    performance.record(indexing_measurement.finish_current(
+        "report-indexing",
+        input_summary.records,
+        output_bytes.saturating_add(structured_result_bytes),
+        detail_index_bytes,
+    ));
     check_cancel(staging)?;
     set_phase("publishing", "Publishing result files");
-    let output_bytes = file_bytes(&parquet)?;
-    let consequences_bytes = file_bytes(&consequences)?;
-    let evidence_bytes = file_bytes(&evidence)?;
-    let field_catalog_bytes = file_bytes(&field_catalog)?;
+    let publishing_measurement = StageMeasurement::current(performance.diagnostic_profiling);
     let annotated_vcf = if request.include_annotated_vcf {
         Some((file_bytes(output)?, super::fastvep::sha256_file(output)?))
     } else {
@@ -1648,6 +1986,18 @@ fn finalize_outputs(
     .map_err(|error| error.to_string())?;
     fs::rename(staging, final_directory)
         .map_err(|error| format!("cannot publish completed run: {error}"))?;
+    performance.record(publishing_measurement.finish_current(
+        "publishing",
+        input_summary.records,
+        canonical_result_bytes,
+        canonical_result_bytes.saturating_add(detail_index_bytes),
+    ));
+    if let Err(error) = performance.persist(final_directory) {
+        crate::terminal_log(
+            "performance",
+            format!("{run_id} could not write {PERFORMANCE_FILE}: {error}"),
+        );
+    }
     Ok((canonical.rows, output_bytes))
 }
 
@@ -2347,6 +2697,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stage_performance_reports_rates_and_optional_process_counters() {
+        let measurement = StageMeasurement {
+            started_at: Instant::now() - Duration::from_millis(100),
+            usage: Some(ProcessUsageSnapshot {
+                cpu_100ns: 10_000,
+                read_bytes: 100,
+                write_bytes: 200,
+            }),
+        };
+        let stage = measurement.finish(
+            "fixture",
+            50,
+            1024 * 1024,
+            2 * 1024 * 1024,
+            Some(ProcessUsageSnapshot {
+                cpu_100ns: 510_000,
+                read_bytes: 1_100,
+                write_bytes: 2_200,
+            }),
+        );
+
+        assert_eq!(stage.stage, "fixture");
+        assert!((490.0..=510.0).contains(&stage.records_per_second));
+        assert_eq!(stage.cpu_time_ms, Some(50.0));
+        assert!(stage.average_cpu_cores.is_some_and(|value| value > 0.45));
+        assert_eq!(stage.process_read_bytes, Some(1_000));
+        assert_eq!(stage.process_write_bytes, Some(2_000));
+    }
+
+    #[test]
+    fn stage_performance_omits_disabled_diagnostic_fields() {
+        let stage = StageMeasurement {
+            started_at: Instant::now() - Duration::from_millis(1),
+            usage: None,
+        }
+        .finish("fixture", 1, 1, 1, None);
+        let value = serde_json::to_value(stage).unwrap();
+
+        assert!(value.get("cpuTimeMs").is_none());
+        assert!(value.get("averageCpuCores").is_none());
+        assert!(value.get("processReadBytes").is_none());
+        assert!(value.get("processWriteBytes").is_none());
+    }
+
+    #[test]
     fn names_are_safe_and_bounded() {
         assert_eq!(safe_name("HG002 / chr 22"), "HG002---chr-22");
         assert_eq!(safe_name("***"), "annotation");
@@ -2459,6 +2854,41 @@ mod tests {
         );
         request.confirm_grch38 = true;
         validate_request(&request, &root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn annotation_rejects_a_declared_non_grch38_assembly_before_engine_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-annotation-assembly-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("grch37.vcf");
+        fs::write(
+            &input,
+            "##fileformat=VCFv4.2\n##contig=<ID=1,assembly=b37,length=249250621>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t100\t.\tA\tG\t.\tPASS\t.\n",
+        )
+        .unwrap();
+        let request = AnnotationRequest {
+            input,
+            name: None,
+            output_directory: None,
+            source_ids: Vec::new(),
+            include_annotated_vcf: false,
+            run_mode: RunMode::Annotation,
+            add_local_consequences: false,
+            confirm_grch38: false,
+        };
+        assert!(
+            validate_request(&request, &root)
+                .unwrap_err()
+                .contains("does not support GRCh37, b37, or hg19")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

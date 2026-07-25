@@ -1,4 +1,7 @@
-use annocat_core::{demo_variants_json, practical_resource_plan_json, profiles_json, sources_json};
+use annocat_core::{
+    demo_variants_json, evidence_calibrations_json, practical_resource_plan_json, profiles_json,
+    sources_json,
+};
 use serde::Serialize;
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
@@ -246,6 +249,61 @@ fn installed_resource_versions(resource_id: &str, resources: &std::path::Path) -
     versions
 }
 
+fn resource_chromosomes(resource_id: &str) -> Vec<String> {
+    if resource_id == "dbnsfp" {
+        preparation::pinned_dbnsfp_manifest()
+            .map(|manifest| {
+                manifest
+                    .members
+                    .into_iter()
+                    .map(|member| member.chromosome)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else if resource_id == "dbsnp" {
+        (1..=22)
+            .map(|chromosome| chromosome.to_string())
+            .chain(["X".to_string(), "Y".to_string(), "M".to_string()])
+            .collect()
+    } else if matches!(resource_id, "gnomad" | "gnomad-genomes" | "phylop") {
+        preparation::pinned_sharded_source(resource_id)
+            .map(|source| {
+                source
+                    .shards
+                    .into_iter()
+                    .map(|shard| shard.chromosome)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else if matches!(resource_id, "cadd" | "spliceai" | "revel") {
+        (1..=22)
+            .map(|chromosome| chromosome.to_string())
+            .chain(["X".to_string(), "Y".to_string()])
+            .collect()
+    } else {
+        vec!["all".to_string()]
+    }
+}
+
+fn verified_installed_resource_versions(
+    resource_id: &str,
+    resources: &std::path::Path,
+) -> Vec<String> {
+    let chromosomes = resource_chromosomes(resource_id);
+    installed_resource_versions(resource_id, resources)
+        .into_iter()
+        .filter(|version| {
+            preparation::verified_storage_status(
+                resource_id,
+                &resources.join(resource_id).join(version),
+                &chromosomes,
+            )
+            .state
+                == "ready"
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ResourceUpdateStatus {
@@ -263,18 +321,29 @@ fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, Str
         (resolve_clinvar_release()?.version, "rolling-snapshot")
     } else if resource_id == "dbsnp" {
         (resolve_dbsnp_release()?.version, "rolling-snapshot")
+    } else if resource_id == "hpo" {
+        (
+            phenotype::resolve_latest_asset_manifest()?
+                .release()
+                .to_owned(),
+            "rolling-snapshot",
+        )
     } else if resource_id == "ensembl-gff3" {
         ("115".to_string(), "compatibility-pinned")
     } else {
         let release = resource_release(resource_id)?;
         (release.version.to_string(), "catalog-pinned")
     };
-    let installed_versions = if resource_id == "ensembl-gff3" {
+    let installed_versions = if resource_id == "hpo" {
+        phenotype::installed_versions(&paths.resources)
+    } else if resource_id == "ensembl-gff3" {
         if transcript::is_ready(&paths.resources) {
             vec!["115".to_string()]
         } else {
             Vec::new()
         }
+    } else if is_rolling_resource(resource_id) {
+        verified_installed_resource_versions(resource_id, &paths.resources)
     } else {
         installed_resource_versions(resource_id, &paths.resources)
     };
@@ -305,6 +374,7 @@ mod fastvep;
 mod http_client;
 mod install_queue;
 mod library_metadata;
+mod phenotype;
 mod preparation;
 mod reference;
 mod report_import;
@@ -1276,6 +1346,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         || path.ends_with("/name")
         || path.ends_with("/share")
         || path.ends_with("/export")
+        || path.ends_with("/phenotypes/rank")
+        || path.ends_with("/phenotypes/explore")
+        || (path.ends_with("/phenotypes") && method == "POST")
         || (path.ends_with("/config") && method == "POST")
         || (path.ends_with("/notes") && method == "POST")
         || matches!(
@@ -1673,7 +1746,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 }),
             "start" if method == "POST" => match set_preparation_concurrency(query)
                 .and_then(|_| set_source_input_mode(query))
-                .and_then(|_| enqueue_preparation(resource_id))
+                .and_then(|_| update_install_requested(query))
+                .and_then(|update| enqueue_preparation(resource_id, update))
             {
                 Ok(()) => ("202 Accepted", "{\"accepted\":true}".into()),
                 Err(error) => (
@@ -1831,6 +1905,129 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let (status, body) = match response {
             Ok(Some(summary)) => ("200 OK", serde_json::to_string(&summary).unwrap()),
             Ok(None) => ("200 OK", "{\"path\":null}".into()),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if path == "/api/phenotypes/terms" {
+        let response = portable_paths().and_then(|paths| {
+            let search_query = query_parameter(query, "q").transpose()?.unwrap_or_default();
+            let limit = query_parameter_u64(query, "limit").unwrap_or(20) as usize;
+            let terms = phenotype::search_terms(&paths.resources, &search_query, limit)?;
+            Ok(serde_json::json!({
+                "hpoRelease": phenotype::hpo_release(&paths.resources)?,
+                "terms": terms
+            })
+            .to_string())
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/phenotypes/explore"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let result = completed_run_result(&paths.runs, run_id)?;
+            let consequences = completed_run_file(
+                &paths.runs,
+                run_id,
+                "consequencesFile",
+                "consequences.parquet",
+                "parquet",
+            )?;
+            let request = if request_body.is_empty() {
+                phenotype::ExploreRequest::default()
+            } else {
+                serde_json::from_slice::<phenotype::ExploreRequest>(request_body)
+                    .map_err(|error| format!("invalid phenotype exploration request: {error}"))?
+            };
+            phenotype::explore_report(
+                &paths.resources,
+                &paths.runs,
+                run_id,
+                &result,
+                Some(&consequences),
+                request,
+            )
+            .and_then(|exploration| {
+                serde_json::to_string(&exploration).map_err(|error| error.to_string())
+            })
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/phenotypes/rank"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let result = completed_run_result(&paths.runs, run_id)?;
+            let consequences = completed_run_file(
+                &paths.runs,
+                run_id,
+                "consequencesFile",
+                "consequences.parquet",
+                "parquet",
+            )?;
+            let request = serde_json::from_slice::<phenotype::RankRequest>(request_body)
+                .map_err(|error| format!("invalid phenotype comparison request: {error}"))?;
+            phenotype::rank(
+                &paths.resources,
+                &paths.runs,
+                run_id,
+                &result,
+                Some(&consequences),
+                request,
+            )
+            .and_then(|profile| phenotype::profile_json(&paths.resources, &profile, &result))
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/phenotypes"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let result = completed_run_result(&paths.runs, run_id)?;
+            let profile = if method == "GET" {
+                phenotype::load(&paths.runs, run_id)?
+            } else if method == "POST" {
+                let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
+                    .map_err(|error| format!("invalid phenotype profile request: {error}"))?;
+                phenotype::update(&paths.resources, &paths.runs, run_id, request)?
+            } else {
+                return Err("GET or POST required".into());
+            };
+            phenotype::profile_json(&paths.resources, &profile, &result)
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
             Err(error) => (
                 "409 Conflict",
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
@@ -2184,6 +2381,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             web_asset("src/brand-theme.css", BRAND_THEME_CSS),
         ),
         "/api/sources" => ("200 OK", "application/json", sources_json()),
+        "/api/evidence-calibrations" => (
+            "200 OK",
+            "application/json",
+            evidence_calibrations_json().into(),
+        ),
         "/api/profiles" => ("200 OK", "application/json", profiles_json()),
         "/api/resources/plan" => ("200 OK", "application/json", practical_resource_plan_json()),
         "/api/resources/status" => match resources_status() {
@@ -2341,11 +2543,16 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             ),
         },
         "/api/pick-recovery-input" => match pick_recovery_input() {
-            Ok(Some(path)) => (
-                "200 OK",
-                "application/json",
-                serde_json::json!({"path": path}).to_string(),
-            ),
+            Ok(Some(path)) => {
+                let file = selected_vcf_summaries(std::slice::from_ref(&path))
+                    .into_iter()
+                    .next();
+                (
+                    "200 OK",
+                    "application/json",
+                    serde_json::json!({"path": path, "file": file}).to_string(),
+                )
+            }
             Ok(None) => ("200 OK", "application/json", "{\"path\":null}".to_string()),
             Err(error) => (
                 "500 Internal Server Error",
@@ -2805,39 +3012,50 @@ fn managed_preparation_status(
     let Some(release) = annocat_core::source_catalog::download_release(resource_id) else {
         return preparation::live_status(resource_id);
     };
-    let chromosomes = if resource_id == "dbnsfp" {
-        preparation::pinned_dbnsfp_manifest()
-            .map(|manifest| {
-                manifest
-                    .members
-                    .into_iter()
-                    .map(|member| member.chromosome)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    } else if resource_id == "dbsnp" {
-        (1..=22)
-            .map(|chromosome| chromosome.to_string())
-            .chain(["X".to_string(), "Y".to_string(), "M".to_string()])
-            .collect()
-    } else if matches!(resource_id, "gnomad" | "gnomad-genomes" | "phylop") {
-        preparation::pinned_sharded_source(resource_id)
-            .map(|source| {
-                source
-                    .shards
-                    .into_iter()
-                    .map(|shard| shard.chromosome)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    } else if matches!(resource_id, "cadd" | "spliceai" | "revel") {
-        (1..=22)
-            .map(|chromosome| chromosome.to_string())
-            .chain(["X".to_string(), "Y".to_string()])
-            .collect()
-    } else {
-        vec!["all".to_string()]
-    };
+    if resource_id == "hpo" {
+        let live = preparation::live_status(resource_id);
+        if live.state != "idle" {
+            return live;
+        }
+        if let Some(ready) = phenotype::installed_status(resources) {
+            return preparation::LivePreparationState {
+                resource_id: Some(resource_id.into()),
+                state: "ready".into(),
+                phase: "ready".into(),
+                network_bytes: ready.asset_bytes,
+                expected_network_bytes: ready.asset_bytes,
+                percent: 100.0,
+                parsed_records: ready.disease_count as u64,
+                prepared_bytes: ready.asset_bytes,
+                completed_chromosomes: 1,
+                remaining_chromosomes: 0,
+                detail: format!(
+                    "Indexed {} HPO terms and {} disease profiles",
+                    ready.term_count, ready.disease_count
+                ),
+                ..preparation::LivePreparationState::default()
+            };
+        }
+        if let Some(position) = install_queue::position(resource_id, preparation::running_count()) {
+            return preparation::LivePreparationState {
+                resource_id: Some(resource_id.into()),
+                state: "queued".into(),
+                phase: "queued".into(),
+                expected_network_bytes: release.download_bytes.unwrap_or(0),
+                remaining_chromosomes: 1,
+                detail: format!("Waiting in the installation queue (position {position})"),
+                ..preparation::LivePreparationState::default()
+            };
+        }
+        return preparation::LivePreparationState {
+            resource_id: Some(resource_id.into()),
+            expected_network_bytes: release.download_bytes.unwrap_or(0),
+            remaining_chromosomes: 1,
+            detail: "Human Phenotype Ontology data is not installed".into(),
+            ..preparation::LivePreparationState::default()
+        };
+    }
+    let chromosomes = resource_chromosomes(resource_id);
     if is_rolling_resource(resource_id) {
         let live = preparation::live_status(resource_id);
         if live.state != "idle" {
@@ -2898,9 +3116,16 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
         ));
     }
     for resource_id in actionable {
-        enqueue_preparation(resource_id)?;
+        enqueue_preparation(resource_id, false)?;
     }
     Ok(())
+}
+
+fn update_install_requested(query: &str) -> Result<bool, String> {
+    Ok(matches!(
+        query_parameter(query, "update").transpose()?.as_deref(),
+        Some("true")
+    ))
 }
 
 fn set_preparation_concurrency(query: &str) -> Result<usize, String> {
@@ -2922,14 +3147,14 @@ fn set_source_input_mode(query: &str) -> Result<preparation::SourceInputMode, St
     Ok(mode)
 }
 
-fn enqueue_preparation(resource_id: &str) -> Result<(), String> {
+fn enqueue_preparation(resource_id: &str, update: bool) -> Result<(), String> {
     if !preparation_available(resource_id) {
         return Err(format!(
             "resource '{resource_id}' has no verified streaming plan"
         ));
     }
     let paths = portable_paths()?;
-    if managed_preparation_status(resource_id, &paths.resources).state == "ready" {
+    if !update && managed_preparation_status(resource_id, &paths.resources).state == "ready" {
         return Ok(());
     }
     preparation::forget_live(resource_id);
@@ -2959,7 +3184,9 @@ fn start_preparation_queue_worker() {
                 install_queue::finish(&resource_id);
                 continue;
             };
-            if managed_preparation_status(&resource_id, &paths.resources).state == "ready" {
+            if managed_preparation_status(&resource_id, &paths.resources).state == "ready"
+                && !is_rolling_resource(&resource_id)
+            {
                 install_queue::finish(&resource_id);
                 continue;
             }
@@ -2994,10 +3221,19 @@ fn catalog_source_type(resource_id: &str) -> Option<&'static str> {
 }
 
 fn preparation_available(resource_id: &str) -> bool {
-    resource_id == "dbnsfp" || catalog_source_type(resource_id).is_some()
+    matches!(resource_id, "dbnsfp" | "hpo") || catalog_source_type(resource_id).is_some()
 }
 
 fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
+    if resource_id == "hpo" {
+        let resources = portable_paths()?.resources;
+        let manifest = phenotype::resolve_latest_asset_manifest()?;
+        let resource_root = resources.join("hpo").join(manifest.release());
+        return preparation::start_hpo_live(preparation::HpoLiveRequest {
+            resource_root,
+            manifest,
+        });
+    }
     let release = resource_release(resource_id).map_err(|_| {
         format!("resource '{resource_id}' has no pinned per-object preparation metadata")
     })?;
@@ -4475,15 +4711,18 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn data_sources_use_one_download_list_and_the_shared_task_projection() {
+    fn data_sources_do_not_duplicate_download_tasks() {
         let html = include_str!("../../../web/index.html");
         let app = include_str!("../../../web/src/app.js");
         let theme = include_str!("../../../web/src/brand-theme.css");
-        assert!(html.contains("id=\"download-section\""));
-        assert!(html.contains("id=\"download-jobs\""));
+        assert!(!html.contains("id=\"download-section\""));
+        assert!(!html.contains("id=\"download-jobs\""));
+        assert!(html.contains("id=\"jobs-list\""));
+        assert!(html.contains("id=\"task-nav-status\""));
         assert_eq!(app.matches("$('#source-list').innerHTML=").count(), 1);
         assert!(app.contains("profile.sourceIds.map"));
-        assert!(app.contains("renderResourceTasks(lastTaskSnapshots)"));
+        assert!(!app.contains("renderResourceTasks"));
+        assert!(app.contains("const jobs=lastTaskSnapshots.map"));
         assert!(!app.contains("data-source-tasks"));
         assert!(app.contains("task.availableActions"));
         assert!(app.contains("task.throughputBytesPerSecond"));
@@ -4534,7 +4773,7 @@ mod profile_status_tests {
     }
 
     #[test]
-    #[ignore = "contacts the official NCBI release directories"]
+    #[ignore = "contacts the official rolling-release endpoints"]
     fn official_rolling_source_resolvers_return_downloadable_artifacts() {
         let clinvar = resolve_clinvar_release().expect("resolve current ClinVar release");
         assert!(clinvar.version.bytes().all(|byte| byte.is_ascii_digit()));
@@ -4551,6 +4790,11 @@ mod profile_status_tests {
         assert!(dbsnp.download_bytes > 0);
         assert!(dbsnp.index_bytes.is_some_and(|bytes| bytes > 0));
         assert!(dbsnp.index_md5.is_some());
+
+        let hpo = phenotype::resolve_latest_asset_manifest()
+            .expect("resolve current Human Phenotype Ontology release");
+        assert!(hpo.expected_bytes() > 0);
+        assert!(hpo.release().starts_with("20"));
     }
 
     #[test]
@@ -4581,7 +4825,26 @@ mod profile_status_tests {
         }
         assert!(is_rolling_resource("clinvar"));
         assert!(is_rolling_resource("dbsnp"));
+        assert!(is_rolling_resource("hpo"));
         assert!(!is_rolling_resource("cadd"));
+    }
+
+    #[test]
+    fn rolling_installed_versions_ignore_incomplete_release_directories() {
+        let resources = std::env::temp_dir().join(format!(
+            "annocat-rolling-installed-test-{}",
+            std::process::id()
+        ));
+        let release = resources.join("clinvar").join("20260724");
+        std::fs::create_dir_all(&release).unwrap();
+
+        assert_eq!(
+            installed_resource_versions("clinvar", &resources),
+            vec!["20260724".to_string()]
+        );
+        assert!(verified_installed_resource_versions("clinvar", &resources).is_empty());
+
+        std::fs::remove_dir_all(resources).unwrap();
     }
 
     #[test]
@@ -4647,6 +4910,8 @@ mod profile_status_tests {
         assert!(set_preparation_concurrency("concurrency=0").is_err());
         assert!(set_preparation_concurrency("concurrency=5").is_err());
         assert!(set_preparation_concurrency("concurrency=lots").is_err());
+        assert!(update_install_requested("concurrency=2&update=true").unwrap());
+        assert!(!update_install_requested("concurrency=2").unwrap());
         set_preparation_concurrency("concurrency=1").unwrap();
     }
 
@@ -4747,7 +5012,8 @@ mod profile_status_tests {
     fn annotation_start_failures_use_the_unified_status_surface() {
         let app = include_str!("../../../web/src/app.js");
         let html = include_str!("../../../web/index.html");
-        assert!(html.contains("id=\"global-status-button\""));
+        assert!(!html.contains("id=\"global-status-button\""));
+        assert!(html.contains("id=\"task-nav-status\""));
         assert!(html.contains("id=\"annotation-notice\""));
         assert!(app.contains("catch(error){setAnnotationStartError(error.message)}"));
         assert!(
@@ -4766,6 +5032,25 @@ mod profile_status_tests {
         assert!(app.contains("<option value=\"custom\">Custom</option>"));
         assert!(app.contains("$('#profile').value='custom'"));
         assert!(app.contains("selectedProfile()?.sourceIds.includes(id)"));
+    }
+
+    #[test]
+    fn phenotype_knowledge_source_is_not_an_annotation_wizard_source() {
+        let app = include_str!("../../../web/src/app.js");
+        let html = include_str!("../../../web/index.html");
+        assert!(app.contains(
+            "availableCatalog=orderedCatalogSources().filter(source=>source.fastvepSource&&"
+        ));
+        assert!(app.contains("role=\"combobox\""));
+        assert!(app.contains("aria-controls=\"phenotype-search-results\""));
+        assert!(app.contains("data-phenotype-sample"));
+        assert!(app.contains("sampleName:phenotypeSampleName"));
+        assert!(app.contains("disease.reportOverlap"));
+        assert!(!app.contains("disease.reportSupport"));
+        assert!(app.contains("HPO license and attribution"));
+        assert!(html.contains("HPO license and attribution terms"));
+        assert!(!app.contains("Disease hypotheses"));
+        assert!(!app.contains("plausible report genes"));
     }
 
     #[test]

@@ -161,7 +161,7 @@ fn validate_manifest(
     if manifest.package_format != "annocat-report" || manifest.package_version != 1 {
         return Err("unsupported AnnoCAT report package format".into());
     }
-    if manifest.schema_version != 1 {
+    if !(1..=annocat_core::RESULT_SCHEMA_VERSION as u32).contains(&manifest.schema_version) {
         return Err(format!(
             "unsupported AnnoCAT result schema version {}",
             manifest.schema_version
