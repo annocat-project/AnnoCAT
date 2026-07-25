@@ -751,11 +751,6 @@ const UI_COMPONENTS_JS: &str = include_str!("../../../web/src/app/ui-components.
 const VARIANT_PRESENTATION_JS: &str = include_str!("../../../web/src/app/variant-presentation.js");
 const ANNOCAT_CSS: &str = include_str!("../../../web/src/annocat.css");
 const STYLE_CSS: &str = include_str!("../../../web/src/style.css");
-const WIZARD_CSS: &str = include_str!("../../../web/src/wizard.css");
-const BATCH_CSS: &str = include_str!("../../../web/src/batch.css");
-const LIGHT_THEME_CSS: &str = include_str!("../../../web/src/light-theme.css");
-const DOWNLOADS_UI_CSS: &str = include_str!("../../../web/src/downloads-ui.css");
-const RESOURCE_LOCATION_CSS: &str = include_str!("../../../web/src/resource-location.css");
 const REPORT_SHARE_CSS: &str = include_str!("../../../web/src/report-share.css");
 const BRAND_THEME_CSS: &str = include_str!("../../../web/src/brand-theme.css");
 const FLUENT_COMPONENTS_CSS: &str = include_str!("../../../web/src/fluent-components.css");
@@ -2375,31 +2370,6 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "200 OK",
             "text/css; charset=utf-8",
             web_asset("src/style.css", STYLE_CSS),
-        ),
-        "/wizard.css" => (
-            "200 OK",
-            "text/css; charset=utf-8",
-            web_asset("src/wizard.css", WIZARD_CSS),
-        ),
-        "/batch.css" => (
-            "200 OK",
-            "text/css; charset=utf-8",
-            web_asset("src/batch.css", BATCH_CSS),
-        ),
-        "/light-theme.css" => (
-            "200 OK",
-            "text/css; charset=utf-8",
-            web_asset("src/light-theme.css", LIGHT_THEME_CSS),
-        ),
-        "/downloads-ui.css" => (
-            "200 OK",
-            "text/css; charset=utf-8",
-            web_asset("src/downloads-ui.css", DOWNLOADS_UI_CSS),
-        ),
-        "/resource-location.css" => (
-            "200 OK",
-            "text/css; charset=utf-8",
-            web_asset("src/resource-location.css", RESOURCE_LOCATION_CSS),
         ),
         "/report-share.css" => (
             "200 OK",
@@ -4661,6 +4631,19 @@ mod profile_status_tests {
         assert!(!ANNOCAT_CSS.trim().is_empty());
         assert!(server.contains(r#""/fluent-components.css""#));
         assert!(!FLUENT_COMPONENTS_CSS.trim().is_empty());
+        for removed_stylesheet in [
+            "wizard.css",
+            "batch.css",
+            "light-theme.css",
+            "downloads-ui.css",
+            "resource-location.css",
+        ] {
+            assert!(
+                !ANNOCAT_CSS.contains(removed_stylesheet)
+                    && !server.contains(&format!(r#""/{removed_stylesheet}""#)),
+                "removed legacy stylesheet must not be imported or served: {removed_stylesheet}"
+            );
+        }
     }
 
     #[test]
@@ -4680,6 +4663,14 @@ mod profile_status_tests {
             "fui-choice-row",
             "fui-status-message",
             "fui-summary-grid",
+            "fui-menu-item--described",
+            "fui-progress",
+            "fui-file-list",
+            "fui-path-list",
+            "fui-fieldset",
+            "fui-wizard",
+            "fui-data-grid__utility-cell",
+            "fui-select-trigger",
         ] {
             assert!(
                 INDEX_HTML.contains(contract)
@@ -4722,6 +4713,33 @@ mod profile_status_tests {
                 "component typography must use a design token: {declaration}"
             );
         }
+        for declaration in BRAND_THEME_CSS
+            .lines()
+            .filter(|line| line.contains("border-radius:"))
+        {
+            assert!(
+                declaration.contains("var(") || declaration.contains("border-radius: 0"),
+                "brand shapes must use a radius token: {declaration}"
+            );
+        }
+        assert!(!BRAND_THEME_CSS.contains("--shadow-sm"));
+        assert!(!BRAND_THEME_CSS.contains("--shadow-md"));
+        assert!(!BRAND_THEME_CSS.contains("#results #filters>span"));
+        assert!(!BRAND_THEME_CSS.contains("#results #columns>span"));
+        assert!(!BRAND_THEME_CSS.contains("#results .selection-cell, #results .candidate-cell"));
+        assert!(!REPORT_SHARE_CSS.contains(".selection-cell"));
+        assert!(!STYLE_CSS.contains(".result-pager span"));
+        assert!(!BRAND_THEME_CSS.contains(".topbar::before"));
+        assert!(!BRAND_THEME_CSS.contains("height: calc(100vh - 48px)"));
+        assert!(!FLUENT_COMPONENTS_CSS.contains("inset 0 -2px 0"));
+        assert!(FLUENT_COMPONENTS_CSS.contains(".fui-button>span"));
+        assert!(FLUENT_COMPONENTS_CSS.contains("--fui-results-band-height"));
+        assert!(REPORT_SHARE_CSS.contains("container: filter-popover / inline-size"));
+        assert!(!REPORT_SHARE_CSS.contains("@container results-pane (max-width: 62.5rem)"));
+        assert!(
+            BRAND_THEME_CSS
+                .contains("#results .toolbar { grid-template-columns: minmax(0, 1fr) auto;")
+        );
         assert!(!FLUENT_COMPONENTS_CSS.contains("html.annocat-results-ui #results .table-wrap th"));
         assert!(
             !FLUENT_COMPONENTS_CSS
@@ -4744,6 +4762,73 @@ mod profile_status_tests {
                 "layout compatibility must not own visual property {visual_override}"
             );
         }
+
+        for visual_override in [
+            "border-radius:",
+            "box-shadow:",
+            "font-size:",
+            "font-weight:",
+            "color:",
+            "background:",
+        ] {
+            assert!(
+                !REPORT_SHARE_CSS.contains(visual_override),
+                "report layout must not redefine component appearance with {visual_override}"
+            );
+        }
+    }
+
+    #[test]
+    fn wizard_uses_shared_fluent_layout_contracts() {
+        assert!(INDEX_HTML.contains(r#"class="run-card fui-card fui-wizard""#));
+        assert!(INDEX_HTML.contains(r#"class="run-actions fui-card__footer fui-wizard__footer""#));
+        assert!(!INDEX_HTML.contains(r#"run-card fui-card fui-card--elevated"#));
+        assert!(!INDEX_HTML.contains("Annotation runs locally."));
+        assert!(INDEX_HTML.contains(
+            r#"<div class="run-actions fui-card__footer fui-wizard__footer"><button id="recover-annotation""#
+        ));
+        assert!(APP_JS.contains(r#"$('#recover-annotation').classList.toggle('hidden',step!==1)"#));
+        assert!(
+            INDEX_HTML.contains(
+                r#"<details class="fui-accordion"><summary><span>Advanced output</span>"#
+            )
+        );
+
+        for contract in [
+            ".fui-stepper li:not(:last-child)::after",
+            "height: auto;",
+            ".fui-stepper .complete b::after",
+            "background: var(--color-accent);",
+            ".fui-wizard>.wizard-panel",
+            ".fui-wizard>.wizard-panel>.fui-accordion",
+            ".fui-wizard__footer",
+            "grid-template-columns: minmax(0, 1fr) auto;",
+            ".fui-button--primary:disabled",
+            "background: var(--color-surface-muted);",
+        ] {
+            assert!(
+                FLUENT_COMPONENTS_CSS.contains(contract),
+                "missing wizard component contract {contract}"
+            );
+        }
+
+        let compatibility = FLUENT_COMPONENTS_CSS
+            .split("@layer annocat-compat {")
+            .nth(1)
+            .expect("component stylesheet must retain a layout compatibility layer");
+        for migrated_selector in [
+            "html.annocat-results-ui .run-card",
+            "html.annocat-results-ui .run-actions",
+            "html.annocat-results-ui .wizard-panel>.fui-accordion",
+        ] {
+            assert!(
+                !compatibility.contains(migrated_selector),
+                "wizard component styling must not return to compatibility: {migrated_selector}"
+            );
+        }
+        assert!(REPORT_SHARE_CSS.contains("container: results-pane / inline-size;"));
+        assert!(REPORT_SHARE_CSS.contains("container: filter-popover / inline-size;"));
+        assert!(REPORT_SHARE_CSS.contains("@container filter-popover (max-width: 42rem)"));
     }
 
     #[test]

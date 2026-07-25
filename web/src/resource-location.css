@@ -1,7 +1,0 @@
-.settings-storage { grid-column: 1 / -1; }
-.settings-path { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 16px; align-items: center; padding: 14px 0; border-top: 1px solid var(--line); }
-.settings-path > span, .settings-path > strong, .settings-path > small { grid-column: 1; display: block; min-width: 0; }
-.settings-path > span { color: var(--muted); font-size:var(--font-size-sm); font-weight:var(--font-weight-bold); text-transform: uppercase; letter-spacing: .05em; }
-.settings-path > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size:var(--font-size-base); }
-.settings-path > small { color: var(--muted); }
-.settings-path > button { grid-column: 2; grid-row: 1 / 4; padding: 8px 12px; border: 1px solid var(--color-border-strong); border-radius: 8px; background: var(--color-surface); }
