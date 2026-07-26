@@ -97,12 +97,25 @@ pub fn from_preparation(
     let total_chromosomes = status
         .completed_chromosomes
         .saturating_add(status.remaining_chromosomes);
+    let retained_partial = status.state == "idle"
+        && status.completed_chromosomes > 0
+        && status.remaining_chromosomes > 0;
+    let state = if retained_partial {
+        "paused".into()
+    } else {
+        status.state.clone()
+    };
+    let phase = if retained_partial {
+        "paused".into()
+    } else {
+        status.phase
+    };
     TaskSnapshot {
         id: format!("install:{resource_id}"),
         kind: "installation",
         title: title.into(),
-        state: status.state.clone(),
-        phase: status.phase,
+        state: state.clone(),
+        phase,
         detail: status.detail,
         resource_id: Some(resource_id.into()),
         chromosome: status.chromosome,
@@ -119,7 +132,7 @@ pub fn from_preparation(
         throughput_records_per_second: 0.0,
         eta_seconds: None,
         error: status.error,
-        available_actions: resource_actions("installation", &status.state),
+        available_actions: resource_actions("installation", &state),
     }
 }
 
@@ -220,7 +233,8 @@ pub fn from_annotation(status: annotation::State) -> TaskSnapshot {
         available_actions: match state.as_str() {
             "running" if status.resumable => vec!["pause", "cancel"],
             "running" => vec!["cancel"],
-            "interrupted" | "failed" if status.resumable => vec!["resume"],
+            "interrupted" | "failed" if status.resumable => vec!["resume", "discard"],
+            "interrupted" | "failed" => vec!["discard"],
             _ => Vec::new(),
         },
     }
@@ -347,6 +361,31 @@ mod tests {
     }
 
     #[test]
+    fn retained_installation_shards_reappear_as_a_paused_task() {
+        let task = from_preparation(
+            "gnomad-genomes",
+            "gnomAD genomes",
+            preparation::LivePreparationState {
+                resource_id: Some("gnomad-genomes".into()),
+                state: "idle".into(),
+                phase: "idle".into(),
+                completed_chromosomes: 1,
+                remaining_chromosomes: 23,
+                network_bytes: 44_000_000_000,
+                expected_network_bytes: 566_000_000_000,
+                percent: 100.0 / 24.0,
+                detail: "1 verified chromosome shard is retained".into(),
+                ..preparation::LivePreparationState::default()
+            },
+        );
+
+        assert_eq!(task.state, "paused");
+        assert_eq!(task.phase, "paused");
+        assert!(task.is_meaningful());
+        assert_eq!(task.available_actions, vec!["resume", "cancel"]);
+    }
+
+    #[test]
     fn failed_download_preserves_error_and_resume_action() {
         let task = from_download(
             "clinvar",
@@ -420,6 +459,34 @@ mod tests {
         assert_eq!(task.throughput_records_per_second, 25_000.0);
         assert_eq!(task.eta_seconds, Some(24));
         assert_eq!(task.available_actions, vec!["pause", "cancel"]);
+    }
+
+    #[test]
+    fn interrupted_annotations_can_resume_or_be_discarded() {
+        let task = from_annotation(annotation::State {
+            state: "interrupted",
+            phase: "indexing-variants",
+            detail: "Interrupted during indexing".into(),
+            run_id: Some("run-test".into()),
+            name: Some("Interrupted run".into()),
+            input: None,
+            output: None,
+            records: Some(1_000),
+            completed_records: 400,
+            total_records: 1_000,
+            output_bytes: 1_100,
+            valid_output_bytes: 1_000,
+            total_bytes: 2_000,
+            chromosome: Some("22".into()),
+            percent: 40.0,
+            throughput_bytes_per_second: 0.0,
+            throughput_records_per_second: 0.0,
+            eta_seconds: None,
+            resumable: true,
+            cancel_requested: false,
+            error: None,
+        });
+        assert_eq!(task.available_actions, vec!["resume", "discard"]);
     }
 
     #[test]

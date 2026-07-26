@@ -694,6 +694,26 @@ pub fn resume_background(
     Ok(returned_id)
 }
 
+pub fn discard_interrupted_run(runs: &Path, run_id: &str) -> Result<(), String> {
+    if run_id.trim().is_empty() {
+        return Err("annotation run ID is required".into());
+    }
+    let current = status();
+    if (is_running() || BATCH_ACTIVE.load(Ordering::SeqCst))
+        && current.run_id.as_deref() == Some(run_id)
+    {
+        return Err("the annotation is still active; cancel it before deleting its output".into());
+    }
+    let (directory, _) = find_checkpoint(runs, run_id)
+        .ok_or("the interrupted annotation checkpoint is unavailable")?;
+    fs::remove_dir_all(&directory).map_err(|error| {
+        format!(
+            "cannot delete interrupted annotation {}: {error}",
+            directory.display()
+        )
+    })
+}
+
 pub fn start_batch_background(
     request: BatchAnnotationRequest,
     default_runs: PathBuf,
@@ -2988,6 +3008,58 @@ mod tests {
         fs::create_dir_all(&unsupported).unwrap();
         fs::write(unsupported.join("dbnsfp.osa-shards.json"), b"fixture").unwrap();
         assert!(resolve_source_root(&root, "dbnsfp").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_run_discard_removes_only_its_checkpoint_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-discard-interrupted-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let interrupted = root.join("fixture.partial");
+        let unrelated = root.join("unrelated");
+        fs::create_dir_all(&interrupted).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        let checkpoint = AnnotationCheckpoint {
+            schema_version: 1,
+            run_id: "run-discard-fixture".into(),
+            name: "Discard fixture".into(),
+            input: root.join("input.vcf"),
+            source_ids: Vec::new(),
+            include_annotated_vcf: false,
+            run_mode: RunMode::Annotation,
+            add_local_consequences: false,
+            confirm_grch38: true,
+            state: "interrupted".into(),
+            phase: "indexing-variants".into(),
+            detail: "Interrupted during indexing".into(),
+            completed_records: 1,
+            total_records: 2,
+            output_bytes: 100,
+            valid_output_bytes: 100,
+            total_bytes: 200,
+            chromosome: Some("22".into()),
+            percent: 50.0,
+            throughput_bytes_per_second: 0.0,
+            throughput_records_per_second: 0.0,
+            eta_seconds: None,
+            updated_at: current_timestamp(),
+        };
+        fs::write(
+            interrupted.join("annotation-state.json"),
+            serde_json::to_vec(&checkpoint).unwrap(),
+        )
+        .unwrap();
+
+        discard_interrupted_run(&root, "run-discard-fixture").unwrap();
+
+        assert!(!interrupted.exists());
+        assert!(unrelated.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

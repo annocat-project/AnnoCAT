@@ -308,9 +308,8 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 .source-list .source-card-storage { margin-top: 10px; color: var(--color-text-secondary); }
 .source-card-storage .resource-storage { margin: 0; color: var(--color-text-secondary); font-size:var(--text-supporting-size); font-weight:var(--text-supporting-weight); line-height: var(--text-supporting-leading); }
 .source-license-note { display: block; margin-top: 4px; color: var(--color-text-muted); font-size:var(--font-size-xs); font-weight:var(--font-weight-normal); line-height: 1.4; }
-.source-card-meta { display: grid; min-width: 220px; justify-items: end; gap: 12px; }
-.source-card-meta .source-actions { max-width: 380px; flex-wrap: wrap; justify-content: flex-end; white-space: normal; }
-.source-state { justify-self: end; background: var(--color-border-subtle); color: var(--color-text-secondary); font-weight:var(--font-weight-semibold); }
+.source-card-meta { display: grid; min-width: 220px; justify-items: end; }
+.source-card-meta .source-actions { max-width: 480px; flex-wrap: wrap; justify-content: flex-end; white-space: normal; }
 .confirmation-dialog { width: min(480px, calc(100% - 32px)); }
 .confirmation-dialog [data-confirm-action-message] { white-space: pre-line; }
 .impact-high { color: var(--color-status-danger); background: var(--color-status-danger-soft); }
@@ -1351,7 +1350,7 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   max-height: min(820px, calc(100vh - 48px));
   padding: 32px 36px 26px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
 }
 .about-close {
   position: absolute;
@@ -1377,7 +1376,7 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 .about-version a { color: var(--blue-strong); text-decoration: none; }
 .about-version a:hover { text-decoration: underline; }
 .about-use-notice {
-  max-width: 560px;
+  width: 100%;
   margin-top: 20px;
   overflow: hidden;
   border: 1px solid var(--color-border);
@@ -1574,7 +1573,6 @@ main { margin-left: var(--annocat-sidebar-width); transition: margin-left .2s ea
 @media(max-width:700px) {
   .source-list article { grid-template-columns: minmax(0, 1fr); }
   .source-card-meta { min-width: 0; justify-items: start; }
-  .source-card-meta .source-state { justify-self: start; }
   .source-card-meta .source-actions { grid-column: auto; justify-content: flex-start; }
 }
 

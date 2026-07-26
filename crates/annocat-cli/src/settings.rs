@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 #[derive(Default, Deserialize, Serialize)]
 pub(crate) struct AppConfig {
     pub(crate) resource_directory: Option<PathBuf>,
+    pub(crate) downloads_directory: Option<PathBuf>,
     pub(crate) results_directory: Option<PathBuf>,
 }
 

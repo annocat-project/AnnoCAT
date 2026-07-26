@@ -106,14 +106,15 @@ body:has(dialog[open]) {
 }
 
 .fui-button--danger-subtle {
-  border-color: var(--color-status-danger-border);
+  border-color: var(--color-border-strong);
   background: var(--color-surface);
-  color: var(--color-status-danger);
+  color: var(--color-text-primary);
 }
 
 .fui-button--danger-subtle:not(:disabled):hover {
   border-color: var(--color-status-danger);
   background: var(--color-status-danger-soft);
+  color: var(--color-status-danger);
 }
 
 .fui-button--subtle,
@@ -528,6 +529,14 @@ body:has(dialog[open]) {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-subtitle-2);
+}
+
+.fui-card__title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
 .fui-card__description {
@@ -1035,8 +1044,8 @@ body:has(dialog[open]) {
   width: calc(var(--control-height-small) + var(--space-4));
   min-width: calc(var(--control-height-small) + var(--space-4));
   max-width: calc(var(--control-height-small) + var(--space-4));
-  padding-right: var(--space-2);
-  padding-left: var(--space-2);
+  padding-right: var(--space-1);
+  padding-left: var(--space-1);
   overflow: hidden;
   vertical-align: middle;
   text-align: center;
@@ -2168,8 +2177,7 @@ body:has(dialog[open]) {
   grid-column: 1 / -1;
 }
 
-.fui-path-row,
-.settings-path {
+.fui-path-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: var(--space-half) var(--space-4);
@@ -2178,21 +2186,31 @@ body:has(dialog[open]) {
   border-top: 1px solid var(--color-border-subtle);
 }
 
-:is(.fui-path-row, .settings-path)>:not(button) {
+.fui-path-row>:not(button) {
   grid-column: 1;
   display: block;
   min-width: 0;
 }
 
-:is(.fui-path-row, .settings-path)>strong {
+.fui-path-row>strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-:is(.fui-path-row, .settings-path)>button {
+.fui-path-row>button {
   grid-column: 2;
   grid-row: 1 / 4;
+}
+
+.settings-path {
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.settings-path>.fui-control-group {
+  width: 100%;
 }
 
 .fui-helper-text,
@@ -2252,18 +2270,51 @@ body:has(dialog[open]) {
   display: block;
 }
 
-.download-stage,
 .download-progress-meta {
   margin-top: var(--space-2);
 }
 
-.download-speed {
-  flex: none;
-  color: var(--color-text-primary);
-  font-variant-numeric: tabular-nums;
+.jobs-list {
+  display: grid;
+  gap: var(--space-5);
 }
 
-.jobs-list {
+.fui-list-section {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.fui-list-section__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--control-height-medium);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.fui-list-section__title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.fui-list-section__header h2,
+.fui-list-section__header p {
+  margin: 0;
+}
+
+.fui-list-section__header h2 {
+  font: var(--font-subtitle-2);
+  color: var(--color-text-primary);
+}
+
+.fui-list-section__header p {
+  margin-top: var(--space-1);
+}
+
+.fui-list-section__content {
   display: grid;
   gap: var(--space-3);
 }

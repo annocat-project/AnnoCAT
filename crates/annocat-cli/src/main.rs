@@ -1341,6 +1341,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
     let mutating = path.ends_with("/start")
         || path.ends_with("/cancel")
+        || path.ends_with("/discard")
         || path.ends_with("/resume")
         || path.ends_with("/recover")
         || path.ends_with("/delete")
@@ -1356,6 +1357,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             path,
             "/api/pick-folder"
                 | "/api/pick-resource-folder"
+                | "/api/pick-downloads-folder"
                 | "/api/pick-results-folder"
                 | "/api/pick-vcfs"
                 | "/api/pick-recovery-files"
@@ -1454,6 +1456,26 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "202 Accepted",
                 serde_json::json!({"accepted": true, "runId": run_id}).to_string(),
             ),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if path == "/api/annotations/discard" {
+        let response = portable_paths().and_then(|paths| {
+            let value: serde_json::Value = serde_json::from_slice(request_body)
+                .map_err(|error| format!("invalid annotation discard request: {error}"))?;
+            let run_id = value
+                .get("runId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or("annotation run ID is required")?;
+            annotation::discard_interrupted_run(&paths.runs, run_id)
+        });
+        let (status, body) = match response {
+            Ok(()) => ("200 OK", "{\"discarded\":true}".to_string()),
             Err(error) => (
                 "409 Conflict",
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
@@ -2503,6 +2525,19 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
             ),
         },
+        "/api/pick-downloads-folder" => match pick_downloads_folder() {
+            Ok(Some(path)) => (
+                "200 OK",
+                "application/json",
+                format!("{{\"path\":\"{}\"}}", json_escape(&path)),
+            ),
+            Ok(None) => ("200 OK", "application/json", "{\"path\":null}".to_string()),
+            Err(error) => (
+                "409 Conflict",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
         "/api/pick-results-folder" => match pick_results_folder() {
             Ok(Some(path)) => (
                 "200 OK",
@@ -3081,11 +3116,14 @@ fn managed_preparation_status(
             }
         }
     }
-    let status = preparation::status_with_storage(
+    let mut status = preparation::status_with_storage(
         resource_id,
         &resources.join(resource_id).join(release.version),
         &chromosomes,
     );
+    if let Some(expected_network_bytes) = release.download_bytes {
+        status.expected_network_bytes = status.expected_network_bytes.max(expected_network_bytes);
+    }
     if status.state == "idle"
         && let Some(position) = install_queue::position(resource_id, preparation::running_count())
     {
@@ -3434,6 +3472,13 @@ fn save_resource_directory(path: &std::path::Path) -> Result<(), String> {
     save_config(&home, &config)
 }
 
+fn save_downloads_directory(path: &std::path::Path) -> Result<(), String> {
+    let home = portable_home()?;
+    let mut config = load_config(&home)?;
+    config.downloads_directory = Some(path.to_path_buf());
+    save_config(&home, &config)
+}
+
 fn save_results_directory(path: &std::path::Path) -> Result<(), String> {
     let home = portable_home()?;
     let mut config = load_config(&home)?;
@@ -3600,12 +3645,15 @@ fn portable_paths() -> Result<PortablePaths, String> {
     let home = portable_home()?;
     let config = load_config(&home)?;
     let resource_directory = config.resource_directory.unwrap_or_else(|| home.clone());
+    let downloads = config
+        .downloads_directory
+        .unwrap_or_else(|| resource_directory.join("downloads"));
     let runs = config
         .results_directory
         .unwrap_or_else(|| home.join("runs"));
     Ok(PortablePaths {
         resources: resource_directory.join("resources"),
-        downloads: resource_directory.join("downloads"),
+        downloads,
         runs,
         config: home.join("config"),
         resource_directory,
@@ -4059,11 +4107,10 @@ fn task_snapshots(paths: &PortablePaths) -> Vec<tasks::TaskSnapshot> {
 
 fn task_sort_rank(task: &tasks::TaskSnapshot) -> u8 {
     match task.state.as_str() {
-        "queued" | "running" | "validating" | "cancelling" => 0,
-        "paused" | "cancelled" | "downloaded" => 1,
-        "failed" => 2,
-        "ready" | "completed" => 3,
-        _ => 4,
+        "queued" | "running" | "validating" | "cancelling" | "downloaded" => 0,
+        "paused" | "cancelled" | "failed" | "interrupted" => 1,
+        "ready" | "completed" => 2,
+        _ => 3,
     }
 }
 
@@ -4072,7 +4119,7 @@ fn sort_tasks(tasks: &mut [tasks::TaskSnapshot]) {
         task_sort_rank(left)
             .cmp(&task_sort_rank(right))
             .then_with(|| {
-                if task_sort_rank(left) == 3 {
+                if task_sort_rank(left) == 2 {
                     right.updated_at.cmp(&left.updated_at)
                 } else {
                     std::cmp::Ordering::Equal
@@ -4357,6 +4404,32 @@ fn pick_resource_folder() -> Result<Option<String>, String> {
         terminal_log(
             "config",
             format!("resource directory changed to {}", path.display()),
+        );
+        Ok(Some(path.to_string_lossy().into_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn pick_downloads_folder() -> Result<Option<String>, String> {
+    if downloader::is_running() || reference::is_running() || preparation::running_count() > 0 {
+        return Err(
+            "cancel the active download or preparation before changing the downloads directory"
+                .into(),
+        );
+    }
+    let selection = pick_folder("Choose AnnoCAT downloads folder")?;
+    if let Some(path) = selection {
+        save_downloads_directory(&path)?;
+        std::fs::create_dir_all(&path).map_err(|error| {
+            format!(
+                "cannot create downloads directory {}: {error}",
+                path.display()
+            )
+        })?;
+        terminal_log(
+            "config",
+            format!("downloads directory changed to {}", path.display()),
         );
         Ok(Some(path.to_string_lossy().into_owned()))
     } else {
@@ -4847,13 +4920,16 @@ mod profile_status_tests {
             legacy.resource_directory,
             Some(std::path::PathBuf::from(r"D:\resources"))
         );
+        assert!(legacy.downloads_directory.is_none());
         assert!(legacy.results_directory.is_none());
         let current = AppConfig {
             resource_directory: Some(r"D:\resources".into()),
+            downloads_directory: Some(r"F:\downloads".into()),
             results_directory: Some(r"E:\results".into()),
         };
         let encoded = serde_json::to_value(current).unwrap();
         assert_eq!(encoded["resource_directory"], r"D:\resources");
+        assert_eq!(encoded["downloads_directory"], r"F:\downloads");
         assert_eq!(encoded["results_directory"], r"E:\results");
     }
 
@@ -4864,6 +4940,9 @@ mod profile_status_tests {
         assert!(html.contains("id=\"settings-resource-path\""));
         assert!(html.contains("id=\"settings-downloads-path\""));
         assert!(html.contains("id=\"settings-results-path\""));
+        assert!(html.contains("data-pick-storage=\"resource\""));
+        assert!(html.contains("data-pick-storage=\"downloads\""));
+        assert!(html.contains("data-pick-storage=\"results\""));
         assert!(!html.contains("id=\"sources-resource-path\""));
         assert!(!html.contains("id=\"result-density\""));
         assert!(!html.contains("class=\"streaming-storage-note\""));
@@ -4877,6 +4956,7 @@ mod profile_status_tests {
         assert!(!app.contains("setInterval(()=>refreshAnnotationStatus()"));
         assert!(!app.contains("setInterval(()=>refreshTasks()"));
         assert!(!app.contains("$('#result-density')"));
+        assert!(!app.contains("Sources coming later"));
     }
 
     #[test]
@@ -4932,7 +5012,7 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn task_order_is_active_paused_failed_then_completed() {
+    fn task_order_is_active_attention_then_completed() {
         let task = |id: &str, state: &str, updated: &str| {
             let mut task = tasks::from_completed_run(id, id, updated, "GRCh38", 1, 1);
             task.id = id.into();
@@ -4944,6 +5024,7 @@ mod profile_status_tests {
             task("failed", "failed", ""),
             task("active-first", "running", ""),
             task("paused", "paused", ""),
+            task("interrupted", "interrupted", ""),
             task("new", "completed", "2026-07-19T02:00:00Z"),
             task("active-second", "queued", ""),
             task("old", "completed", "2026-07-19T01:00:00Z"),
@@ -4957,8 +5038,9 @@ mod profile_status_tests {
             [
                 "active-first",
                 "active-second",
-                "paused",
                 "failed",
+                "paused",
+                "interrupted",
                 "new",
                 "old"
             ]
