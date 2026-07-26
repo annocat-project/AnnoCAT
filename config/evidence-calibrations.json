@@ -677,8 +677,9 @@
   "displayPolicies": {
     "alleleFrequency": {
       "interpretation": "Population frequency is context, not an independent pathogenic or benign classification.",
+      "availableTone": "informative",
       "rareTone": "informative",
-      "commonTone": "neutral"
+      "commonTone": "informative"
     },
     "cadd": {
       "interpretation": "CADD is rank-scaled. Its published clinical calibration applies only to missense variants and is not the primary AnnoCat missense interpretation.",
@@ -689,6 +690,14 @@
       "conservedTone": "informative",
       "acceleratedTone": "caution",
       "neutralTone": "neutral"
+    },
+    "quality": {
+      "interpretation": "Without a versioned assay- and caller-specific profile, quality values are context rather than inferred pass or failure states.",
+      "profileStatus": "not-configured",
+      "contextTone": "informative",
+      "passTone": "reassuring",
+      "failureTone": "adverse",
+      "missingTone": "missing"
     }
   }
 }

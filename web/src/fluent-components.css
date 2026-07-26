@@ -1719,6 +1719,52 @@ body:has(dialog[open]) {
   line-height: var(--text-body-leading);
 }
 
+.fui-description-grid dd.tone-adverse,
+.fui-key-value-row.tone-adverse>:is(b, dd, .annotation-value-list),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-adverse {
+  color: var(--color-status-danger);
+}
+
+.fui-description-grid dd.tone-caution,
+.fui-key-value-row.tone-caution>:is(b, dd, .annotation-value-list),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-caution {
+  color: var(--color-status-warning);
+}
+
+.fui-description-grid dd.tone-reassuring,
+.fui-key-value-row.tone-reassuring>:is(b, dd, .annotation-value-list),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-reassuring {
+  color: var(--color-status-success);
+}
+
+.fui-description-grid dd.tone-informative,
+.fui-key-value-row.tone-informative>:is(b, dd, .annotation-value-list),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-informative {
+  color: var(--color-status-info);
+}
+
+.fui-description-grid dd.tone-missing,
+.fui-key-value-row.tone-missing>:is(b, dd, .annotation-value-list),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-missing {
+  color: var(--color-status-missing);
+}
+
+.fui-description-grid .variant-summary-parts {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.fui-description-grid .variant-summary-separator {
+  color: var(--color-text-muted);
+}
+
+.fui-description-grid .tone-adverse { color: var(--color-status-danger); }
+.fui-description-grid .tone-caution { color: var(--color-status-warning); }
+.fui-description-grid .tone-reassuring { color: var(--color-status-success); }
+.fui-description-grid .tone-informative { color: var(--color-status-info); }
+.fui-description-grid .tone-missing { color: var(--color-status-missing); }
+
 .fui-section-heading {
   color: var(--color-text-primary);
   font-size: var(--text-body-size);
