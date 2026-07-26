@@ -4,6 +4,7 @@ export function createResultFilters({
   resetResultPages,clearVariantSelection,openCompletedRun,getState
 }){
   let humanReadableColumnNames=true,resultFieldCatalog=[],selectionMode='explicit',currentResultRun=null;
+  $('#result-filters')?.classList.add('fui-popover--nested-content');
   function syncState(){({humanReadableColumnNames,resultFieldCatalog,selectionMode,currentResultRun}=getState())}
 
 function likelyNumericEvidenceField(field){const name=String(field?.fieldPath||'').toLowerCase();return['integer','number'].includes(field?.valueType)||/(^|_)(score|rankscore|phred|raw|af|faf|ac|an|nhomalt|count|frequency|percentile|distance|depth|dp|gq|mq|fs|sor|qd)(_|$)/.test(name)||/(phylop|gerp|spliceai|cadd|revel|primateai|alphamissense)/.test(name)&&!/(pred|prediction|class|label|id)$/.test(name)}

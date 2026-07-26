@@ -139,6 +139,18 @@ body:has(dialog[open]) {
   text-decoration: underline;
 }
 
+.fui-link {
+  color: var(--color-accent);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.fui-link:hover {
+  color: var(--color-accent-strong);
+}
+
 .fui-button--small {
   min-width: var(--control-height-small);
   height: var(--control-height-small);
@@ -480,6 +492,10 @@ body:has(dialog[open]) {
   box-shadow: var(--shadow-8);
 }
 
+.fui-card--menu-host {
+  overflow: visible;
+}
+
 .fui-card--interactive {
   color: var(--color-text-primary);
   font-size: var(--text-body-size);
@@ -738,9 +754,26 @@ body:has(dialog[open]) {
   padding: var(--space-1);
 }
 
+.fui-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.fui-menu__popover {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 30;
+  min-width: 10rem;
+}
+
 .fui-popover--dialog {
-  overflow: visible;
+  overflow: hidden;
   border-color: var(--color-border);
+}
+
+.fui-popover--nested-content {
+  overflow: visible;
 }
 
 .fui-popover__header {
@@ -749,11 +782,113 @@ body:has(dialog[open]) {
   background: var(--color-surface);
 }
 
+.fui-popover__header > * {
+  margin: 0;
+}
+
+.fui-popover__header > * + * {
+  margin-top: var(--space-1);
+}
+
+.fui-popover__header--borderless {
+  border-bottom: 0;
+}
+
 .fui-popover__content {
   min-height: 0;
   padding: var(--space-3);
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+.fui-popover--compact .fui-popover__header,
+.fui-popover--compact .fui-popover__content {
+  padding: var(--space-2) var(--space-3);
+}
+
+.favor-popover__content {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.favor-popover__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-3);
+}
+
+.favor-popover__help {
+  flex: 0 0 auto;
+  font-weight: var(--font-weight-semibold);
+}
+
+.favor-popover__content > * {
+  margin: 0;
+}
+
+.favor-popover__status {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-normal);
+}
+
+.favor-popover__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.favor-consent-dialog {
+  width: min(500px, calc(100% - 32px));
+}
+
+.favor-summary-dialog {
+  width: min(680px, calc(100% - 32px));
+}
+
+.favor-summary-fields {
+  margin: 0;
+}
+
+.favor-summary-fields > div {
+  display: grid;
+  grid-template-columns: minmax(9rem, 11rem) minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.favor-summary-fields > div:first-child {
+  padding-top: 0;
+}
+
+.favor-summary-fields dt {
+  font-weight: var(--font-weight-semibold);
+}
+
+.favor-summary-fields dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.favor-summary-note {
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+.favor-consent-dialog__preference {
+  margin-top: var(--space-4);
+}
+
+@media (max-width: 560px) {
+  .favor-summary-fields > div {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+  }
+}
+
+.online-service-card .source-card-storage {
+  font-weight: var(--font-weight-normal);
 }
 
 .fui-popover :is(.fui-caption, small) {
@@ -838,6 +973,14 @@ body:has(dialog[open]) {
 .fui-menu-item[aria-selected="true"],
 .fui-menu-item.active {
   background: var(--color-control-hover);
+}
+
+.fui-menu-item--danger {
+  color: var(--color-status-danger);
+}
+
+.fui-menu-item--danger:not(:disabled):hover {
+  background: var(--color-status-danger-soft);
 }
 
 .fui-menu-group__label {
@@ -1037,6 +1180,25 @@ body:has(dialog[open]) {
   background: var(--color-surface);
   color: var(--color-text-primary);
   font-weight: var(--font-weight-normal);
+}
+
+.fui-data-grid td.fui-data-grid__empty-cell {
+  padding: 0;
+  overflow: visible;
+}
+
+.fui-data-grid__empty-content {
+  position: sticky;
+  left: 0;
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  width: var(--fui-data-grid-viewport-width, 100%);
+  min-height: var(--table-row-height);
+  padding: var(--space-2);
+  color: var(--color-text-secondary);
+  text-align: center;
 }
 
 .fui-data-grid :is(th, td).fui-data-grid__utility-cell {

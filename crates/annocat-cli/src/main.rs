@@ -371,6 +371,7 @@ mod detail_lookup;
 mod downloader;
 mod evidence_resolution;
 mod fastvep;
+mod favor;
 mod http_client;
 mod install_queue;
 mod library_metadata;
@@ -745,6 +746,7 @@ fn terminal_active_lines() -> Vec<String> {
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/src/app.js");
+const FAVOR_ONLINE_JS: &str = include_str!("../../../web/src/app/favor-online.js");
 const PHENOTYPES_JS: &str = include_str!("../../../web/src/app/phenotypes.js");
 const RESULT_FILTERS_JS: &str = include_str!("../../../web/src/app/result-filters.js");
 const UI_COMPONENTS_JS: &str = include_str!("../../../web/src/app/ui-components.js");
@@ -1350,9 +1352,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         || path.ends_with("/export")
         || path.ends_with("/phenotypes/rank")
         || path.ends_with("/phenotypes/explore")
+        || path.ends_with("/favor/enrich")
         || (path.ends_with("/phenotypes") && method == "POST")
         || (path.ends_with("/config") && method == "POST")
         || (path.ends_with("/notes") && method == "POST")
+        || (path == "/api/services/favor" && method == "POST")
         || matches!(
             path,
             "/api/pick-folder"
@@ -2131,6 +2135,75 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     }
     if let Some(run_id) = path
         .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/favor/enrich"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            if !favor_service_enabled()? {
+                return Err("FAVOR is disabled in Data sources".into());
+            }
+            let variants = completed_run_result(&paths.runs, run_id)?;
+            let evidence = completed_run_file(
+                &paths.runs,
+                run_id,
+                "evidenceFile",
+                "evidence.parquet",
+                "parquet",
+            )?;
+            let catalog = completed_run_file(
+                &paths.runs,
+                run_id,
+                "fieldCatalogFile",
+                "field-catalog.json",
+                "json",
+            )?;
+            let request = serde_json::from_slice::<favor::EnrichRequest>(request_body)
+                .map_err(|error| format!("invalid FAVOR enrichment request: {error}"))?;
+            let run_directory = variants
+                .parent()
+                .ok_or("completed result has no run directory")?;
+            favor::enrich(run_directory, &variants, &evidence, &catalog, request).and_then(
+                |summary| serde_json::to_string(&summary).map_err(|error| error.to_string()),
+            )
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) if error.starts_with("FAVOR rate limit reached") => (
+                "429 Too Many Requests",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/favor"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let variants = completed_run_result(&paths.runs, run_id)?;
+            let run_directory = variants
+                .parent()
+                .ok_or("completed result has no run directory")?;
+            favor::status(run_directory, favor_service_enabled()?).and_then(|status| {
+                serde_json::to_string(&status).map_err(|error| error.to_string())
+            })
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "404 Not Found",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
         .and_then(|value| value.strip_suffix("/candidate-variants"))
         .filter(|value| !value.is_empty() && !value.contains('/'))
     {
@@ -2139,22 +2212,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let page_request = result_page_request(query);
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
-            let evidence = completed_run_file(
-                &paths.runs,
-                run_id,
-                "evidenceFile",
-                "evidence.parquet",
-                "parquet",
-            )
-            .ok();
-            let catalog = completed_run_file(
-                &paths.runs,
-                run_id,
-                "fieldCatalogFile",
-                "field-catalog.json",
-                "json",
-            )
-            .ok();
+            let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
             let candidate_ids = library_metadata::candidates(&paths.runs, run_id)?
                 .into_iter()
                 .map(|candidate| candidate.allele_id)
@@ -2185,15 +2243,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         .filter(|value| !value.is_empty() && !value.contains('/'))
     {
         let response = portable_paths()
-            .and_then(|paths| {
-                completed_run_file(
-                    &paths.runs,
-                    run_id,
-                    "fieldCatalogFile",
-                    "field-catalog.json",
-                    "json",
-                )
-            })
+            .and_then(|paths| completed_run_query_inputs(&paths.runs, run_id))
+            .and_then(|(_, catalog)| catalog.ok_or("field catalog is missing".into()))
             .and_then(|catalog| {
                 let metadata = std::fs::metadata(&catalog)
                     .map_err(|error| format!("field catalog is missing: {error}"))?;
@@ -2276,14 +2327,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "parquet",
             )
             .ok();
-            let evidence = completed_run_file(
-                &paths.runs,
-                run_id,
-                "evidenceFile",
-                "evidence.parquet",
-                "parquet",
-            )
-            .ok();
+            let (evidence, _) = completed_run_query_inputs(&paths.runs, run_id)?;
             let record_number = query_parameter_u64(query, "recordNumber")
                 .and_then(|value| i64::try_from(value).ok());
             let alt_index =
@@ -2316,22 +2360,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let page_request = result_page_request(query);
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
-            let evidence = completed_run_file(
-                &paths.runs,
-                run_id,
-                "evidenceFile",
-                "evidence.parquet",
-                "parquet",
-            )
-            .ok();
-            let catalog = completed_run_file(
-                &paths.runs,
-                run_id,
-                "fieldCatalogFile",
-                "field-catalog.json",
-                "json",
-            )
-            .ok();
+            let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
             let page_request = page_request?;
             results::page_json_with_details(
                 run_id,
@@ -2367,6 +2396,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "200 OK",
             "text/javascript; charset=utf-8",
             web_asset("src/app/phenotypes.js", PHENOTYPES_JS),
+        ),
+        "/app/favor-online.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/favor-online.js", FAVOR_ONLINE_JS),
         ),
         "/app/result-filters.js" => (
             "200 OK",
@@ -2415,6 +2449,31 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             evidence_calibrations_json().into(),
         ),
         "/api/profiles" => ("200 OK", "application/json", profiles_json()),
+        "/api/services/favor" => {
+            let response = if method == "GET" {
+                favor_service_enabled().and_then(favor_service_json)
+            } else if method == "POST" {
+                serde_json::from_slice::<serde_json::Value>(request_body)
+                    .map_err(|error| format!("invalid FAVOR service request: {error}"))
+                    .and_then(|request| {
+                        let enabled = request["enabled"]
+                            .as_bool()
+                            .ok_or("FAVOR service request needs enabled")?;
+                        save_favor_service_enabled(enabled)?;
+                        favor_service_json(enabled)
+                    })
+            } else {
+                Err("GET or POST required".into())
+            };
+            match response {
+                Ok(body) => ("200 OK", "application/json", body),
+                Err(error) => (
+                    "409 Conflict",
+                    "application/json",
+                    format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+                ),
+            }
+        }
         "/api/resources/plan" => ("200 OK", "application/json", practical_resource_plan_json()),
         "/api/resources/status" => match resources_status() {
             Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
@@ -3486,6 +3545,33 @@ fn save_results_directory(path: &std::path::Path) -> Result<(), String> {
     save_config(&home, &config)
 }
 
+fn favor_service_enabled() -> Result<bool, String> {
+    Ok(load_config(&portable_home()?)?
+        .favor_enabled
+        .unwrap_or(true))
+}
+
+fn save_favor_service_enabled(enabled: bool) -> Result<(), String> {
+    let home = portable_home()?;
+    let mut config = load_config(&home)?;
+    config.favor_enabled = Some(enabled);
+    save_config(&home, &config)
+}
+
+fn favor_service_json(enabled: bool) -> Result<String, String> {
+    let service = annocat_core::source_catalog::service(favor::SERVICE_ID)
+        .ok_or("FAVOR service configuration is missing")?;
+    Ok(serde_json::json!({
+        "id": service.id,
+        "name": service.provider,
+        "purpose": service.purpose,
+        "providerUrl": service.provider_url,
+        "maxVariants": service.max_results,
+        "enabled": enabled
+    })
+    .to_string())
+}
+
 fn delete_managed_resource(resource_id: &str) -> Result<(), String> {
     if annotation::is_running()
         || managed_download_is_active(resource_id)
@@ -3977,6 +4063,40 @@ fn completed_run_file(
     Ok(file)
 }
 
+fn completed_run_query_inputs(
+    runs_directory: &std::path::Path,
+    requested_id: &str,
+) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), String> {
+    let evidence = completed_run_file(
+        runs_directory,
+        requested_id,
+        "evidenceFile",
+        "evidence.parquet",
+        "parquet",
+    )
+    .ok();
+    let catalog = completed_run_file(
+        runs_directory,
+        requested_id,
+        "fieldCatalogFile",
+        "field-catalog.json",
+        "json",
+    )
+    .ok();
+    if let (Some(evidence), Some(catalog)) = (&evidence, &catalog) {
+        let effective_evidence = favor::effective_evidence(evidence);
+        let effective_catalog = favor::effective_catalog(catalog);
+        if effective_evidence == *evidence || effective_catalog == *catalog {
+            favor::prepare_query_assets(evidence, catalog)?;
+        }
+        return Ok((
+            Some(favor::effective_evidence(evidence)),
+            Some(favor::effective_catalog(catalog)),
+        ));
+    }
+    Ok((evidence, catalog))
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
@@ -4284,22 +4404,7 @@ fn export_filtered_results_interactive(
 ) -> Result<Option<FilteredExportSummary>, String> {
     let paths = portable_paths()?;
     let result = completed_run_result(&paths.runs, run_id)?;
-    let evidence = completed_run_file(
-        &paths.runs,
-        run_id,
-        "evidenceFile",
-        "evidence.parquet",
-        "parquet",
-    )
-    .ok();
-    let catalog = completed_run_file(
-        &paths.runs,
-        run_id,
-        "fieldCatalogFile",
-        "field-catalog.json",
-        "json",
-    )
-    .ok();
+    let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
     let name = library_metadata::display_name(&paths.runs, run_id)
         .unwrap_or_else(|| "AnnoCAT-report".to_owned());
     let (title, extension, suffix) = match request.format.as_str() {
@@ -4658,6 +4763,7 @@ mod profile_status_tests {
     fn web_app_source() -> String {
         [
             APP_JS,
+            FAVOR_ONLINE_JS,
             PHENOTYPES_JS,
             RESULT_FILTERS_JS,
             UI_COMPONENTS_JS,
@@ -4671,6 +4777,11 @@ mod profile_status_tests {
         let server = include_str!("main.rs");
         assert!(INDEX_HTML.contains(r#"<script type="module" src="/app.js">"#));
         for (import, route, source) in [
+            (
+                "./app/favor-online.js",
+                r#""/app/favor-online.js""#,
+                FAVOR_ONLINE_JS,
+            ),
             (
                 "./app/phenotypes.js",
                 r#""/app/phenotypes.js""#,
@@ -4717,6 +4828,18 @@ mod profile_status_tests {
                 "removed legacy stylesheet must not be imported or served: {removed_stylesheet}"
             );
         }
+    }
+
+    #[test]
+    fn favor_is_a_fixed_online_service_not_an_install_field_selector() {
+        assert!(INDEX_HTML.contains(r#"id="favor""#));
+        assert!(FAVOR_ONLINE_JS.contains(r#"data-service-card="favor""#));
+        assert!(FAVOR_ONLINE_JS.contains("data-favor-service-toggle"));
+        assert!(!FAVOR_ONLINE_JS.contains("data-source-field"));
+        assert!(!FAVOR_ONLINE_JS.contains("Choose fields"));
+        assert!(!FAVOR_ONLINE_JS.contains("data-install"));
+        assert!(!FAVOR_ONLINE_JS.contains("data-update"));
+        assert!(!FAVOR_ONLINE_JS.contains("data-delete"));
     }
 
     #[test]
@@ -4922,15 +5045,18 @@ mod profile_status_tests {
         );
         assert!(legacy.downloads_directory.is_none());
         assert!(legacy.results_directory.is_none());
+        assert!(legacy.favor_enabled.is_none());
         let current = AppConfig {
             resource_directory: Some(r"D:\resources".into()),
             downloads_directory: Some(r"F:\downloads".into()),
             results_directory: Some(r"E:\results".into()),
+            favor_enabled: Some(false),
         };
         let encoded = serde_json::to_value(current).unwrap();
         assert_eq!(encoded["resource_directory"], r"D:\resources");
         assert_eq!(encoded["downloads_directory"], r"F:\downloads");
         assert_eq!(encoded["results_directory"], r"E:\results");
+        assert_eq!(encoded["favor_enabled"], false);
     }
 
     #[test]
@@ -5057,7 +5183,7 @@ mod profile_status_tests {
         assert!(html.contains("id=\"jobs-list\""));
         assert!(html.contains("id=\"task-nav-status\""));
         assert_eq!(app.matches("$('#source-list').innerHTML=").count(), 1);
-        assert!(app.contains("profile.sourceIds.map"));
+        assert!(app.contains("(profile.sourceIds||[]).map"));
         assert!(!app.contains("renderResourceTasks"));
         assert!(app.contains("const jobs=lastTaskSnapshots.map"));
         assert!(!app.contains("data-source-tasks"));

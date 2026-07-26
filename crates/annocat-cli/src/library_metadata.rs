@@ -260,6 +260,16 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn publish_atomic_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let _publish_guard = atomic_write_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if source.parent() != destination.parent() {
+        return Err("atomic file publication requires paths in the same directory".into());
+    }
+    replace_file(source, destination)
+}
+
 #[cfg(windows)]
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;

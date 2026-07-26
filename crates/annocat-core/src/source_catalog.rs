@@ -50,6 +50,8 @@ pub struct Profile {
     pub name: String,
     pub purpose: String,
     pub source_ids: Vec<String>,
+    #[serde(default)]
+    pub service_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +152,7 @@ pub fn profiles_json() -> String {
                     "name": profile.name,
                     "purpose": profile.purpose,
                     "sourceIds": profile.source_ids,
+                    "serviceIds": profile.service_ids,
                     "requiredEngineIds": ["fastvep"],
                     "requiredResourceIds": ["grch38-reference", "ensembl-gff3"]
                 })
@@ -431,7 +434,7 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             || !profile_ids.insert(profile.id.as_str())
             || profile.name.trim().is_empty()
             || profile.purpose.trim().is_empty()
-            || profile.source_ids.is_empty()
+            || profile.source_ids.is_empty() && profile.service_ids.is_empty()
         {
             return Err(format!("invalid or duplicate profile {}", profile.id));
         }
@@ -444,6 +447,17 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 return Err(format!(
                     "profile {} references an unknown or duplicate source {}",
                     profile.id, source_id
+                ));
+            }
+        }
+        let mut profile_service_ids = HashSet::new();
+        for service_id in &profile.service_ids {
+            if !service_ids.contains(service_id.as_str())
+                || !profile_service_ids.insert(service_id.as_str())
+            {
+                return Err(format!(
+                    "profile {} references an unknown or duplicate service {}",
+                    profile.id, service_id
                 ));
             }
         }
@@ -469,8 +483,39 @@ fn validate_evidence_calibrations() -> Result<(), String> {
             .get("unregisteredPredictors")
             .and_then(serde_json::Value::as_str)
             != Some("contextual-only")
+        || policy
+            .get("calibrationScope")
+            .and_then(serde_json::Value::as_str)
+            != Some("global-only")
+        || policy
+            .get("geneSpecificOverrides")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || policy
+            .get("thresholdComparison")
+            .and_then(serde_json::Value::as_str)
+            != Some("raw-numeric-no-rounding")
     {
         return Err("evidence calibration policy must remain display-only".into());
+    }
+    let strength_display = policy
+        .get("strengthDisplay")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("evidence calibration policy has no strength display contract")?;
+    if strength_display
+        .get("hueEncodesDirection")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+        || strength_display
+            .get("saturationEncodesStrength")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || strength_display
+            .get("strengthPresentation")
+            .and_then(serde_json::Value::as_str)
+            != Some("text-and-tooltip")
+    {
+        return Err("evidence strength must not be encoded by color saturation".into());
     }
     let calibrations = value["calibrations"]
         .as_array()
@@ -491,7 +536,7 @@ fn validate_evidence_calibrations() -> Result<(), String> {
             || !calibration["scope"]
                 .as_str()
                 .is_some_and(|text| !text.is_empty())
-            || !calibration["geneSpecific"].is_boolean()
+            || calibration["geneSpecific"].as_bool() != Some(false)
             || !calibration["singlePredictorOnly"].is_boolean()
         {
             return Err(format!(
@@ -532,12 +577,7 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                 || !band["strength"].as_str().is_some_and(|strength| {
                     matches!(
                         strength,
-                        "none"
-                            | "supporting"
-                            | "moderate"
-                            | "moderate-to-strong"
-                            | "strong"
-                            | "very strong"
+                        "none" | "supporting" | "moderate" | "3-point" | "strong" | "very strong"
                     )
                 })
                 || !band["tone"].as_str().is_some_and(|tone| {
@@ -697,6 +737,31 @@ fn validate_evidence_calibrations() -> Result<(), String> {
             .filter(|matches| !matches.is_empty())
             .ok_or_else(|| format!("evidence predictor {id} has no field matches"))?;
         for field_match in matches {
+            let verification_status = field_match["verificationStatus"]
+                .as_str()
+                .filter(|status| matches!(*status, "approved" | "unverified"))
+                .ok_or_else(|| {
+                    format!("evidence predictor {id} has an invalid source verification status")
+                })?;
+            match verification_status {
+                "approved"
+                    if !field_match["sourceVersion"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()) =>
+                {
+                    return Err(format!(
+                        "approved evidence predictor {id} has no source version"
+                    ));
+                }
+                "unverified"
+                    if !field_match["reason"]
+                        .as_str()
+                        .is_some_and(|value| !value.trim().is_empty()) =>
+                {
+                    return Err(format!("unverified evidence predictor {id} has no reason"));
+                }
+                _ => {}
+            }
             let source_ids = field_match["sourceIds"]
                 .as_array()
                 .filter(|values| !values.is_empty())
@@ -727,6 +792,87 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                 }
             }
         }
+    }
+    let categorical_predictions = value["categoricalPredictions"]
+        .as_array()
+        .filter(|mappings| !mappings.is_empty())
+        .ok_or("evidence calibration manifest has no categorical prediction registry")?;
+    let mut categorical_fields = HashSet::new();
+    for mapping in categorical_predictions {
+        let source_id = mapping["sourceId"]
+            .as_str()
+            .filter(|value| safe_id(value))
+            .ok_or("categorical prediction mapping has an invalid source ID")?;
+        let field_name = mapping["fieldName"]
+            .as_str()
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .ok_or("categorical prediction mapping has an invalid field name")?;
+        if mapping["displayOnly"].as_bool() != Some(true)
+            || !mapping["referenceUrl"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("https://") && url.len() <= 2048)
+            || !categorical_fields.insert((source_id.to_ascii_lowercase(), field_name.to_owned()))
+        {
+            return Err(format!(
+                "categorical prediction mapping {source_id}.{field_name} has invalid metadata"
+            ));
+        }
+        let codes = mapping["codes"]
+            .as_array()
+            .filter(|codes| !codes.is_empty())
+            .ok_or_else(|| {
+                format!("categorical prediction mapping {source_id}.{field_name} has no codes")
+            })?;
+        let mut code_values = HashSet::new();
+        for code in codes {
+            let value = code["value"]
+                .as_str()
+                .filter(|value| !value.is_empty() && value.len() <= 64)
+                .ok_or_else(|| {
+                    format!(
+                        "categorical prediction mapping {source_id}.{field_name} has an invalid code"
+                    )
+                })?;
+            if !code_values.insert(value.to_ascii_lowercase())
+                || !code["label"]
+                    .as_str()
+                    .is_some_and(|label| !label.trim().is_empty() && label.len() <= 128)
+                || !code["tone"].as_str().is_some_and(|tone| {
+                    matches!(
+                        tone,
+                        "neutral" | "informative" | "reassuring" | "caution" | "adverse"
+                    )
+                })
+            {
+                return Err(format!(
+                    "categorical prediction mapping {source_id}.{field_name} has invalid codes"
+                ));
+            }
+        }
+    }
+    let dbnsfp_contract: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/dbnsfp-4.9a-curated-fields.json"
+    )))
+    .map_err(|error| format!("invalid dbNSFP field contract: {error}"))?;
+    let expected_dbnsfp_predictions = dbnsfp_contract["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| group["fields"].as_array().into_iter().flatten())
+        .filter_map(serde_json::Value::as_str)
+        .filter(|field| field.ends_with("_pred"))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mapped_dbnsfp_predictions = categorical_fields
+        .iter()
+        .filter(|(source_id, _)| source_id == "dbnsfp")
+        .map(|(_, field_name)| field_name.to_owned())
+        .collect::<HashSet<_>>();
+    if mapped_dbnsfp_predictions != expected_dbnsfp_predictions {
+        return Err(
+            "categorical prediction registry must cover every curated dbNSFP _pred field".into(),
+        );
     }
     let missense_policy = &value["interpretationPolicy"]["missenseProteinEffect"];
     let splicing_policy = &value["interpretationPolicy"]["splicing"];
@@ -970,6 +1116,22 @@ mod tests {
             false
         );
         assert_eq!(
+            manifest["interpretationPolicy"]["calibrationScope"],
+            "global-only"
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["geneSpecificOverrides"],
+            false
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["thresholdComparison"],
+            "raw-numeric-no-rounding"
+        );
+        assert_eq!(
+            manifest["interpretationPolicy"]["strengthDisplay"]["saturationEncodesStrength"],
+            false
+        );
+        assert_eq!(
             manifest["interpretationPolicy"]["missenseProteinEffect"]["primaryPredictorId"],
             "revel"
         );
@@ -1008,6 +1170,37 @@ mod tests {
         assert_eq!(
             manifest["interpretationPolicy"]["splicing"]["aggregation"],
             "maximum-delta-score"
+        );
+        assert!(
+            manifest["calibrations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|calibration| calibration["geneSpecific"] == false)
+        );
+        let favor_revel_match = predictors
+            .iter()
+            .find(|predictor| predictor["id"] == "revel")
+            .unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field_match| field_match["sourceIds"] == serde_json::json!(["favor-online"]))
+            .unwrap();
+        assert_eq!(favor_revel_match["verificationStatus"], "unverified");
+        let dbnsfp_revel_match = predictors
+            .iter()
+            .find(|predictor| predictor["id"] == "revel")
+            .unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field_match| field_match["sourceIds"] == serde_json::json!(["dbnsfp"]))
+            .unwrap();
+        assert_eq!(dbnsfp_revel_match["verificationStatus"], "approved");
+        assert_eq!(
+            manifest["categoricalPredictions"].as_array().unwrap().len(),
+            20
         );
     }
 
@@ -1067,6 +1260,14 @@ mod tests {
 
         let alpha_missense = calibration("alphamissense-clingen-svi-2025-global");
         assert_eq!(
+            label_at(alpha_missense, 0.070),
+            "3-point benign computational interval"
+        );
+        assert_eq!(
+            label_at(alpha_missense, 0.070_000_1),
+            "Moderate benign computational evidence"
+        );
+        assert_eq!(
             label_at(alpha_missense, 0.791),
             "Indeterminate calibrated range"
         );
@@ -1077,6 +1278,51 @@ mod tests {
         assert_eq!(
             label_at(alpha_missense, 0.990),
             "Strong pathogenic computational evidence"
+        );
+        assert_eq!(
+            label_at(alpha_missense, 0.972),
+            "3-point pathogenic computational interval"
+        );
+
+        let varity_r = calibration("varity-r-clingen-svi-2025-global");
+        assert_eq!(
+            label_at(varity_r, 0.036),
+            "Strong benign computational evidence"
+        );
+        assert_eq!(
+            label_at(varity_r, 0.036_000_1),
+            "3-point benign computational interval"
+        );
+        assert_eq!(
+            label_at(varity_r, 0.675),
+            "Supporting pathogenic computational evidence"
+        );
+        assert_eq!(
+            label_at(varity_r, 0.915),
+            "3-point pathogenic computational interval"
+        );
+        assert_eq!(
+            label_at(varity_r, 0.965),
+            "Strong pathogenic computational evidence"
+        );
+
+        let esm1b = calibration("esm1b-clingen-svi-2025-global");
+        assert_eq!(
+            label_at(esm1b, -24.0),
+            "Strong pathogenic computational evidence"
+        );
+        assert_eq!(
+            label_at(esm1b, -23.9),
+            "3-point pathogenic computational interval"
+        );
+        assert_eq!(
+            label_at(esm1b, -10.7),
+            "Supporting pathogenic computational evidence"
+        );
+        assert_eq!(label_at(esm1b, -6.2), "Indeterminate calibrated range");
+        assert_eq!(
+            label_at(esm1b, 8.8),
+            "3-point benign computational interval"
         );
 
         let splice_ai = calibration("spliceai-clingen-svi-2023-global");
@@ -1134,6 +1380,11 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&profiles_json()).unwrap();
         assert_eq!(json[0]["id"], "wgs");
         assert_eq!(json[1]["id"], "standard");
+        assert_eq!(json[2]["id"], "online");
+        assert_eq!(
+            json[2]["serviceIds"],
+            serde_json::json!(["favor-variant-annotation"])
+        );
     }
 
     #[test]

@@ -155,7 +155,7 @@
     {
       "id": "alphamissense",
       "name": "AlphaMissense",
-      "purpose": "Protein missense pathogenicity prediction",
+      "purpose": "Planned adapter for a future pinned AlphaMissense release",
       "defaultEnabled": false,
       "fastvepSource": null,
       "delivery": "adapter-required",
@@ -212,6 +212,15 @@
       "providerUrl": "https://monarchinitiative.org/",
       "timeoutSeconds": 45,
       "maxResults": 50
+    },
+    {
+      "id": "favor-variant-annotation",
+      "provider": "FAVOR",
+      "purpose": "Online GRCh38 annotations for selected or filtered result sets",
+      "apiUrl": "https://api-v2.genohub.org/api/v1/variants/batch",
+      "providerUrl": "https://favor-beta.genohub.org/",
+      "timeoutSeconds": 60,
+      "maxResults": 10000
     }
   ],
   "profiles": [
@@ -226,6 +235,13 @@
       "name": "Minimal",
       "purpose": "A smaller clinical and population set with dbSNP, conservation, and standalone REVEL scores",
       "sourceIds": ["clinvar", "dbsnp", "gnomad", "phylop", "revel"]
+    },
+    {
+      "id": "online",
+      "name": "Core + FAVOR",
+      "purpose": "Local core consequence annotation with explicit FAVOR enrichment for selected or filtered result sets",
+      "sourceIds": [],
+      "serviceIds": ["favor-variant-annotation"]
     }
   ],
   "resources": [

@@ -6,6 +6,8 @@ pub(crate) struct AppConfig {
     pub(crate) resource_directory: Option<PathBuf>,
     pub(crate) downloads_directory: Option<PathBuf>,
     pub(crate) results_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) favor_enabled: Option<bool>,
 }
 
 pub(crate) fn config_file(home: &Path) -> PathBuf {

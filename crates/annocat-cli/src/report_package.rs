@@ -68,23 +68,38 @@ pub fn create_with_display_name(
     {
         return Err("report display name is invalid".into());
     }
-    let files = [
-        (&manifest.result_file, "variants"),
-        (&manifest.consequences_file, "consequences"),
-        (&manifest.evidence_file, "evidence"),
-        (&manifest.field_catalog_file, "field-catalog"),
+    let mut files = vec![
+        (manifest.result_file.clone(), "variants"),
+        (manifest.consequences_file.clone(), "consequences"),
+        (manifest.evidence_file.clone(), "evidence"),
+        (manifest.field_catalog_file.clone(), "field-catalog"),
     ];
+    files.extend(
+        crate::favor::packaged_assets(run_directory)?
+            .into_iter()
+            .map(|(name, role)| (name.to_owned(), role)),
+    );
     let run_root = run_directory
         .canonicalize()
         .map_err(|error| format!("cannot resolve completed run: {error}"))?;
     let mut entries = Vec::with_capacity(files.len());
     for (declared, role) in files {
-        let path = contained_file(&run_root, declared)?;
+        let path = contained_file(&run_root, &declared)?;
         let bytes = fs::metadata(&path)
             .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?
             .len();
         let sha256 = sha256_file(&path)?;
-        entries.push((declared.clone(), role, path, bytes, sha256));
+        entries.push((declared, role, path, bytes, sha256));
+    }
+    let mut source_ids = manifest.source_ids;
+    if entries
+        .iter()
+        .any(|(_, role, _, _, _)| *role == "favor-evidence")
+        && !source_ids
+            .iter()
+            .any(|source| source == crate::favor::SOURCE_ID)
+    {
+        source_ids.push(crate::favor::SOURCE_ID.into());
     }
     let package_manifest = serde_json::to_vec_pretty(&serde_json::json!({
         "packageFormat": "annocat-report",
@@ -103,7 +118,7 @@ pub fn create_with_display_name(
             "version": manifest.fastvep_version,
             "sha256": manifest.fastvep_sha256
         })),
-        "sourceIds": manifest.source_ids,
+        "sourceIds": source_ids,
         "files": entries.iter().map(|(name, role, _, bytes, sha256)| serde_json::json!({
             "path": name, "role": role, "bytes": bytes, "sha256": sha256
         })).collect::<Vec<_>>()

@@ -121,6 +121,19 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     let consequences = role(&roles, "consequences")?;
     let evidence = role(&roles, "evidence")?;
     let catalog = role(&roles, "field-catalog")?;
+    let favor_roles = [
+        "favor-evidence",
+        "favor-status",
+        "favor-field-catalog",
+        "favor-provenance",
+    ];
+    let favor_role_count = favor_roles
+        .iter()
+        .filter(|role_name| roles.contains_key(**role_name))
+        .count();
+    if favor_role_count != 0 && favor_role_count != favor_roles.len() {
+        return Err("imported FAVOR enrichment files are incomplete".into());
+    }
     let variant_count = manifest.variant_count;
     if report_kind == "vcf-only" {
         crate::results::validate_report_tables_allow_empty_consequences(
@@ -178,6 +191,9 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         serde_json::to_vec_pretty(&local_manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("cannot write imported run manifest: {error}"))?;
+    if favor_role_count == favor_roles.len() {
+        crate::favor::prepare_query_assets(evidence, catalog)?;
+    }
     fs::rename(&staging, &final_directory)
         .map_err(|error| format!("cannot publish imported report: {error}"))?;
     std::mem::forget(cleanup);

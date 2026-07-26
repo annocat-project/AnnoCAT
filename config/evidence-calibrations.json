@@ -5,6 +5,14 @@
     "automaticClassification": false,
     "unregisteredPredictors": "contextual-only",
     "developerCategories": "display-only",
+    "calibrationScope": "global-only",
+    "geneSpecificOverrides": false,
+    "thresholdComparison": "raw-numeric-no-rounding",
+    "strengthDisplay": {
+      "hueEncodesDirection": true,
+      "saturationEncodesStrength": false,
+      "strengthPresentation": "text-and-tooltip"
+    },
     "missenseProteinEffect": {
       "primaryPredictorId": "revel",
       "fallback": "none",
@@ -28,8 +36,9 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original REVEL score; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["revel"], "fieldNames": ["score"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["REVEL_score"]}
+        {"sourceIds": ["revel"], "fieldNames": ["score"], "verificationStatus": "approved", "sourceVersion": "REVEL 1.3"},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["REVEL_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["revel"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream REVEL release."}
       ]
     },
     {
@@ -42,8 +51,9 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original AlphaMissense pathogenicity score; developer categories and rank scores are excluded",
       "matches": [
-        {"sourceIds": ["alphamissense"], "fieldNames": ["score", "pathogenicity"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["AlphaMissense_score"]}
+        {"sourceIds": ["alphamissense"], "fieldNames": ["score", "pathogenicity"], "verificationStatus": "unverified", "reason": "The planned adapter has no pinned AlphaMissense release contract."},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["AlphaMissense_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["alphaMissense"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream AlphaMissense release."}
       ]
     },
     {
@@ -56,7 +66,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "BayesDel no-AF score; allele-frequency and rank-score models are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -69,7 +79,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original VEST4 score; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["VEST4_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VEST4_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -82,8 +92,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original PrimateAI score; categorical and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["primateai"], "fieldNames": ["score"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"]}
+        {"sourceIds": ["primateai"], "fieldNames": ["score"], "verificationStatus": "unverified", "reason": "The dedicated PrimateAI source is not yet backed by a pinned release contract."},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -96,7 +106,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original PolyPhen-2 HumDiv score; HumVar, categorical, and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HDIV_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HDIV_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -109,7 +119,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original SIFT score; SIFT4G, categorical, converted, and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -122,8 +132,9 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "CADD PHRED score; raw and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["cadd"], "fieldNames": ["phred"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["CADD_phred"]}
+        {"sourceIds": ["cadd"], "fieldNames": ["phred"], "verificationStatus": "approved", "sourceVersion": "CADD 1.7"},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["CADD_phred"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a (CADD 1.7)"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["caddPhred"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream CADD release."}
       ]
     },
     {
@@ -136,7 +147,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original MPC score; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["MPC_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["MPC_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -149,7 +160,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original VARITY_R rare-variant model score; VARITY_ER and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["VARITY_R_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VARITY_R_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -162,8 +173,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "phyloP 100-way vertebrate score for the variant position; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["phylop"], "fieldNames": ["score"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"]}
+        {"sourceIds": ["phylop"], "fieldNames": ["score"], "verificationStatus": "approved", "sourceVersion": "UCSC hg38 phyloP 100-way"},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -176,8 +187,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "GERP++ rejected-substitution score; neutral-rate and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["gerp"], "fieldNames": ["score"]},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["GERP++_RS"]}
+        {"sourceIds": ["gerp"], "fieldNames": ["score"], "verificationStatus": "unverified", "reason": "The dedicated GERP source is not yet backed by a pinned release contract."},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["GERP++_RS"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
       ]
     },
     {
@@ -191,19 +202,21 @@
       "excludedVariantClasses": ["splice_acceptor_variant", "splice_donor_variant"],
       "scoreIdentity": "Maximum of DS_AG, DS_AL, DS_DG, and DS_DL for the selected allele; the generic calibration excludes canonical splice-site variants",
       "matches": [
-        {"sourceIds": ["spliceai"], "fieldNames": ["maxDeltaScore"]}
+        {"sourceIds": ["spliceai"], "fieldNames": ["maxDeltaScore"], "verificationStatus": "approved", "sourceVersion": "Ensembl MANE Select v1.4 masked SNV scores"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["spliceaiDsMax"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream SpliceAI release or masking configuration."}
       ]
     },
     {
       "id": "esm1b",
       "label": "ESM1b",
-      "calibrationStatus": "unverified",
+      "calibrationStatus": "published",
+      "calibrationId": "esm1b-clingen-svi-2025-global",
       "evidenceGroup": "missense-protein-effect",
       "role": "contextual",
       "variantClasses": ["missense_variant"],
-      "scoreIdentity": "dbNSFP ESM1b score identity and precision have not been verified against the 2025 calibration inputs",
+      "scoreIdentity": "Original ESM1b log-likelihood-ratio score; lower values predict greater functional impact",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"], "verificationStatus": "unverified", "reason": "dbNSFP 4.9a documents the original ESM1b LLR, but AnnoCat has not verified source precision and transcript mapping against the 2025 calibration input."}
       ]
     },
     {
@@ -213,9 +226,221 @@
       "evidenceGroup": "missense-protein-effect",
       "role": "contextual",
       "variantClasses": ["missense_variant"],
-      "scoreIdentity": "The dbNSFP MutPred field has not been verified as the exact MutPred2 score calibrated by ClinGen SVI",
+      "scoreIdentity": "dbNSFP 4.9a MutPred_score is legacy MutPred v1.2, not the MutPred2 score calibrated by ClinGen SVI in 2022",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["MutPred_score"]}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["MutPred_score"], "verificationStatus": "unverified", "reason": "The installed field is MutPred v1.2 and must not use MutPred2 calibration."}
+      ]
+    }
+  ],
+  "categoricalPredictions": [
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "SIFT_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "SIFT4G_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "Polyphen2_HDIV_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Probably damaging", "tone": "adverse"},
+        {"value": "P", "label": "Possibly damaging", "tone": "caution"},
+        {"value": "B", "label": "Benign", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "Polyphen2_HVAR_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Probably damaging", "tone": "adverse"},
+        {"value": "P", "label": "Possibly damaging", "tone": "caution"},
+        {"value": "B", "label": "Benign", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "MutationTaster_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "A", "label": "Disease causing (automatic)", "tone": "adverse"},
+        {"value": "D", "label": "Disease causing", "tone": "adverse"},
+        {"value": "N", "label": "Polymorphism", "tone": "reassuring"},
+        {"value": "P", "label": "Polymorphism (automatic)", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "MutationAssessor_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "H", "label": "High functional impact", "tone": "adverse"},
+        {"value": "M", "label": "Medium functional impact", "tone": "caution"},
+        {"value": "L", "label": "Low functional impact", "tone": "neutral"},
+        {"value": "N", "label": "Neutral", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "PROVEAN_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "N", "label": "Neutral", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "MetaSVM_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "MetaLR_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "MetaRNN_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "M-CAP_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "PrimateAI_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "DEOGEN2_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "BayesDel_noAF_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "ClinPred_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "LIST-S2_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "ESM1b_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "note": "dbNSFP derives this category at -7.5; the ESM1b authors did not recommend a binary threshold.",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "AlphaMissense_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "B", "label": "Likely benign", "tone": "reassuring"},
+        {"value": "A", "label": "Uncertain", "tone": "caution"},
+        {"value": "P", "label": "Likely pathogenic", "tone": "adverse"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "Aloft_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "note": "ALoFT predicts loss-of-function tolerance or inheritance context; Dominant and Recessive are not variant classifications.",
+      "codes": [
+        {"value": "Tolerant", "label": "Tolerant", "tone": "reassuring"},
+        {"value": "Recessive", "label": "Recessive loss-of-function context", "tone": "informative"},
+        {"value": "Dominant", "label": "Dominant loss-of-function context", "tone": "informative"}
+      ]
+    },
+    {
+      "sourceId": "dbnsfp",
+      "fieldName": "fathmm-XF_coding_pred",
+      "displayOnly": true,
+      "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "N", "label": "Neutral", "tone": "reassuring"}
       ]
     }
   ],
@@ -248,13 +473,13 @@
       "singlePredictorOnly": true,
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
-        {"maximumInclusive": 0.07, "label": "Between moderate and strong benign computational evidence", "direction": "benign", "strength": "moderate-to-strong", "tone": "reassuring"},
+        {"maximumInclusive": 0.07, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"},
         {"minimumExclusive": 0.07, "maximumInclusive": 0.099, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.099, "maximumInclusive": 0.169, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.169, "maximumExclusive": 0.792, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
         {"minimumInclusive": 0.792, "maximumExclusive": 0.906, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
         {"minimumInclusive": 0.906, "maximumExclusive": 0.972, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumInclusive": 0.972, "maximumExclusive": 0.99, "label": "Between moderate and strong pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate-to-strong", "tone": "adverse"},
+        {"minimumInclusive": 0.972, "maximumExclusive": 0.99, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
         {"minimumInclusive": 0.99, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
     },
@@ -378,14 +603,32 @@
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
         {"maximumInclusive": 0.036, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
-        {"minimumExclusive": 0.036, "maximumInclusive": 0.063, "label": "Between moderate and strong benign computational evidence", "direction": "benign", "strength": "moderate-to-strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.036, "maximumInclusive": 0.063, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"},
         {"minimumExclusive": 0.063, "maximumInclusive": 0.116, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.116, "maximumInclusive": 0.251, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.251, "maximumExclusive": 0.675, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
         {"minimumInclusive": 0.675, "maximumExclusive": 0.842, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
         {"minimumInclusive": 0.842, "maximumExclusive": 0.915, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumInclusive": 0.915, "maximumExclusive": 0.965, "label": "Between moderate and strong pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate-to-strong", "tone": "adverse"},
+        {"minimumInclusive": 0.915, "maximumExclusive": 0.965, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
         {"minimumInclusive": 0.965, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "esm1b-clingen-svi-2025-global",
+      "reference": "Bergquist et al. 2025, DOI 10.1016/j.gim.2025.101402",
+      "referenceUrl": "https://doi.org/10.1016/j.gim.2025.101402",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "bands": [
+        {"maximumInclusive": -24.0, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"},
+        {"minimumExclusive": -24.0, "maximumInclusive": -14.0, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
+        {"minimumExclusive": -14.0, "maximumInclusive": -12.2, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumExclusive": -12.2, "maximumInclusive": -10.7, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumExclusive": -10.7, "maximumInclusive": -6.2, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumExclusive": -6.2, "maximumInclusive": -3.2, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": -3.2, "maximumInclusive": 8.7, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 8.7, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"}
       ]
     },
     {

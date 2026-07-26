@@ -3104,6 +3104,27 @@ fn split_numeric_evidence_comparison(
     ))
 }
 
+fn canonical_evidence_path(evidence: &Path) -> PathBuf {
+    if is_composite_evidence(evidence)
+        && let Some(run_directory) = evidence.parent().and_then(Path::parent)
+    {
+        let canonical = run_directory.join("evidence.parquet");
+        if canonical.is_file() {
+            return canonical;
+        }
+    }
+    evidence.to_path_buf()
+}
+
+fn is_composite_evidence(evidence: &Path) -> bool {
+    evidence.file_name().and_then(|name| name.to_str()) == Some("*.parquet")
+        && evidence
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("query-evidence")
+}
+
 fn evidence_filter_rules_sql(
     evidence: Option<&Path>,
     catalog: Option<&Path>,
@@ -3135,8 +3156,9 @@ fn evidence_filter_rules_sql(
             _ => FilterValueKind::Text,
         };
         if field.alignment_group.is_some() {
-            let resolved = crate::evidence_resolution::available_path(evidence)
-                .ok_or("transcript evidence index is not ready")?;
+            let resolved =
+                crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
+                    .ok_or("transcript evidence index is not ready")?;
             let expression = if kind == FilterValueKind::Number {
                 "er.resolved_number"
             } else {
@@ -3273,8 +3295,9 @@ fn displayed_field_search_sql(
                     .map_err(|error| format!("cannot search displayed evidence fields: {error}"))?;
             }
             if !aligned.is_empty() {
-                let resolved = crate::evidence_resolution::available_path(evidence)
-                    .ok_or("transcript evidence index is not ready")?;
+                let resolved =
+                    crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
+                        .ok_or("transcript evidence index is not ready")?;
                 let conditions = std::iter::repeat_n(
                     "(er_search.source_id = ? AND er_search.field_path = ?)",
                     aligned.len(),
@@ -3353,7 +3376,7 @@ fn prepare_requested_evidence_resolution(
     {
         return Ok(None);
     }
-    crate::evidence_resolution::prepare(variants, evidence, catalog)
+    crate::evidence_resolution::prepare(variants, &canonical_evidence_path(evidence), catalog)
 }
 
 fn page_json_with_evidence_internal(
@@ -3506,8 +3529,9 @@ fn page_with_evidence_result(
         .collect::<Vec<_>>();
     let mut resolutions: HashMap<(String, usize), TranscriptEvidenceResolution> = HashMap::new();
     if !aligned.is_empty() {
-        let resolved = crate::evidence_resolution::available_path(evidence)
-            .ok_or("transcript evidence index is not ready")?;
+        let resolved =
+            crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
+                .ok_or("transcript evidence index is not ready")?;
         let conditions = std::iter::repeat_n("(source_id = ? AND field_path = ?)", aligned.len())
             .collect::<Vec<_>>()
             .join(" OR ");
@@ -4101,7 +4125,7 @@ fn evidence_sort_spec(
     let field = selected.pop().ok_or("unknown evidence sort column")?;
     let resolved = field.alignment_group.is_some();
     let evidence_path = if resolved {
-        crate::evidence_resolution::available_path(evidence)
+        crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
             .ok_or("transcript evidence index is not ready")?
     } else {
         evidence.to_path_buf()
@@ -4362,14 +4386,16 @@ pub fn complete_detail_json_at(
         evidence_parquet,
         record_number,
         alt_index,
-    ) && let Ok(Some(mut indexed)) = crate::detail_lookup::lookup(
-        variants_parquet,
-        consequences,
-        evidence,
-        allele_id,
-        record_number,
-        alt_index,
-    ) {
+    ) && !is_composite_evidence(evidence)
+        && let Ok(Some(mut indexed)) = crate::detail_lookup::lookup(
+            variants_parquet,
+            consequences,
+            evidence,
+            allele_id,
+            record_number,
+            alt_index,
+        )
+    {
         let alternate_count = variant_alternate_count(variants_parquet, record_number, alt_index)?;
         indexed
             .variant
