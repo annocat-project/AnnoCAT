@@ -5,18 +5,43 @@ const FIELD_DETAILS = {
   consequence: ['Consequence', 'Functional consequence category returned by FAVOR.'],
   clinicalsignificance: ['Clinical significance', 'Clinical significance category returned by FAVOR. Verify clinical assertions against the primary ClinVar record.'],
   caddphred: ['CADD PHRED score', 'Rank-scaled CADD deleteriousness score; higher values indicate stronger predicted functional impact.'],
-  revel: ['REVEL score', 'Missense ensemble score from 0 to 1; higher values indicate greater predicted pathogenicity.'],
-  alphamissense: ['AlphaMissense score', 'Missense pathogenicity score returned by AlphaMissense.'],
+  revel: ['REVEL summary', 'FAVOR REVEL missense summary from 0 to 1. The standard response does not identify the contributing transcript.'],
+  alphamissense: ['AlphaMissense maximum', 'Maximum pathogenicity score across the per-transcript AlphaMissense predictions returned by FAVOR.'],
   spliceaidsmax: ['SpliceAI maximum delta score', 'Maximum SpliceAI delta score across acceptor and donor gain and loss predictions.'],
-  siftcat: ['SIFT prediction', 'SIFT missense-effect category returned by FAVOR.'],
-  polyphencat: ['PolyPhen-2 prediction', 'PolyPhen-2 missense-effect category returned by FAVOR.'],
-  metasvmpred: ['MetaSVM prediction', 'MetaSVM ensemble missense-effect category returned by FAVOR.'],
+  siftcat: ['SIFT summary', 'FAVOR SIFT missense-effect summary. The standard response does not identify the contributing transcript.'],
+  polyphencat: ['PolyPhen-2 summary', 'FAVOR PolyPhen-2 missense-effect summary. The standard response does not identify the contributing transcript.'],
+  metasvmpred: ['MetaSVM summary', 'FAVOR MetaSVM missense-effect summary. The standard response does not identify the contributing transcript.'],
   gnomadaf: ['gnomAD allele frequency', 'Overall allele frequency from the gnomAD data represented by FAVOR.'],
   bravoaf: ['TOPMed BRAVO allele frequency', 'Overall allele frequency from TOPMed BRAVO represented by FAVOR.'],
   tgall: ['1000 Genomes allele frequency', 'Overall allele frequency from the 1000 Genomes data represented by FAVOR.'],
   apcconservation: ['Conservation aPC', 'FAVOR annotation principal-component score summarizing conservation features.'],
   apcepigenetics: ['Epigenetics aPC', 'FAVOR annotation principal-component score summarizing epigenetic features.'],
-  apcproteinfunction: ['Protein function aPC', 'FAVOR annotation principal-component score summarizing protein-function features.']
+  apcproteinfunction: ['Protein function aPC', 'FAVOR annotation principal-component score summarizing protein-function features.'],
+  codingtranscriptbasis: ['Coding transcript basis', 'Transcript preference reported by FAVOR for its coding annotation record, such as MANE Select or canonical transcript.'],
+  codinggene: ['Coding gene symbol', "Gene symbol attached to FAVOR's selected coding annotation record."],
+  codinghgvsp: ['Coding protein change', "Protein-level HGVS expression attached to FAVOR's selected coding annotation record."],
+  codingcaddphred: ['CADD PHRED score', "CADD PHRED score from FAVOR's selected coding annotation record."],
+  codingrevelscore: ['REVEL score', "REVEL missense score from FAVOR's selected coding annotation record."],
+  codingalphamissensescore: ['AlphaMissense score', "AlphaMissense score from FAVOR's selected coding annotation record."],
+  codingalphamissensepred: ['AlphaMissense prediction', "Source-native AlphaMissense category from FAVOR's selected coding annotation record."],
+  codingsiftscore: ['SIFT score', "SIFT missense-effect score from FAVOR's selected coding annotation record."],
+  codingsiftpred: ['SIFT prediction', "Source-native SIFT category from FAVOR's selected coding annotation record."],
+  codingpolyphen2hvarscore: ['PolyPhen-2 HVAR score', "PolyPhen-2 HumVar score from FAVOR's selected coding annotation record."],
+  codingpolyphen2hvarpred: ['PolyPhen-2 HVAR prediction', "Source-native PolyPhen-2 HumVar category from FAVOR's selected coding annotation record."],
+  codingmetasvmscore: ['MetaSVM score', "MetaSVM ensemble score from FAVOR's selected coding annotation record."],
+  codingmetasvmpred: ['MetaSVM prediction', "Source-native MetaSVM category from FAVOR's selected coding annotation record."],
+  codingbayesdelnoafscore: ['BayesDel no-AF score', "BayesDel score without allele frequency from FAVOR's selected coding annotation record."],
+  codingvest4score: ['VEST4 score', "VEST4 missense score from FAVOR's selected coding annotation record."],
+  codingmutpred2score: ['MutPred2 score', "MutPred2 missense score from FAVOR's selected coding annotation record."],
+  codingmutpred2pred: ['MutPred2 interpretation', "ClinGen-calibrated MutPred2 category returned by dbNSFP for FAVOR's selected coding annotation record."],
+  codingprimateaiscore: ['PrimateAI score', "PrimateAI missense score from FAVOR's selected coding annotation record."],
+  codingprimateaipred: ['PrimateAI prediction', "Source-native PrimateAI category from FAVOR's selected coding annotation record."],
+  codingmpcscore: ['MPC score', "Missense badness, PolyPhen-2, and regional constraint score from FAVOR's selected coding annotation record."],
+  codingvarityrscore: ['VARITY_R score', "VARITY rare-variant model score from FAVOR's selected coding annotation record."],
+  codingesm1bscore: ['ESM1b score', "ESM1b protein language-model score from FAVOR's selected coding annotation record."],
+  codingesm1bpred: ['ESM1b prediction', "Source-native ESM1b category from FAVOR's selected coding annotation record."],
+  codinggerprs: ['GERP++ RS', "GERP++ rejected-substitution conservation score returned with FAVOR's coding record."],
+  codingphylop100way: ['phyloP 100-way score', "phyloP 100-way vertebrate conservation score returned with FAVOR's coding record."]
 };
 const FAVOR_CONFIRMATION_STORAGE_KEY = 'annocat.favorTransmissionConfirmed.v1';
 
@@ -42,6 +67,7 @@ export function createFavorOnline({
   openFluentDialog,
   togglePopover,
   getState,
+  resolveCurrentTotal,
   collectFilteredAlleles,
   collectSelectedAlleles,
   refreshResultSchema,
@@ -72,7 +98,7 @@ export function createFavorOnline({
           <span class="source-state fui-badge">${state}</span>
         </h2>
         <p class="source-card-description fui-card__description">${escapeHtml(service.purpose || 'Online GRCh38 annotation for selected or filtered result sets.')}</p>
-        <p class="source-card-storage fui-card__metadata">Fixed standard field set &middot; Up to ${Number(service.maxVariants || 10000).toLocaleString()} variants per operation</p>
+        <p class="source-card-storage fui-card__metadata">Curated standard and coding fields &middot; Up to ${Number(service.maxVariants || 10000).toLocaleString()} variants per operation</p>
       </div>
       <div class="source-card-meta">
         <div class="source-actions">
@@ -94,7 +120,8 @@ export function createFavorOnline({
     const state = getState();
     return {
       selected: Number(state.selectionCount || 0),
-      current: Number(state.resultTotal || 0)
+      current: Number.isFinite(state.resultTotal) ? state.resultTotal : null,
+      loaded: Number(state.loadedCount || 0)
     };
   }
 
@@ -105,6 +132,7 @@ export function createFavorOnline({
     if (status?.notFound) outcomes.push(`${Number(status.notFound).toLocaleString()} not found`);
     if (status?.ambiguous) outcomes.push(`${Number(status.ambiguous).toLocaleString()} ambiguous`);
     if (status?.errors) outcomes.push(`${Number(status.errors).toLocaleString()} errors`);
+    if (status?.codingFound) outcomes.unshift(`${Number(status.codingFound).toLocaleString()} with coding predictors`);
     const coverage = total
       ? `${found.toLocaleString()} of ${total.toLocaleString()} variants annotated`
       : `${found.toLocaleString()} variants annotated`;
@@ -124,7 +152,7 @@ export function createFavorOnline({
     panel.classList.add('fui-popover--compact', 'fui-popover--anchor-center');
     const counts = selectionCounts();
     const maximum = Number(service.maxVariants || runStatus?.maxVariants || 10000);
-    const currentTooLarge = counts.current > maximum;
+    const currentTooLarge = counts.current !== null && counts.current > maximum;
     const selectedTooLarge = counts.selected > maximum;
     const selectedUnavailable = busy || !service.enabled || !activeRunId || counts.selected === 0 || selectedTooLarge;
     const selectedTitle = counts.selected === 0
@@ -144,7 +172,7 @@ export function createFavorOnline({
         ${currentTooLarge ? `<p class="fui-status-message fui-status-message--info">Current results exceed ${maximum.toLocaleString()} variants. Narrow the table with search or filters before enrichment.</p>` : ''}
         <div class="favor-popover__actions">
           <button type="button" class="fui-button" data-favor-enrich="selected" title="${escapeHtml(selectedTitle)}" ${selectedUnavailable ? 'disabled' : ''}>${prototypeIcon('check')}<span>Get selected${counts.selected ? ` (${counts.selected.toLocaleString()})` : ''}</span></button>
-          <button type="button" class="fui-button fui-button--primary" data-favor-enrich="current" ${busy || !service.enabled || !activeRunId || counts.current === 0 || currentTooLarge ? 'disabled' : ''}>${prototypeIcon('download')}<span>${busy ? 'Getting annotations...' : `Get current results${counts.current ? ` (${counts.current.toLocaleString()})` : ''}`}</span></button>
+          <button type="button" class="fui-button fui-button--primary" data-favor-enrich="current" ${busy || !service.enabled || !activeRunId || counts.current === 0 || counts.current === null && counts.loaded === 0 || currentTooLarge ? 'disabled' : ''}>${prototypeIcon('download')}<span>${busy ? 'Getting annotations...' : `Get current results${counts.current ? ` (${counts.current.toLocaleString()})` : ''}`}</span></button>
         </div>
       </div>`;
     panel.querySelectorAll('[data-favor-enrich]').forEach(button => {
@@ -166,7 +194,7 @@ export function createFavorOnline({
           <div>
             <p class="kicker">Online annotations</p>
             <h2 id="favor-summary-title">FAVOR summary fields</h2>
-            <p class="fui-dialog__description">AnnoCAT stores these 18 fields from FAVOR's summary API response.</p>
+            <p class="fui-dialog__description">AnnoCAT stores a curated set of standard and coding fields returned by FAVOR.</p>
           </div>
           <button type="submit" value="close" class="fui-button fui-button--icon" aria-label="Close"><svg class="ui-icon" aria-hidden="true"><use href="#icon-close"></use></svg></button>
         </header>
@@ -174,11 +202,11 @@ export function createFavorOnline({
           <dl class="favor-summary-fields">
             <div><dt>Variant context</dt><dd>dbSNP identifier, variant coordinate, gene symbol, and consequence</dd></div>
             <div><dt>Clinical evidence</dt><dd>Clinical significance</dd></div>
-            <div><dt>Prediction scores</dt><dd>CADD PHRED, REVEL, AlphaMissense, SpliceAI maximum delta, SIFT, PolyPhen-2, and MetaSVM</dd></div>
+            <div><dt>Prediction scores</dt><dd>Selected coding-record scores and categories for CADD, REVEL, AlphaMissense, SIFT, PolyPhen-2, MetaSVM, BayesDel, VEST4, PrimateAI, MPC, VARITY_R, and ESM1b; plus standard SpliceAI and variant summaries</dd></div>
             <div><dt>Population frequencies</dt><dd>gnomAD, TOPMed BRAVO, and 1000 Genomes allele frequencies</dd></div>
-            <div><dt>Annotation-PC summaries</dt><dd>Conservation, epigenetics, and protein-function aPC scores</dd></div>
+            <div><dt>Conservation</dt><dd>phyloP 100-way, GERP++ RS, and conservation aPC, with epigenetics and protein-function aPC context</dd></div>
           </dl>
-          <p class="fui-text--secondary favor-summary-note">FAVOR's full catalog contains additional fields that are not returned by this summary request.</p>
+          <p class="fui-text--secondary favor-summary-note">Coding fields are available only for coding variants. Missing annotations remain missing rather than being stored as zero.</p>
           <a class="fui-link" href="https://favor-beta.genohub.org/docs/data" target="_blank" rel="noopener noreferrer">Explore FAVOR's full annotation catalog</a>
         </div>
         <footer class="fui-dialog__footer"><div class="fui-dialog__actions"><button type="submit" value="close" class="fui-button">Close</button></div></footer>
@@ -222,15 +250,29 @@ export function createFavorOnline({
   async function enrich(scope) {
     if (busy || !activeRunId || !service.enabled) return;
     const counts = selectionCounts();
-    const count = scope === 'selected' ? counts.selected : counts.current;
+    let count = scope === 'selected' ? counts.selected : counts.current;
     const maximum = Number(service.maxVariants || 10000);
-    if (!count || count > maximum) return;
-    if (!await confirmEnrichment(count)) return;
     busy = true;
-    feedback = `Preparing ${count.toLocaleString()} variants...`;
-    setResultStatus(`Preparing ${count.toLocaleString()} variants for online annotations...`, { busy: true });
+    feedback = count === null ? 'Counting current results...' : `Preparing ${count.toLocaleString()} variants...`;
+    setResultStatus(count === null ? 'Counting matching variants...' : `Preparing ${count.toLocaleString()} variants for online annotations...`, { busy: true });
     renderPopover();
     try {
+      if (count === null) count = await resolveCurrentTotal();
+      if (!count) {
+        feedback = 'No matching variants are available for online annotation.';
+        setResultStatus(feedback);
+        return;
+      }
+      if (count > maximum) {
+        feedback = `Current results exceed ${maximum.toLocaleString()} variants. Narrow the table with search or filters before enrichment.`;
+        setResultStatus(feedback);
+        return;
+      }
+      if (!await confirmEnrichment(count)) {
+        feedback = '';
+        setResultStatus('');
+        return;
+      }
       const alleleIds = scope === 'selected'
         ? await collectSelectedAlleles()
         : await collectFilteredAlleles();
@@ -254,13 +296,14 @@ export function createFavorOnline({
       try {
       await refreshResultSchema({
         sourceId: 'favor-online',
-        preferredFields: ['clinicalSignificance', 'gnomadAf', 'caddPhred', 'revel', 'spliceaiDsMax']
+        preferredFields: ['clinicalSignificance', 'gnomadAf', 'codingCaddPhred', 'codingRevelScore', 'codingAlphaMissenseScore', 'codingPhyloP100way', 'spliceaiDsMax']
       });
         feedback = completed;
       } catch (error) {
         feedback = `${completed} Reload the report to display the new fields (${error.message}).`;
       }
       const resultParts = [`${Number(result.found || 0).toLocaleString()} found`];
+      if (result.codingFound) resultParts.push(`${Number(result.codingFound).toLocaleString()} with coding predictors`);
       if (result.notFound) resultParts.push(`${Number(result.notFound).toLocaleString()} not found`);
       if (result.ambiguous) resultParts.push(`${Number(result.ambiguous).toLocaleString()} ambiguous`);
       if (result.errors) resultParts.push(`${Number(result.errors).toLocaleString()} errors`);

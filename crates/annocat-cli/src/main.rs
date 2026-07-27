@@ -2287,15 +2287,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "evidence.parquet",
                 "parquet",
             )?;
-            let catalog = completed_run_file(
-                &paths.runs,
-                run_id,
-                "fieldCatalogFile",
-                "field-catalog.json",
-                "json",
-            )?;
             detail_lookup::prepare(&variants, &consequences, &evidence)?;
-            evidence_resolution::prepare(&variants, &evidence, &catalog)?;
             Ok(r#"{"ready":true}"#.to_owned())
         });
         let (status, body) = match response {
@@ -2909,6 +2901,7 @@ fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
         known_total: integer("knownTotal")?
             .map(|value| u64::try_from(value).map_err(|_| "knownTotal must be non-negative"))
             .transpose()?,
+        exact_total: boolean("exactTotal")?.unwrap_or(false),
         query_session: text("querySession")?,
         request_generation: integer("requestGeneration")?
             .map(|value| u64::try_from(value).map_err(|_| "requestGeneration must be non-negative"))

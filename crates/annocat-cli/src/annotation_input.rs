@@ -312,15 +312,15 @@ mod tests {
         let mut encoder = GzEncoder::new(File::create(&input).unwrap(), Compression::fast());
         encoder
             .write_all(
-                b"##fileformat=VCFv4.2\n##reference=GRCh38\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n",
+                b"##fileformat=VCFv4.2\n##reference=GRCh38\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n1\t14\t.\tA\t*\t.\tPASS\t.\n",
             )
             .unwrap();
         encoder.finish().unwrap();
         let mut output = Vec::new();
         let summary = stream_variants(&input, &mut output, || false, |_| {}).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert_eq!(summary.source_records, 4);
-        assert_eq!(summary.skipped_non_variant_records, 2);
+        assert_eq!(summary.source_records, 5);
+        assert_eq!(summary.skipped_non_variant_records, 3);
         assert_eq!(summary.records, 2);
         assert_eq!(summary.alleles, 2);
         assert_eq!(summary.multiallelic_records, 0);

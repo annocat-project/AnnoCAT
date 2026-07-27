@@ -131,13 +131,13 @@
   --color-status-danger-soft: #f8dfe3;
   --color-status-danger-border: #edc9cf;
   --color-status-danger-ring: rgba(196, 56, 85, .12);
-  --color-status-warning: #9a5a13;
-  --color-status-warning-emphasis: #b05f00;
-  --color-status-warning-pill: #9f5700;
-  --color-status-warning-soft: #fff0d9;
-  --color-status-warning-border: #ead5b5;
-  --color-status-warning-border-strong: #d39b2e;
-  --color-status-warning-ring: rgba(183, 121, 31, .13);
+  --color-status-warning: #8a6700;
+  --color-status-warning-emphasis: #956d00;
+  --color-status-warning-pill: #806000;
+  --color-status-warning-soft: #fff4cf;
+  --color-status-warning-border: #e7d28c;
+  --color-status-warning-border-strong: #c59a1c;
+  --color-status-warning-ring: rgba(149, 109, 0, .14);
   --color-status-success: #247451;
   --color-status-success-emphasis: #008653;
   --color-status-success-pill: #00794a;
@@ -153,6 +153,11 @@
   --color-status-missing-soft: #eef0f4;
   --color-status-neutral: #4e5668;
   --color-status-neutral-soft: #f1f3f6;
+  --color-tone-adverse: var(--color-status-danger-emphasis);
+  --color-tone-caution: var(--color-status-warning-emphasis);
+  --color-tone-reassuring: var(--color-status-success-emphasis);
+  --color-tone-informative: var(--color-status-info-emphasis);
+  --color-tone-missing: var(--color-status-missing);
   --color-favorite: #d59116;
   --color-favorite-soft: #fff9e9;
   --color-favorite-border: #ead39a;
@@ -443,13 +448,13 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 #results .impact-moderate { color: var(--color-status-warning-pill); background: var(--color-status-warning-soft); }
 #results .impact-low { color: var(--color-status-info-pill); background: var(--color-status-info-soft); }
 #results .impact-modifier { color: var(--color-text-muted); background: var(--color-surface-muted); }
-#results .table-value { display: inline; padding: 0; border-radius: 0; background: transparent !important; font-weight: inherit; }
-#results .table-value.tone-adverse { color: var(--color-status-danger-pill); }
-#results .table-value.tone-caution { color: var(--color-status-warning-pill); }
-#results .table-value.tone-reassuring { color: var(--color-status-success-pill); }
-#results .table-value.tone-informative { color: var(--color-status-info-pill); }
+#results .table-value:not(.evidence-presentation-pill) { display: inline; padding: 0; border-radius: 0; background: transparent !important; font-weight: inherit; }
+#results .table-value.tone-adverse { color: var(--color-tone-adverse); }
+#results .table-value.tone-caution { color: var(--color-tone-caution); }
+#results .table-value.tone-reassuring { color: var(--color-tone-reassuring); }
+#results .table-value.tone-informative { color: var(--color-tone-informative); }
 #results .table-value.tone-neutral { color: var(--ink); font-weight: inherit; }
-#results .table-value.tone-missing { color: var(--color-status-missing); font-weight:var(--font-weight-normal); }
+#results .table-value.tone-missing { color: var(--color-tone-missing); font-weight:var(--font-weight-normal); }
 #results .column-sort, #results .column-sort span { min-width: 0; max-width: 100%; white-space: nowrap; }
 #results .draggable-column { cursor: grab; }
 #results .draggable-column.column-dragging { cursor: grabbing; opacity: .55; }
@@ -547,20 +552,20 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 #results #variant-detail-body { min-height: 0; flex: 1 1 auto; overflow: auto; }
 #results .detail-overview { padding-bottom: 15px; }
 #results .detail-summary { gap: 9px 14px; }
-#results .detail-summary dd.tone-caution { color: var(--color-status-warning); }
-#results .detail-summary dd.tone-adverse { color: var(--color-status-danger); }
-#results .detail-summary dd.tone-reassuring { color: var(--color-status-success); }
-#results .detail-summary dd.tone-informative { color: var(--color-status-info); }
-#results .detail-summary dd.tone-missing { color: var(--color-status-missing); }
+#results .detail-summary dd.tone-caution { color: var(--color-tone-caution); }
+#results .detail-summary dd.tone-adverse { color: var(--color-tone-adverse); }
+#results .detail-summary dd.tone-reassuring { color: var(--color-tone-reassuring); }
+#results .detail-summary dd.tone-informative { color: var(--color-tone-informative); }
+#results .detail-summary dd.tone-missing { color: var(--color-tone-missing); }
 #results .prediction-summary { min-width: 0; padding: 0; border: 0; background: var(--color-surface); }
 #results .prediction-summary dd { margin-top: 4px; }
 #results .prediction-summary-bar { display: flex; width: 100%; max-width: 150px; min-height: 20px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-small); background: var(--color-surface); }
 #results .prediction-summary-segment { display: flex; min-width: 23px; align-items: center; justify-content: center; padding: 3px 5px; border-right: 1px solid var(--color-surface-translucent-strong); font-style: normal; line-height: 1; }
 #results .prediction-summary-segment:last-child { border-right: 0; }
 #results .prediction-summary-segment b { font-size:var(--text-supporting-size); font-weight:var(--text-supporting-weight); }
-#results .prediction-summary-segment.tone-adverse { background: var(--color-status-danger-soft); color: var(--color-status-danger); }
-#results .prediction-summary-segment.tone-caution { background: var(--color-status-warning-soft); color: var(--color-status-warning); }
-#results .prediction-summary-segment.tone-reassuring { background: var(--color-status-success-soft); color: var(--color-status-success); }
+#results .prediction-summary-segment.tone-adverse { background: var(--color-status-danger-soft); color: var(--color-tone-adverse); }
+#results .prediction-summary-segment.tone-caution { background: var(--color-status-warning-soft); color: var(--color-tone-caution); }
+#results .prediction-summary-segment.tone-reassuring { background: var(--color-status-success-soft); color: var(--color-tone-reassuring); }
 #results .prediction-summary-segment.tone-neutral { background: var(--color-border-subtle); color: var(--color-text-muted); }
 #results .detail-links { gap: 6px; padding-bottom: 0; border-bottom: 0; }
 #results .detail-section h3 { color: var(--color-text-primary); font-size:var(--text-label-size); font-weight:var(--font-weight-semibold); }
@@ -569,11 +574,11 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 #results .selected-transcript-card { border-color: var(--color-border); background: var(--color-surface-accent); }
 #results .annotation-list { border-color: var(--color-border); border-radius: var(--radius-large); }
 #results .annotation-row { min-height: var(--table-row-height); border-bottom-color: var(--color-border-subtle); }
-#results .annotation-row.tone-adverse>b { color: var(--color-status-danger); }
-#results .annotation-row.tone-caution>b { color: var(--color-status-warning); }
-#results .annotation-row.tone-reassuring>b { color: var(--color-status-success); }
-#results .annotation-row.tone-informative>b { color: var(--color-status-info); }
-#results .annotation-row.tone-missing>b { color: var(--color-status-missing); }
+#results .annotation-row.tone-adverse>b { color: var(--color-tone-adverse); }
+#results .annotation-row.tone-caution>b { color: var(--color-tone-caution); }
+#results .annotation-row.tone-reassuring>b { color: var(--color-tone-reassuring); }
+#results .annotation-row.tone-informative>b { color: var(--color-tone-informative); }
+#results .annotation-row.tone-missing>b { color: var(--color-tone-missing); }
 #results .evidence-domain-section { padding: 0; }
 #results .evidence-domain>.annotation-list { margin: 0 0 10px; }
 #results .key-evidence-subgroups { margin-bottom: 10px; border: 1px solid var(--color-border); border-radius: var(--radius-large); overflow: hidden; }
@@ -918,11 +923,11 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   margin-top: 2px;
 }
 .annocat-results-ui #results .detail-summary>div[title] { cursor: help; }
-.annocat-results-ui #results .detail-summary dd.tone-adverse { color: var(--color-status-danger); }
-.annocat-results-ui #results .detail-summary dd.tone-caution { color: var(--color-status-warning); }
-.annocat-results-ui #results .detail-summary dd.tone-reassuring { color: var(--color-status-success); }
-.annocat-results-ui #results .detail-summary dd.tone-informative { color: var(--color-status-info); }
-.annocat-results-ui #results .detail-summary dd.tone-missing { color: var(--color-status-missing); }
+.annocat-results-ui #results .detail-summary dd.tone-adverse { color: var(--color-tone-adverse); }
+.annocat-results-ui #results .detail-summary dd.tone-caution { color: var(--color-tone-caution); }
+.annocat-results-ui #results .detail-summary dd.tone-reassuring { color: var(--color-tone-reassuring); }
+.annocat-results-ui #results .detail-summary dd.tone-informative { color: var(--color-tone-informative); }
+.annocat-results-ui #results .detail-summary dd.tone-missing { color: var(--color-tone-missing); }
 .annocat-results-ui #results .population-af-summary dd {
   display: flex;
   min-width: 0;
@@ -945,9 +950,9 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   text-overflow: ellipsis;
 }
 .annocat-results-ui #results .population-af-summary .population-af-group-value { font-weight: inherit; }
-.annocat-results-ui #results .population-af-summary .tone-reassuring { color: var(--color-status-success); }
-.annocat-results-ui #results .population-af-summary .tone-informative { color: var(--color-status-info); }
-.annocat-results-ui #results .population-af-summary .tone-missing { color: var(--color-status-missing); }
+.annocat-results-ui #results .population-af-summary .tone-reassuring { color: var(--color-tone-reassuring); }
+.annocat-results-ui #results .population-af-summary .tone-informative { color: var(--color-tone-informative); }
+.annocat-results-ui #results .population-af-summary .tone-missing { color: var(--color-tone-missing); }
 .annocat-results-ui #results .prediction-summary { padding: 7px 9px; }
 .annocat-results-ui #results .prediction-summary dd { margin-top: 4px; }
 .annocat-results-ui #results .prediction-summary-bar {
@@ -1046,9 +1051,9 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   justify-self: start;
   text-align: left;
 }
-.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-adverse>b { color: var(--color-status-danger); }
-.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-caution>b { color: var(--color-status-warning); }
-.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-reassuring>b { color: var(--color-status-success); }
+.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-adverse>b { color: var(--color-tone-adverse); }
+.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-caution>b { color: var(--color-tone-caution); }
+.annocat-results-ui #results .clinical-population-section [data-evidence-group="clinical"] .annotation-row.tone-reassuring>b { color: var(--color-tone-reassuring); }
 .annocat-results-ui #results .clinical-population-section [data-evidence-group="population"] .annotation-row {
   grid-template-columns: minmax(0, 1fr) minmax(90px, auto);
   min-height: var(--table-row-height);
@@ -1170,36 +1175,36 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   overflow-wrap: anywhere;
   text-align: right;
 }
-.annocat-results-ui #results .selected-transcript-card dd.tone-adverse { color: var(--color-status-danger); }
-.annocat-results-ui #results .selected-transcript-card dd.tone-caution { color: var(--color-status-warning); }
-.annocat-results-ui #results .selected-transcript-card dd.tone-reassuring { color: var(--color-status-success); }
-.annocat-results-ui #results .selected-transcript-card dd.tone-informative { color: var(--color-status-info); }
-.annocat-results-ui #results .selected-transcript-card dd.tone-missing { color: var(--color-status-missing); }
+.annocat-results-ui #results .selected-transcript-card dd.tone-adverse { color: var(--color-tone-adverse); }
+.annocat-results-ui #results .selected-transcript-card dd.tone-caution { color: var(--color-tone-caution); }
+.annocat-results-ui #results .selected-transcript-card dd.tone-reassuring { color: var(--color-tone-reassuring); }
+.annocat-results-ui #results .selected-transcript-card dd.tone-informative { color: var(--color-tone-informative); }
+.annocat-results-ui #results .selected-transcript-card dd.tone-missing { color: var(--color-tone-missing); }
 
-/* Standalone detail values can be brighter than compact pills without reducing contrast. */
+/* Evidence direction uses the same foreground token in every presentation. */
 .annocat-results-ui #results .variant-detail dd.tone-adverse,
 .annocat-results-ui #results .variant-detail b.tone-adverse,
 .annocat-results-ui #results .variant-detail strong.tone-adverse,
 .annocat-results-ui #results .variant-detail .annotation-row.tone-adverse>b {
-  color: var(--color-status-danger-emphasis);
+  color: var(--color-tone-adverse);
 }
 .annocat-results-ui #results .variant-detail dd.tone-caution,
 .annocat-results-ui #results .variant-detail b.tone-caution,
 .annocat-results-ui #results .variant-detail strong.tone-caution,
 .annocat-results-ui #results .variant-detail .annotation-row.tone-caution>b {
-  color: var(--color-status-warning-emphasis);
+  color: var(--color-tone-caution);
 }
 .annocat-results-ui #results .variant-detail dd.tone-reassuring,
 .annocat-results-ui #results .variant-detail b.tone-reassuring,
 .annocat-results-ui #results .variant-detail strong.tone-reassuring,
 .annocat-results-ui #results .variant-detail .annotation-row.tone-reassuring>b {
-  color: var(--color-status-success-emphasis);
+  color: var(--color-tone-reassuring);
 }
 .annocat-results-ui #results .variant-detail dd.tone-informative,
 .annocat-results-ui #results .variant-detail b.tone-informative,
 .annocat-results-ui #results .variant-detail strong.tone-informative,
 .annocat-results-ui #results .variant-detail .annotation-row.tone-informative>b {
-  color: var(--color-status-info-emphasis);
+  color: var(--color-tone-informative);
 }
 .annocat-results-ui #results .variant-detail dd.tone-missing,
 .annocat-results-ui #results .variant-detail b.tone-missing,

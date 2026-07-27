@@ -1719,34 +1719,34 @@ body:has(dialog[open]) {
   line-height: var(--text-body-leading);
 }
 
-.fui-description-grid dd.tone-adverse,
-.fui-key-value-row.tone-adverse>:is(b, dd, .annotation-value-list),
-.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-adverse {
-  color: var(--color-status-danger);
+.fui-description-grid dd.tone-adverse:not(.evidence-presentation-pill),
+.fui-key-value-row.tone-adverse>:is(b, dd, .annotation-value-list):not(.evidence-presentation-pill),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-adverse:not(.evidence-presentation-pill) {
+  color: var(--color-tone-adverse);
 }
 
-.fui-description-grid dd.tone-caution,
-.fui-key-value-row.tone-caution>:is(b, dd, .annotation-value-list),
-.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-caution {
-  color: var(--color-status-warning);
+.fui-description-grid dd.tone-caution:not(.evidence-presentation-pill),
+.fui-key-value-row.tone-caution>:is(b, dd, .annotation-value-list):not(.evidence-presentation-pill),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-caution:not(.evidence-presentation-pill) {
+  color: var(--color-tone-caution);
 }
 
-.fui-description-grid dd.tone-reassuring,
-.fui-key-value-row.tone-reassuring>:is(b, dd, .annotation-value-list),
-.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-reassuring {
-  color: var(--color-status-success);
+.fui-description-grid dd.tone-reassuring:not(.evidence-presentation-pill),
+.fui-key-value-row.tone-reassuring>:is(b, dd, .annotation-value-list):not(.evidence-presentation-pill),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-reassuring:not(.evidence-presentation-pill) {
+  color: var(--color-tone-reassuring);
 }
 
-.fui-description-grid dd.tone-informative,
-.fui-key-value-row.tone-informative>:is(b, dd, .annotation-value-list),
-.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-informative {
-  color: var(--color-status-info);
+.fui-description-grid dd.tone-informative:not(.evidence-presentation-pill),
+.fui-key-value-row.tone-informative>:is(b, dd, .annotation-value-list):not(.evidence-presentation-pill),
+.fui-key-value-row>:is(b, dd, .annotation-value-list).tone-informative:not(.evidence-presentation-pill) {
+  color: var(--color-tone-informative);
 }
 
 .fui-description-grid dd.tone-missing,
 .fui-key-value-row.tone-missing>:is(b, dd, .annotation-value-list),
 .fui-key-value-row>:is(b, dd, .annotation-value-list).tone-missing {
-  color: var(--color-status-missing);
+  color: var(--color-tone-missing);
 }
 
 .fui-description-grid .variant-summary-parts {
@@ -1759,11 +1759,57 @@ body:has(dialog[open]) {
   color: var(--color-text-muted);
 }
 
-.fui-description-grid .tone-adverse { color: var(--color-status-danger); }
-.fui-description-grid .tone-caution { color: var(--color-status-warning); }
-.fui-description-grid .tone-reassuring { color: var(--color-status-success); }
-.fui-description-grid .tone-informative { color: var(--color-status-info); }
-.fui-description-grid .tone-missing { color: var(--color-status-missing); }
+.fui-description-grid .tone-adverse:not(.evidence-presentation-pill) { color: var(--color-tone-adverse); }
+.fui-description-grid .tone-caution:not(.evidence-presentation-pill) { color: var(--color-tone-caution); }
+.fui-description-grid .tone-reassuring:not(.evidence-presentation-pill) { color: var(--color-tone-reassuring); }
+.fui-description-grid .tone-informative:not(.evidence-presentation-pill) { color: var(--color-tone-informative); }
+.fui-description-grid .tone-missing { color: var(--color-tone-missing); }
+
+.evidence-presentation-pill {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-small);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-caption-1);
+}
+
+.evidence-presentation-pill.tone-adverse {
+  color: var(--color-status-danger-pill);
+  background: var(--color-status-danger-soft);
+  border-color: var(--color-status-danger-border);
+}
+
+.evidence-presentation-pill.tone-caution {
+  color: var(--color-status-warning-pill);
+  background: var(--color-status-warning-soft);
+  border-color: var(--color-status-warning-border);
+}
+
+.evidence-presentation-pill.tone-reassuring {
+  color: var(--color-status-success-pill);
+  background: var(--color-status-success-soft);
+  border-color: var(--color-status-success-border);
+}
+
+.evidence-presentation-pill.tone-neutral {
+  color: var(--color-text-secondary);
+  background: var(--color-status-neutral-soft);
+}
+
+.prediction-summary-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.prediction-summary-primary {
+  font-size: var(--text-supporting-size);
+}
 
 .fui-section-heading {
   color: var(--color-text-primary);
@@ -1811,6 +1857,11 @@ body:has(dialog[open]) {
   text-align: right;
 }
 
+.fui-key-value-row .evidence-presentation-pill,
+.fui-description-grid .evidence-presentation-pill {
+  font-weight: var(--font-weight-semibold);
+}
+
 .fui-checkbox-field {
   display: flex;
   align-items: center;
@@ -1819,6 +1870,79 @@ body:has(dialog[open]) {
   font-size: var(--text-body-size);
   font-weight: var(--font-weight-normal);
   line-height: var(--text-body-leading);
+}
+
+.fui-switch-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  color: var(--color-text-primary);
+}
+
+.fui-switch-field__label {
+  display: block;
+  min-width: 0;
+}
+
+.fui-switch-field__label > strong {
+  display: block;
+  font-size: var(--text-body-size);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--text-body-leading);
+}
+
+.fui-switch-field__label > small {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-supporting-size);
+  font-weight: var(--text-supporting-weight);
+  line-height: var(--text-supporting-leading);
+}
+
+.fui-switch {
+  width: 40px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 2px;
+  appearance: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-circular);
+  background: var(--color-surface-muted);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.fui-switch::before {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-circular);
+  background: var(--color-text-muted);
+  content: "";
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.fui-switch:checked {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.fui-switch:checked::before {
+  background: var(--color-text-on-accent);
+  transform: translateX(20px);
+}
+
+.fui-switch:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.fui-switch:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 .fui-choice-row {

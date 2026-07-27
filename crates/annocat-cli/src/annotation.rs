@@ -1215,7 +1215,7 @@ fn execute_vcf_review(
         return fail_staging(staging, format!("VCF review validation failed: {error}"));
     }
 
-    prepare_report_indexes(run_id, &parquet, &consequences, &evidence, &field_catalog)?;
+    prepare_report_indexes(run_id, &parquet, &consequences, &evidence)?;
     check_cancel(staging)?;
     set_phase("publishing", "Publishing the VCF review");
 
@@ -1829,12 +1829,14 @@ fn finalize_outputs(
     let structured_input_bytes = file_bytes(structured_output)?;
     let structured_conversion_measurement =
         StageMeasurement::current(performance.diagnostic_profiling);
-    let structured = match super::results::convert_structured_with_reference(
+    let structured = match super::results::convert_structured_with_canonical_vcf_and_sources(
         structured_output,
+        output,
         &consequences,
         &evidence,
         &field_catalog,
         &super::reference::fasta_path(resources),
+        &request.source_ids,
         || CANCEL.load(Ordering::SeqCst),
         |records, writing, output_bytes, bytes_per_second, records_per_second| {
             let detail = if writing {
@@ -1900,7 +1902,7 @@ fn finalize_outputs(
         0.0,
     );
     let indexing_measurement = StageMeasurement::current(performance.diagnostic_profiling);
-    prepare_report_indexes(run_id, &parquet, &consequences, &evidence, &field_catalog)?;
+    prepare_report_indexes(run_id, &parquet, &consequences, &evidence)?;
     let detail_index_bytes = fs::metadata(staging.join("detail-row-groups.json"))
         .map(|value| value.len())
         .unwrap_or(0);
@@ -2032,7 +2034,6 @@ fn prepare_report_indexes(
     variants: &Path,
     consequences: &Path,
     evidence: &Path,
-    catalog: &Path,
 ) -> Result<(), String> {
     if CANCEL.load(Ordering::SeqCst) {
         return Err("cancelled".into());
@@ -2041,15 +2042,6 @@ fn prepare_report_indexes(
         crate::terminal_log(
             "annotation",
             format!("{run_id} completed without the optional fast variant lookup index: {error}"),
-        );
-    }
-    if CANCEL.load(Ordering::SeqCst) {
-        return Err("cancelled".into());
-    }
-    if let Err(error) = crate::evidence_resolution::prepare(variants, evidence, catalog) {
-        crate::terminal_log(
-            "annotation",
-            format!("{run_id} completed without the optional transcript evidence index: {error}"),
         );
     }
     if CANCEL.load(Ordering::SeqCst) {

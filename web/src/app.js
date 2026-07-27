@@ -40,12 +40,14 @@ const filterOperators=[['equals','='],['not_equals','≠'],['gt','>'],['gte','�
 const numericFilterOperators=new Set(['gt','gte','lt','lte']);
 const FILTER_PRESET_STORAGE_KEY='annocat.savedResultFilters.v1';
 const DISMISSED_COMPLETED_TASKS_STORAGE_KEY='annocat.dismissedCompletedTasks.v1';
+const CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY='annocat.useCalibratedEvidenceColors';
 const resultQuerySession=typeof globalThis.crypto?.randomUUID==='function'?globalThis.crypto.randomUUID():`${Date.now()}-${Math.random()}`;
 const RESULT_PAGE_MEMORY_LIMIT=12,resultPageMemory=new Map(),RESULT_VIEW_MEMORY_LIMIT=4,resultViewMemory=new Map(),VARIANT_DETAIL_MEMORY_LIMIT=64,variantDetailMemory=new Map();
 const pageNames={annotate:'New annotation',browse:'Browse results',results:'Results',logs:'Tasks',resources:'Data sources',settings:'Settings'};
 let variants=[],sources=[],profiles=[],resourcePlan={resources:[]},evidenceCalibrations={interpretationPolicy:{},predictors:[],calibrations:[],displayPolicies:{}},portablePaths={},visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key)),visibleEvidence=new Set(),resultColumnOrder=[],currentStep=1,selectedPaths=[],selectedVcfSummaries=[],recoveryFiles=null;
 let humanReadableColumnNames=localStorage.getItem('annocat.humanReadableColumnNames')!=='false',resultSorts=[];
-let setupDismissed=false,lastTaskSnapshots=[],lastAnnotationState={state:'idle'},globalStatusNotice=null,completedRuns=[],lastSetupReady=false,resourceStates={},refreshingResources=false,currentResultRun=null,resultView='all',candidateAlleles=new Set(),resultOffset=0,resultTotal=0,resultCountSignature='',resultNaturalOrderSignature='',resultNaturalOrder=new Map(),selectedAlleleId=null,resultFieldCatalog=[],resultAlignmentGroups=[],resultLoading=false,resultHasMore=false,resultRequestGeneration=0,resultQuerySignature='',resultRequestController=null,loadedCaseNotes='',caseNotesTimer=null,caseNotesRunId=null,selectionRunId=null,selectionAnchorIndex=null,selectedAlleles=new Set(),excludedFilteredAlleles=new Set(),selectedVariantGenes=new Map(),selectedVariantRows=new Map(),selectionMode='explicit',selectionFilterSignature='',dbnsfpConfiguration=null,supplementaryFieldConfigurations=new Map();
+let useCalibratedEvidenceColors=localStorage.getItem(CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY)!=='false';
+let setupDismissed=false,lastTaskSnapshots=[],lastAnnotationState={state:'idle'},globalStatusNotice=null,completedRuns=[],lastSetupReady=false,resourceStates={},refreshingResources=false,currentResultRun=null,resultView='all',candidateAlleles=new Set(),resultOffset=0,resultTotal=0,resultCountSignature='',resultCountRequest=null,resultCountLoading=false,resultNaturalOrderSignature='',resultNaturalOrder=new Map(),selectedAlleleId=null,resultFieldCatalog=[],resultAlignmentGroups=[],resultLoading=false,resultHasMore=false,resultRequestGeneration=0,resultQuerySignature='',resultRequestController=null,loadedCaseNotes='',caseNotesTimer=null,caseNotesRunId=null,selectionRunId=null,selectionAnchorIndex=null,selectedAlleles=new Set(),excludedFilteredAlleles=new Set(),selectedVariantGenes=new Map(),selectedVariantRows=new Map(),selectionMode='explicit',selectionFilterSignature='',dbnsfpConfiguration=null,supplementaryFieldConfigurations=new Map();
 let resultSearchTimer=null,resultOperation='',resultQueryError='',favorResultStatus=null,favorResultStatusTimer=null;
 let favorOnline={initialize:async()=>{},updateControls:()=>{},updateForRun:async()=>{},isEnabled:()=>true,resetConfirmation:()=>{}};
 const RESULT_COLUMN_SELECTION_STORAGE_KEY='annocat.resultColumnSelections.v1';
@@ -83,20 +85,24 @@ function recommendedEvidenceIndexes(){
   pick(
     field=>fieldSourceIs(field,'cadd')&&leaf(field)==='phred',
     field=>fieldSourceIs(field,'dbnsfp')&&leaf(field)==='cadd_phred',
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingcaddphred',
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='caddphred'
   );
   pick(
     field=>fieldSourceIs(field,'revel')&&leaf(field)==='score',
     field=>fieldSourceIs(field,'dbnsfp')&&leaf(field)==='revel_score',
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingrevelscore',
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='revel'
   );
   pick(
     field=>fieldSourceIs(field,'dbnsfp')&&leaf(field)==='alphamissense_score',
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingalphamissensescore',
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='alphamissense'
   );
   pick(
     field=>fieldSourceIs(field,'phylop')&&leaf(field)==='score',
     field=>fieldSourceIs(field,'dbnsfp')&&leaf(field).includes('phylop'),
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingphylop100way',
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='apcconservation'
   );
   pick(field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='spliceaidsmax');
@@ -266,11 +272,12 @@ async function loadCandidates(runId){const response=await fetch(`/api/runs/${enc
 async function setCandidateMembership(alleleIds,add){if(!currentResultRun||!alleleIds.length)return;let body=null;for(let offset=0;offset<alleleIds.length;offset+=1000){const batch=alleleIds.slice(offset,offset+1000),response=await fetch(`/api/runs/${encodeURIComponent(currentResultRun.id)}/candidates`,{method:'POST',headers:{'Content-Type':'application/json','X-AnnoCat-CSRF':'1'},body:JSON.stringify({action:add?'add':'remove',alleleIds:batch})});body=await response.json();if(!response.ok)throw new Error(body.error||'Candidates could not be updated')}resultPageMemory.clear();resultViewMemory.clear();resultCountSignature='';resultNaturalOrderSignature='';resultNaturalOrder.clear();candidateAlleles=new Set((body?.candidates||[]).map(candidate=>candidate.alleleId));renderResultViewTabs();if(resultView==='candidates'){variants=[];await openCompletedRun(currentResultRun,0)}else renderTable()}
 function resultViewMemoryKey(view=resultView){return JSON.stringify([currentResultRun?.id||'',view,currentResultFilterSignature(),[...visibleEvidence].sort((a,b)=>a-b),resultSorts])}
 function rememberResultView(){if(!currentResultRun||resultLoading)return;const key=resultViewMemoryKey(),table=$('#results .table-wrap');resultViewMemory.delete(key);resultViewMemory.set(key,{variants,resultTotal,resultHasMore,resultOffset,resultCountSignature,resultNaturalOrderSignature,resultNaturalOrder,resultQuerySignature,heading:document.querySelector('#results .results-heading p').textContent,scrollTop:table.scrollTop,scrollLeft:table.scrollLeft});while(resultViewMemory.size>RESULT_VIEW_MEMORY_LIMIT)resultViewMemory.delete(resultViewMemory.keys().next().value)}
-function restoreResultView(view){const key=resultViewMemoryKey(view),state=resultViewMemory.get(key);if(!state)return false;resultViewMemory.delete(key);resultViewMemory.set(key,state);({variants,resultTotal,resultHasMore,resultOffset,resultCountSignature,resultNaturalOrderSignature,resultNaturalOrder,resultQuerySignature}=state);resultLoading=false;resultOperation='';resultQueryError='';renderResultViewTabs();renderTable();updateResultPageStatus();updateResultScrollState();document.querySelector('#results .results-heading p').textContent=state.heading;requestAnimationFrame(()=>{const table=$('#results .table-wrap');table.scrollTop=state.scrollTop;table.scrollLeft=state.scrollLeft});return true}
-function changeResultView(view){if(!currentResultRun||view===resultView)return;const loadedCandidateRows=view==='candidates'&&!hasActiveResultQuery()&&!resultSorts.length?variants.filter(row=>candidateAlleles.has(row.alleleId)):[];rememberResultView();resultView=view;clearVariantSelection(false);resultRequestController?.abort();if(restoreResultView(view))return;if(view==='candidates'&&loadedCandidateRows.length===candidateAlleles.size){variants=loadedCandidateRows;resultTotal=loadedCandidateRows.length;resultHasMore=false;resultOffset=0;resultCountSignature=currentResultCountSignature();resultNaturalOrderSignature=resultCountSignature;resultNaturalOrder=new Map(variants.map((row,index)=>[row.alleleId,index]));resultLoading=false;resultOperation='';resultQueryError='';renderResultViewTabs();renderTable();updateResultPageStatus();updateResultScrollState();document.querySelector('#results .results-heading p').textContent=`${currentResultRun.assembly} · ${resultTotal.toLocaleString()} candidates · canonical Parquet`;return}resultLoading=true;variants=[];resultTotal=0;resultHasMore=false;renderResultViewTabs();$('#result-page-status').textContent='Loading…';renderTable();openCompletedRun(currentResultRun,0)}
+function restoreResultView(view){const key=resultViewMemoryKey(view),state=resultViewMemory.get(key);if(!state)return false;resultViewMemory.delete(key);resultViewMemory.set(key,state);({variants,resultTotal,resultHasMore,resultOffset,resultCountSignature,resultNaturalOrderSignature,resultNaturalOrder,resultQuerySignature}=state);resultLoading=false;resultOperation='';resultQueryError='';renderResultViewTabs();renderTable();updateResultPageStatus();updateResultScrollState();document.querySelector('#results .results-heading p').textContent=state.heading;requestAnimationFrame(()=>{const table=$('#results .table-wrap');table.scrollTop=state.scrollTop;table.scrollLeft=state.scrollLeft});if(!Number.isFinite(resultTotal))void ensureExactResultTotal().catch(console.error);return true}
+function changeResultView(view){if(!currentResultRun||view===resultView)return;const loadedCandidateRows=view==='candidates'&&!hasActiveResultQuery()&&!resultSorts.length?variants.filter(row=>candidateAlleles.has(row.alleleId)):[];rememberResultView();resultView=view;clearVariantSelection(false);resultRequestController?.abort();resultCountRequest?.controller.abort();if(restoreResultView(view))return;if(view==='candidates'&&loadedCandidateRows.length===candidateAlleles.size){variants=loadedCandidateRows;resultTotal=loadedCandidateRows.length;resultHasMore=false;resultOffset=0;resultCountSignature=currentResultCountSignature();resultNaturalOrderSignature=resultCountSignature;resultNaturalOrder=new Map(variants.map((row,index)=>[row.alleleId,index]));resultLoading=false;resultOperation='';resultQueryError='';renderResultViewTabs();renderTable();updateResultPageStatus();updateResultScrollState();document.querySelector('#results .results-heading p').textContent=`${currentResultRun.assembly} · ${resultTotal.toLocaleString()} candidates · canonical Parquet`;return}resultLoading=true;variants=[];resultTotal=0;resultHasMore=false;renderResultViewTabs();$('#result-page-status').textContent='Loading…';renderTable();openCompletedRun(currentResultRun,0)}
 async function openCompletedRun(run,offset=0){
   if(!run||resultLoading&&offset>0)return;
   const switchingRun=currentResultRun?.id!==run.id,appending=offset>0;
+  let resolveCount=false;
   if(switchingRun){
     resultLoading=true;
     resultOperation='Preparing report indexes…';
@@ -310,6 +317,7 @@ async function openCompletedRun(run,offset=0){
   if(appending&&querySignature!==resultQuerySignature)return;
   if(!appending){
     resultRequestController?.abort();
+    resultCountRequest?.controller.abort();
     resultQuerySignature=querySignature;
   }
   const generation=appending?resultRequestGeneration:++resultRequestGeneration,controller=new AbortController();
@@ -321,12 +329,8 @@ async function openCompletedRun(run,offset=0){
   updateResultPageStatus();
   updateResultScrollState();
   try{
-    const parameters=new URLSearchParams({offset:String(resultOffset),limit:'200',search,querySession:resultQuerySession,requestGeneration:String(generation)}),knownTotal=appending||countSignature===resultCountSignature?resultTotal:0;
-    if(knownTotal>0)parameters.set('knownTotal',String(knownTotal));
-    if(resultSorts.length)parameters.set('sorts',JSON.stringify(resultSorts.map(({key,direction})=>({column:key,direction}))));
-    if(selectedEvidence.length)parameters.set('evidenceColumns',selectedEvidence.join(','));
-    if(filterParameters.filterRules.length)parameters.set('filterRules',JSON.stringify(filterParameters.filterRules));
-    if(filterParameters.evidenceFilters.length)parameters.set('evidenceFilters',JSON.stringify(filterParameters.evidenceFilters));
+    const knownTotal=appending||countSignature===resultCountSignature?resultTotal:!filtered?(resultView==='all'?Number(run.variantCount)||0:candidateAlleles.size):null;
+    const parameters=resultPageParameters({offset:resultOffset,limit:200,knownTotal,generation});
     const resultEndpoint=resultView==='candidates'?'candidate-variants':'variants',pageMemoryKey=`${querySignature}\u001f${resultOffset}`,remembered=recallResultPage(pageMemoryKey);let body;
     if(remembered)body=remembered;else{const pageResponse=await fetch(`/api/runs/${encodeURIComponent(run.id)}/${resultEndpoint}?${parameters}`,{signal:controller.signal});body=await pageResponse.json();if(!pageResponse.ok)throw new Error(body.error||'Result could not be opened');rememberResultPage(pageMemoryKey,body)}
     if(generation!==resultRequestGeneration||querySignature!==resultQuerySignature)return;
@@ -335,16 +339,18 @@ async function openCompletedRun(run,offset=0){
       const known=new Set(variants.map(row=>row.alleleId));
       variants.push(...incoming.filter(row=>!known.has(row.alleleId)))
     }else variants=incoming;
-    resultTotal=Number(body.total||0);
-    resultCountSignature=countSignature;
-    if(!resultSorts.length&&variants.length===resultTotal){resultNaturalOrderSignature=countSignature;resultNaturalOrder=new Map(variants.map((row,index)=>[row.alleleId,index]))}
-    resultHasMore=variants.length<resultTotal;
+    resultTotal=body.total===null||body.total===undefined?null:Number(body.total);
+    if(resultTotal!==null&&!Number.isFinite(resultTotal))throw new Error('Result returned an invalid total');
+    resultCountSignature=Number.isFinite(resultTotal)?countSignature:'';
+    if(!resultSorts.length&&Number.isFinite(resultTotal)&&variants.length===resultTotal){resultNaturalOrderSignature=countSignature;resultNaturalOrder=new Map(variants.map((row,index)=>[row.alleleId,index]))}
+    resultHasMore=Boolean(body.hasMore);
     renderTable();
-    document.querySelector('#results .results-heading p').textContent=`${run.assembly} · ${resultTotal.toLocaleString()} ${filtered?'matching ':''}${resultView==='candidates'?'candidates':'variants'} · canonical Parquet`;
+    updateResultHeading(run,filtered);
+    resolveCount=!Number.isFinite(resultTotal);
   }catch(error){
     if(error.name!=='AbortError'&&generation===resultRequestGeneration&&querySignature===resultQuerySignature){resultQueryError='Result query failed';document.querySelector('#results .results-heading p').textContent=`Could not open this result: ${error.message}`}
   }finally{
-    if(generation===resultRequestGeneration&&querySignature===resultQuerySignature){resultLoading=false;resultOperation='';if(resultRequestController===controller)resultRequestController=null;updateResultPageStatus();updateResultScrollState()}
+    if(generation===resultRequestGeneration&&querySignature===resultQuerySignature){resultLoading=false;resultOperation='';if(resultRequestController===controller)resultRequestController=null;updateResultPageStatus();updateResultScrollState();if(resolveCount)void ensureExactResultTotal({generation}).catch(console.error)}
   }
 }
 async function refreshCurrentResultSchema({sourceId='',preferredFields=[]}={}){
@@ -391,26 +397,81 @@ async function saveCaseNotes(){const runId=caseNotesRunId;if(!runId)return;clear
 async function toggleCaseNotes(){if(!currentResultRun)return;const panel=$('#case-notes-panel'),opening=panel.classList.contains('hidden');panel.classList.toggle('hidden',!opening);if(opening)await loadCaseNotes()}
 const phenotypeFeature=createPhenotypeFeature({$,escapeHtml,prototypeIcon,showPage});
 async function openPhenotypeDialog(){return phenotypeFeature.open(currentResultRun,resourceStates)}
-function selectionCount(){return selectionMode==='filtered'?Math.max(0,resultTotal-excludedFilteredAlleles.size):selectedAlleles.size}
+function selectionCount(){return selectionMode==='filtered'?Math.max(0,(Number.isFinite(resultTotal)?resultTotal:0)-excludedFilteredAlleles.size):selectedAlleles.size}
 function displayedSearchEvidenceColumns(search=$('#search').value.trim()){return search?[...visibleEvidence].sort((a,b)=>a-b):[]}
 function currentResultFilterSignature(){const search=$('#search').value.trim();return JSON.stringify({search,evidenceColumns:displayedSearchEvidenceColumns(search),...resultFilterParameters()})}
 function currentResultCountSignature(run=currentResultRun){return JSON.stringify([run?.id||'',resultView,currentResultFilterSignature()])}
 function hasActiveResultQuery(){const filters=resultFilterParameters();return Boolean($('#search').value.trim()||filters.filterRules.length||filters.evidenceFilters.length)}
+function resultPageParameters({offset=0,limit=200,knownTotal=null,exactTotal=false,generation=null,querySession=resultQuerySession,includeSort=true}={}){
+  const search=$('#search').value.trim(),filters=resultFilterParameters(),evidenceColumns=[...visibleEvidence].sort((a,b)=>a-b),parameters=new URLSearchParams({offset:String(offset),limit:String(limit),search});
+  if(generation!==null){parameters.set('querySession',querySession);parameters.set('requestGeneration',String(generation))}
+  if(Number.isFinite(knownTotal))parameters.set('knownTotal',String(knownTotal));
+  if(exactTotal)parameters.set('exactTotal','true');
+  if(includeSort&&resultSorts.length)parameters.set('sorts',JSON.stringify(resultSorts.map(({key,direction})=>({column:key,direction}))));
+  if(evidenceColumns.length)parameters.set('evidenceColumns',evidenceColumns.join(','));
+  if(filters.filterRules.length)parameters.set('filterRules',JSON.stringify(filters.filterRules));
+  if(filters.evidenceFilters.length)parameters.set('evidenceFilters',JSON.stringify(filters.evidenceFilters));
+  return parameters
+}
+function updateResultHeading(run=currentResultRun,filtered=hasActiveResultQuery()){
+  if(!run)return;
+  const count=Number.isFinite(resultTotal)?resultTotal.toLocaleString():`${variants.length.toLocaleString()}+`;
+  document.querySelector('#results .results-heading p').textContent=`${run.assembly} · ${count} ${filtered?'matching ':''}${resultView==='candidates'?'candidates':'variants'} · canonical Parquet`
+}
+async function ensureExactResultTotal({generation=resultRequestGeneration}={}){
+  if(Number.isFinite(resultTotal))return resultTotal;
+  if(!currentResultRun)return 0;
+  const run=currentResultRun,countSignature=currentResultCountSignature(),endpoint=resultView==='candidates'?'candidate-variants':'variants';
+  if(resultCountRequest?.signature===countSignature)return resultCountRequest.promise;
+  resultCountRequest?.controller.abort();
+  const controller=new AbortController();
+  resultCountLoading=true;
+  updateResultPageStatus();
+  const promise=(async()=>{
+    try{
+      const parameters=resultPageParameters({offset:0,limit:1,exactTotal:true,generation,querySession:`${resultQuerySession}:count`,includeSort:false});
+      const response=await fetch(`/api/runs/${encodeURIComponent(run.id)}/${endpoint}?${parameters}`,{signal:controller.signal}),body=await response.json();
+      if(!response.ok)throw new Error(body.error||'Matching variants could not be counted');
+      if(run!==currentResultRun||countSignature!==currentResultCountSignature())return null;
+      const total=Number(body.total);
+      if(!Number.isFinite(total)||total<0)throw new Error('Result returned an invalid total');
+      resultTotal=total;
+      resultCountSignature=countSignature;
+      resultHasMore=variants.length<total;
+      resultPageMemory.clear();
+      updateResultHeading(run);
+      updateSelectionControls();
+      return total
+    }catch(error){
+      if(error.name==='AbortError')return null;
+      throw error
+    }finally{
+      if(resultCountRequest?.controller===controller){
+        resultCountRequest=null;
+        resultCountLoading=false;
+        updateResultPageStatus();
+        updateResultScrollState()
+      }
+    }
+  })();
+  resultCountRequest={signature:countSignature,controller,promise};
+  return promise
+}
 function setFavorResultStatus(message,{busy=false,tone=''}={}){
   clearTimeout(favorResultStatusTimer);
   favorResultStatus=message?{message,busy,tone}:null;
   updateResultPageStatus();
   if(message&&!busy)favorResultStatusTimer=setTimeout(()=>{favorResultStatus=null;updateResultPageStatus()},tone==='error'?8000:5000)
 }
-function updateResultPageStatus(){const status=$('#result-page-status');if(!status)return;if(favorResultStatus){status.classList.toggle('error',favorResultStatus.tone==='error');status.innerHTML=`${favorResultStatus.busy?'<i class="result-query-spinner" aria-hidden="true"></i>':''}${escapeHtml(favorResultStatus.message)}`;return}if(resultQueryError){status.textContent=resultQueryError;status.classList.add('error');return}status.classList.remove('error');if(resultLoading){const loaded=variants.length?`${variants.length.toLocaleString()} loaded · `:'';status.innerHTML=`${escapeHtml(loaded)}<i class="result-query-spinner" aria-hidden="true"></i>${escapeHtml(resultOperation||'Loading…')}`;return}status.textContent=resultTotal===0&&hasActiveResultQuery()?'No matching variants':`${variants.length.toLocaleString()} of ${resultTotal.toLocaleString()}`}
-function scheduleResultSearch(){clearTimeout(resultSearchTimer);resultRequestController?.abort();resultRequestGeneration++;resultPageMemory.clear();resultQueryError='';resultOperation='Searching…';resultLoading=true;updateResultPageStatus();updateResultScrollState();resultSearchTimer=setTimeout(()=>{if(currentResultRun)openCompletedRun(currentResultRun,0);else{resultLoading=false;resultOperation='';updateResultPageStatus()}},250)}
+function updateResultPageStatus(){const status=$('#result-page-status');if(!status)return;if(favorResultStatus){status.classList.toggle('error',favorResultStatus.tone==='error');status.innerHTML=`${favorResultStatus.busy?'<i class="result-query-spinner" aria-hidden="true"></i>':''}${escapeHtml(favorResultStatus.message)}`;return}if(resultQueryError){status.textContent=resultQueryError;status.classList.add('error');return}status.classList.remove('error');if(resultLoading){const loaded=variants.length?`${variants.length.toLocaleString()} loaded · `:'';status.innerHTML=`${escapeHtml(loaded)}<i class="result-query-spinner" aria-hidden="true"></i>${escapeHtml(resultOperation||'Loading…')}`;return}if(resultCountLoading){status.innerHTML=`${escapeHtml(`${variants.length.toLocaleString()}+ matching variants · `)}<i class="result-query-spinner" aria-hidden="true"></i>Counting…`;return}status.textContent=resultTotal===0&&hasActiveResultQuery()?'No matching variants':Number.isFinite(resultTotal)?`${variants.length.toLocaleString()} of ${resultTotal.toLocaleString()}`:`${variants.length.toLocaleString()}+ matching variants`}
+function scheduleResultSearch(immediate=false){clearTimeout(resultSearchTimer);resultRequestController?.abort();resultCountRequest?.controller.abort();resultRequestGeneration++;resultPageMemory.clear();resultQueryError='';resultOperation='Searching…';resultLoading=true;updateResultPageStatus();updateResultScrollState();const run=()=>{if(currentResultRun)openCompletedRun(currentResultRun,0);else{resultLoading=false;resultOperation='';updateResultPageStatus()}};if(immediate)run();else resultSearchTimer=setTimeout(run,250)}
 function updateSelectionControls(){const count=selectionCount(),allFiltered=selectionMode==='filtered',candidateButton=$('#candidate-selected'),candidateLabel=$('#candidate-selected-label'),removeCandidates=resultView==='candidates'||!allFiltered&&count>0&&[...selectedAlleles].every(id=>candidateAlleles.has(id));$('#selection-actions').classList.toggle('hidden',count===0);candidateButton?.classList.toggle('hidden',count===0);if(candidateButton){const action=`${removeCandidates?'Remove':'Add'} ${count.toLocaleString()} selected variant${count===1?'':'s'} ${removeCandidates?'from':'to'} candidates`;candidateLabel.textContent=`${removeCandidates?'Remove from':'Add to'} candidates (${count.toLocaleString()})`;candidateButton.title=action;candidateButton.setAttribute('aria-label',action)}$('#export-selected-genes-label').textContent=count?`Export genes (${count.toLocaleString()})`:'Export genes';$('#export-selected-rows-label').textContent=count?`Export rows (${count.toLocaleString()})`:'Export rows';if(!count){$('#selection-actions-menu').classList.add('hidden');$('#selection-actions-toggle').setAttribute('aria-expanded','false')}favorOnline.updateControls()}
-function selectAllFilteredVariants(){if(!resultTotal)return;selectionMode='filtered';selectionFilterSignature=currentResultFilterSignature();selectedAlleles.clear();excludedFilteredAlleles.clear();selectedVariantGenes.clear();selectedVariantRows.clear();renderTable()}
+async function selectAllFilteredVariants(){if(!await ensureExactResultTotal())return;selectionMode='filtered';selectionFilterSignature=currentResultFilterSignature();selectedAlleles.clear();excludedFilteredAlleles.clear();selectedVariantGenes.clear();selectedVariantRows.clear();renderTable()}
 function clearVariantSelection(render=true){selectionMode='explicit';selectionFilterSignature='';selectionAnchorIndex=null;selectedAlleles.clear();excludedFilteredAlleles.clear();selectedVariantGenes.clear();selectedVariantRows.clear();if(render)renderTable();else updateSelectionControls()}
 async function filteredAlleleIds(excluded,expectedCount){if(expectedCount>10000)throw new Error('Candidates are limited to 10,000 variants. Narrow the filters before adding this selection.');const ids=[],filters=resultFilterParameters(),search=$('#search').value.trim(),searchEvidence=displayedSearchEvidenceColumns(search),endpoint=resultView==='candidates'?'candidate-variants':'variants';for(let offset=0;offset<resultTotal&&ids.length<expectedCount;){const parameters=new URLSearchParams({offset:String(offset),limit:'500',search});if(searchEvidence.length)parameters.set('evidenceColumns',searchEvidence.join(','));if(filters.filterRules.length)parameters.set('filterRules',JSON.stringify(filters.filterRules));if(filters.evidenceFilters.length)parameters.set('evidenceFilters',JSON.stringify(filters.evidenceFilters));const response=await fetch(`/api/runs/${encodeURIComponent(currentResultRun.id)}/${endpoint}?${parameters}`),body=await response.json();if(!response.ok)throw new Error(body.error||'Selected variants could not be loaded');const rows=body.rows||[];if(!rows.length)break;rows.forEach(row=>{if(row.alleleId&&!excluded.has(row.alleleId))ids.push(row.alleleId)});offset+=rows.length}if(ids.length!==expectedCount)throw new Error(`Expected ${expectedCount.toLocaleString()} variants but loaded ${ids.length.toLocaleString()}. Please try again.`);return ids}
 function filteredSelectionAlleleIds(){return filteredAlleleIds(excludedFilteredAlleles,selectionCount())}
 async function updateSelectedCandidates(){const count=selectionCount();if(!count)return;const button=$('#candidate-selected'),label=$('#candidate-selected-label'),headerButton=$('#candidate-all'),allFiltered=selectionMode==='filtered',add=allFiltered?resultView!=='candidates':![...selectedAlleles].every(id=>candidateAlleles.has(id));[button,headerButton].filter(Boolean).forEach(item=>item.disabled=true);if(label)label.textContent=add?'Adding…':'Removing…';try{const alleleIds=allFiltered?await filteredSelectionAlleleIds():[...selectedAlleles];await setCandidateMembership(alleleIds,add);clearVariantSelection()}catch(error){document.querySelector('#results .results-heading p').textContent=`Could not update candidates: ${error.message}`}finally{[button,headerButton].filter(Boolean).forEach(item=>item.disabled=false);updateSelectionControls()}}
-async function toggleHeaderCandidates(){if(!currentResultRun||!resultTotal)return;const button=$('#candidate-all');button.disabled=true;try{const alleleIds=await filteredAlleleIds(new Set(),resultTotal),add=!alleleIds.every(id=>candidateAlleles.has(id));await setCandidateMembership(alleleIds,add)}catch(error){document.querySelector('#results .results-heading p').textContent=`Could not update candidates: ${error.message}`}finally{const current=$('#candidate-all');if(current)current.disabled=false}}
+async function toggleHeaderCandidates(){if(!currentResultRun||!variants.length)return;const button=$('#candidate-all');button.disabled=true;try{const total=await ensureExactResultTotal(),alleleIds=await filteredAlleleIds(new Set(),total),add=!alleleIds.every(id=>candidateAlleles.has(id));await setCandidateMembership(alleleIds,add)}catch(error){document.querySelector('#results .results-heading p').textContent=`Could not update candidates: ${error.message}`}finally{const current=$('#candidate-all');if(current)current.disabled=false}}
 function setVariantSelected(row,selected){if(!row?.alleleId)return;if(selected){selectedAlleles.add(row.alleleId);selectedVariantGenes.set(row.alleleId,(row.gene||'').trim());selectedVariantRows.set(row.alleleId,{...row})}else{selectedAlleles.delete(row.alleleId);selectedVariantGenes.delete(row.alleleId);selectedVariantRows.delete(row.alleleId)}}
 function selectVariantRange(index,{additive=false}={}){if(selectionMode==='filtered')clearVariantSelection(false);if(!additive){selectedAlleles.clear();selectedVariantGenes.clear();selectedVariantRows.clear()}const anchor=selectionAnchorIndex??index,start=Math.min(anchor,index),end=Math.max(anchor,index);for(let item=start;item<=end;item++)setVariantSelected(variants[item],true);selectionAnchorIndex=index;renderTable()}
 async function exportFilteredSelection(format){if(!currentResultRun)return;const description=document.querySelector('#results .results-heading p'),columnsToExport=columns.filter(([key])=>visible.has(key)).map(([key])=>key),parameters=resultFilterParameters(),search=$('#search').value.trim(),filters={search,evidenceColumns:displayedSearchEvidenceColumns(search),filterRules:parameters.filterRules,evidenceFilters:parameters.evidenceFilters,excludedAlleleIds:[...excludedFilteredAlleles]};description.textContent=format==='genesTxt'?'Choose where to save all selected genes…':'Choose where to save all selected variants…';try{const response=await fetch(`/api/runs/${encodeURIComponent(currentResultRun.id)}/export`,{method:'POST',headers:{'Content-Type':'application/json','X-AnnoCat-CSRF':'1'},body:JSON.stringify({format,filters,columns:columnsToExport})}),body=await response.json();if(!response.ok)throw new Error(body.error||'Filtered export failed');if(!body.path){description.textContent='Export cancelled.';return}description.textContent=format==='genesTxt'?`Exported ${Number(body.genes||0).toLocaleString()} unique genes from ${Number(body.rows||0).toLocaleString()} selected variants · ${body.path}`:`Exported ${Number(body.rows||0).toLocaleString()} selected variants · ${body.path}`}catch(error){description.textContent=`Could not export selected results: ${error.message}`}}
@@ -458,11 +519,11 @@ function renderTableBase(event){
   if(selectionRunId!==runId){selectionRunId=runId;clearVariantSelection(false)}
   ['#share-report','#rename-report','#case-notes-button'].forEach(selector=>$(selector).classList.toggle('hidden',!currentResultRun));
   if(!currentResultRun)$('#case-notes-panel').classList.add('hidden');
-  const shown=displayColumns(),allFiltered=selectionMode==='filtered',allVisibleCandidates=resultTotal>0&&variants.length>0&&variants.every(row=>candidateAlleles.has(row.alleleId)),candidateAction=allVisibleCandidates?'Remove all filtered variants from candidates':'Add all filtered variants to candidates',emptyMessage=resultLoading?'Loading variants…':hasActiveResultQuery()?'No variants match the current search or filters.':resultView==='candidates'?'No candidates have been added yet.':'This report contains no displayable variants.';
+  const shown=displayColumns(),allFiltered=selectionMode==='filtered',hasResults=Number.isFinite(resultTotal)?resultTotal>0:variants.length>0,allVisibleCandidates=hasResults&&variants.length>0&&variants.every(row=>candidateAlleles.has(row.alleleId)),candidateAction=allVisibleCandidates?'Remove all filtered variants from candidates':'Add all filtered variants to candidates',emptyMessage=resultLoading?'Loading variants…':hasActiveResultQuery()?'No variants match the current search or filters.':resultView==='candidates'?'No candidates have been added yet.':'This report contains no displayable variants.';
   $('#head').innerHTML=`<th class="selection-cell fui-data-grid__utility-cell"><input id="result-select-all-checkbox" class="fui-checkbox" type="checkbox" aria-label="Select all filtered variants" title="Select or clear all filtered variants"></th><th class="candidate-cell fui-data-grid__utility-cell"><button id="candidate-all" type="button" class="candidate-toggle candidate-column-heading fui-data-grid__icon-button ${allVisibleCandidates?'active':''}" aria-label="${candidateAction}" title="${candidateAction}">${prototypeIcon('star')}<span class="legacy-icon">${allVisibleCandidates?'★':'☆'}</span></button></th>`+shown.map(([key,label,description,,sourceId])=>{const tooltip=resultColumnTooltip(key,description,sourceId),priority=resultSorts.findIndex(sort=>sort.key===key),sort=priority<0?null:resultSorts[priority],indicator=sort?`${resultSorts.length>1?priority+1:''}${sort.direction==='asc'?'▲':'▼'}`:'↕',ariaSort=priority===0?(sort.direction==='asc'?'ascending':'descending'):'none';return`<th title="${escapeHtml(tooltip)}" aria-sort="${ariaSort}"><button type="button" class="column-sort fui-data-grid__sort-button" data-sort-column="${escapeHtml(key)}" aria-label="${escapeHtml(`${label}. ${tooltip} Click to sort; Shift-click to add another sort column.`)}"><span>${escapeHtml(label)}</span><b aria-hidden="true">${indicator}</b></button></th>`}).join('');
   $('#rows').innerHTML=variants.length?variants.map(row=>{const candidate=candidateAlleles.has(row.alleleId),selected=allFiltered?!excludedFilteredAlleles.has(row.alleleId):selectedAlleles.has(row.alleleId),classes=[row.alleleId===selectedAlleleId?'selected-variant':'',selected?'selection-active':''].filter(Boolean).join(' ');return`<tr ${row.alleleId?`tabindex="0" data-allele-id="${escapeHtml(row.alleleId)}" aria-label="Open details for ${escapeHtml(`${row.chromosome}:${row.position} ${row.reference}>${row.alternate}`)}"`:''} class="${classes}"><td class="selection-cell fui-data-grid__utility-cell">${row.alleleId?`<input class="fui-checkbox" type="checkbox" data-select-allele="${escapeHtml(row.alleleId)}" aria-label="Select ${escapeHtml(`${row.chromosome}:${row.position} ${row.reference}>${row.alternate}`)}" ${selected?'checked':''}>`:''}</td><td class="candidate-cell fui-data-grid__utility-cell">${row.alleleId?`<button type="button" class="candidate-toggle fui-data-grid__icon-button ${candidate?'active':''}" data-toggle-candidate="${escapeHtml(row.alleleId)}" aria-label="${candidate?'Remove from':'Add to'} candidates" title="${candidate?'Remove from':'Add to'} candidates">${prototypeIcon('star')}<span class="legacy-icon">${candidate?'★':'☆'}</span></button>`:''}</td>${shown.map(([key])=>{const value=resultColumnValue(row,key);return key==='impact'?`<td><span class="impact impact-${String(value||'').toLowerCase().replace(/[^a-z0-9_-]/g,'')}">${escapeHtml(value)}</span></td>`:`<td>${escapeHtml(value)}</td>`}).join('')}</tr>`}).join(''):emptyMessage?`<tr class="empty-result-row"><td class="fui-data-grid__empty-cell" colspan="${Math.max(2,shown.length+2)}"><span class="fui-data-grid__empty-content">${escapeHtml(emptyMessage)}</span></td></tr>`:'';
   $('#head').querySelectorAll('[data-sort-column]').forEach(button=>button.addEventListener('click',event=>changeResultSort(button.dataset.sortColumn,event.shiftKey)));
-  const selectAll=$('#result-select-all-checkbox');selectAll.checked=allFiltered&&!excludedFilteredAlleles.size;selectAll.indeterminate=allFiltered?excludedFilteredAlleles.size>0:selectedAlleles.size>0;selectAll.disabled=!resultTotal;selectAll.addEventListener('change',()=>selectAll.checked?selectAllFilteredVariants():clearVariantSelection());const candidateAll=$('#candidate-all');candidateAll.disabled=!resultTotal;candidateAll.addEventListener('click',toggleHeaderCandidates);
+  const selectAll=$('#result-select-all-checkbox');selectAll.checked=allFiltered&&!excludedFilteredAlleles.size;selectAll.indeterminate=allFiltered?excludedFilteredAlleles.size>0:selectedAlleles.size>0;selectAll.disabled=!hasResults;selectAll.addEventListener('change',async()=>{if(!selectAll.checked){clearVariantSelection();return}selectAll.disabled=true;try{await selectAllFilteredVariants()}catch(error){document.querySelector('#results .results-heading p').textContent=`Could not select matching variants: ${error.message}`;renderTable()}});const candidateAll=$('#candidate-all');candidateAll.disabled=!hasResults;candidateAll.addEventListener('click',toggleHeaderCandidates);
   updateSelectionControls()
 }
 function duckDbNumericEvidenceField(field){
@@ -498,11 +559,11 @@ function sortFullyLoadedResults(){
   });
   renderTable()
 }
-function changeResultSort(key,additive=false){const index=resultSorts.findIndex(sort=>sort.key===key),existing=index<0?null:resultSorts[index];if(additive){if(!existing)resultSorts.push({key,direction:'asc'});else if(existing.direction==='asc')existing.direction='desc';else resultSorts.splice(index,1)}else if(index===0){resultSorts=existing.direction==='asc'?[{key,direction:'desc'}]:[]}else resultSorts=[{key,direction:'asc'}];resultQueryError='';resultOperation='Sorting…';resultLoading=true;updateResultPageStatus();if(!currentResultRun){requestAnimationFrame(()=>{sortFullyLoadedResults();resultLoading=false;resultOperation='';updateResultPageStatus()});return}if(variants.length===resultTotal&&resultTotal<=500&&resultNaturalOrderSignature===currentResultCountSignature()){requestAnimationFrame(()=>{sortFullyLoadedResults();resultLoading=false;resultOperation='';updateResultPageStatus()});return}resultHasMore=false;openCompletedRun(currentResultRun,0)}
-let detailCloseTimer,detailOpenFrame;
+function changeResultSort(key,additive=false){const index=resultSorts.findIndex(sort=>sort.key===key),existing=index<0?null:resultSorts[index];if(additive){if(!existing)resultSorts.push({key,direction:'asc'});else if(existing.direction==='asc')existing.direction='desc';else resultSorts.splice(index,1)}else if(index===0){resultSorts=existing.direction==='asc'?[{key,direction:'desc'}]:[]}else resultSorts=[{key,direction:'asc'}];resultQueryError='';resultOperation='Sorting…';resultLoading=true;updateResultPageStatus();if(!currentResultRun){requestAnimationFrame(()=>{sortFullyLoadedResults();resultLoading=false;resultOperation='';updateResultPageStatus()});return}if(Number.isFinite(resultTotal)&&variants.length===resultTotal&&resultTotal<=500&&resultNaturalOrderSignature===currentResultCountSignature()){requestAnimationFrame(()=>{sortFullyLoadedResults();resultLoading=false;resultOperation='';updateResultPageStatus()});return}resultHasMore=false;openCompletedRun(currentResultRun,0)}
+let detailCloseTimer,detailOpenFrame,variantDetailRequestController=null;
 function revealVariantDetail(){const detail=$('#variant-detail');clearTimeout(detailCloseTimer);cancelAnimationFrame(detailOpenFrame);detail.classList.remove('detail-closing','hidden');if(!detail.classList.contains('detail-visible'))detailOpenFrame=requestAnimationFrame(()=>detail.classList.add('detail-visible'))}
 function syncSelectedVariantRow(){document.querySelectorAll('#rows tr[data-allele-id]').forEach(row=>row.classList.toggle('selected-variant',row.dataset.alleleId===selectedAlleleId))}
-function closeVariantDetail(){selectedAlleleId=null;syncSelectedVariantRow();const candidateToggle=$('#detail-candidate-toggle'),detail=$('#variant-detail');candidateToggle.classList.add('hidden');delete candidateToggle.dataset.candidateAllele;clearTimeout(detailCloseTimer);cancelAnimationFrame(detailOpenFrame);if(document.documentElement.classList.contains('annocat-results-ui')&&!matchMedia('(prefers-reduced-motion: reduce)').matches&&!detail.classList.contains('hidden')){detail.classList.remove('detail-visible');detail.classList.add('detail-closing');detailCloseTimer=setTimeout(()=>{if(!selectedAlleleId){detail.classList.add('hidden');detail.classList.remove('detail-closing')}},170)}else{detail.classList.remove('detail-visible','detail-closing');detail.classList.add('hidden')}}
+function closeVariantDetail(){variantDetailRequestController?.abort();variantDetailRequestController=null;selectedAlleleId=null;syncSelectedVariantRow();const candidateToggle=$('#detail-candidate-toggle'),detail=$('#variant-detail');candidateToggle.classList.add('hidden');delete candidateToggle.dataset.candidateAllele;clearTimeout(detailCloseTimer);cancelAnimationFrame(detailOpenFrame);if(document.documentElement.classList.contains('annocat-results-ui')&&!matchMedia('(prefers-reduced-motion: reduce)').matches&&!detail.classList.contains('hidden')){detail.classList.remove('detail-visible');detail.classList.add('detail-closing');detailCloseTimer=setTimeout(()=>{if(!selectedAlleleId){detail.classList.add('hidden');detail.classList.remove('detail-closing')}},170)}else{detail.classList.remove('detail-visible','detail-closing');detail.classList.add('hidden')}}
 function consequenceKeyVariants(name){
   const original=String(name),snake=original.replace(/([a-z0-9])([A-Z])/g,'$1_$2').replace(/[\s-]+/g,'_').toLowerCase(),camel=snake.replace(/_([a-z0-9])/g,(_,character)=>character.toUpperCase());
   return[...new Set([original,snake,camel,snake.toUpperCase()])]
@@ -529,7 +590,36 @@ function usefulVariantLinks(row,gene,primary={},variant={}){
 function displayDetailValue(value){if(value===null||value===undefined||value===''||value==='-')return'—';if(Array.isArray(value))return value.join(', ');if(typeof value==='object')return JSON.stringify(value);return String(value)}
 function dbnsfpPredictionValue(field,value){if(value==='.'||value==='')return'Not reported';const labels={VEP_canonical:{YES:'Yes'},GENCODE_basic:{Y:'Yes'}};return labels[field]?.[value]||value}
 function renderCandidateDetailControl(alleleId){const button=$('#detail-candidate-toggle');if(!button||!currentResultRun)return;const candidate=candidateAlleles.has(alleleId),label=candidate?'Remove from candidates':'Add to candidates';button.dataset.candidateAllele=alleleId;button.classList.remove('hidden');button.classList.toggle('active',candidate);button.setAttribute('aria-pressed',String(candidate));button.setAttribute('aria-label',label);button.title=label;button.innerHTML=`${prototypeIcon('star')}<span class="legacy-icon">${candidate?'★':'☆'}</span>`}
-async function openVariantDetail(alleleId){if(!currentResultRun||!alleleId)return;const runId=currentResultRun.id,row=variants.find(item=>item.alleleId===alleleId);if(!row)return;const detail=$('#variant-detail'),body=$('#variant-detail-body'),opening=detail.classList.contains('hidden')||detail.classList.contains('detail-closing'),title=`${row.chromosome}:${row.position} ${row.reference}>${row.alternate}`,cacheKey=`${runId}\u001f${alleleId}`,cached=recallVariantDetail(cacheKey);selectedAlleleId=alleleId;syncSelectedVariantRow();$('#variant-detail-title').textContent=title;if(cached){renderVariantDetail(row,cached);renderCandidateDetailControl(alleleId);return}body.setAttribute('aria-busy','true');if(opening){body.replaceChildren();revealVariantDetail()}try{const locator=new URLSearchParams();if(Number.isSafeInteger(row.recordNumber))locator.set('recordNumber',row.recordNumber);if(Number.isSafeInteger(row.altIndex))locator.set('altIndex',row.altIndex);const suffix=locator.size?`?${locator}`:'';const response=await fetch(`/api/runs/${encodeURIComponent(runId)}/variants/${encodeURIComponent(alleleId)}${suffix}`),result=await response.json();if(!response.ok)throw new Error(result.error||'Variant details unavailable');rememberVariantDetail(cacheKey,result);if(currentResultRun?.id===runId&&selectedAlleleId===alleleId){renderVariantDetail(row,result);renderCandidateDetailControl(alleleId)}}catch(error){if(currentResultRun?.id===runId&&selectedAlleleId===alleleId)body.innerHTML=`<p class="detail-warning">${escapeHtml(error.message)}</p>`}finally{if(currentResultRun?.id===runId&&selectedAlleleId===alleleId)body.removeAttribute('aria-busy')}}
+async function openVariantDetail(alleleId){
+  if(!currentResultRun||!alleleId)return;
+  const runId=currentResultRun.id,row=variants.find(item=>item.alleleId===alleleId);
+  if(!row)return;
+  variantDetailRequestController?.abort();
+  variantDetailRequestController=null;
+  const detail=$('#variant-detail'),body=$('#variant-detail-body'),opening=detail.classList.contains('hidden')||detail.classList.contains('detail-closing'),title=`${row.chromosome}:${row.position} ${row.reference}>${row.alternate}`,cacheKey=`${runId}\u001f${alleleId}`,cached=recallVariantDetail(cacheKey);
+  selectedAlleleId=alleleId;
+  syncSelectedVariantRow();
+  $('#variant-detail-title').textContent=title;
+  if(cached){body.removeAttribute('aria-busy');renderVariantDetail(row,cached);renderCandidateDetailControl(alleleId);return}
+  const controller=new AbortController();
+  variantDetailRequestController=controller;
+  body.setAttribute('aria-busy','true');
+  if(opening){body.replaceChildren();revealVariantDetail()}
+  try{
+    const locator=new URLSearchParams();
+    if(Number.isSafeInteger(row.recordNumber))locator.set('recordNumber',row.recordNumber);
+    if(Number.isSafeInteger(row.altIndex))locator.set('altIndex',row.altIndex);
+    const suffix=locator.size?`?${locator}`:'',response=await fetch(`/api/runs/${encodeURIComponent(runId)}/variants/${encodeURIComponent(alleleId)}${suffix}`,{signal:controller.signal}),result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Variant details unavailable');
+    rememberVariantDetail(cacheKey,result);
+    if(currentResultRun?.id===runId&&selectedAlleleId===alleleId){renderVariantDetail(row,result);renderCandidateDetailControl(alleleId)}
+  }catch(error){
+    if(error.name!=='AbortError'&&currentResultRun?.id===runId&&selectedAlleleId===alleleId)body.innerHTML=`<p class="detail-warning">${escapeHtml(error.message)}</p>`
+  }finally{
+    if(variantDetailRequestController===controller)variantDetailRequestController=null;
+    if(currentResultRun?.id===runId&&selectedAlleleId===alleleId)body.removeAttribute('aria-busy')
+  }
+}
 function filterColumnSelector(query){const normalized=query.trim().toLowerCase();$('#column-menu').querySelectorAll('[data-column-group]').forEach(group=>{const groupMatch=group.querySelector('legend')?.textContent.toLowerCase().includes(normalized),fields=[...group.querySelectorAll(':scope>label')];fields.forEach(field=>field.classList.toggle('hidden',Boolean(normalized)&&!groupMatch&&!field.textContent.toLowerCase().includes(normalized)));group.classList.toggle('hidden',fields.every(field=>field.classList.contains('hidden')))})}
 function renderColumns(){
   const groups=new Map();
@@ -954,7 +1044,8 @@ async function queueProfileInstall(profileId,dialog){const profile=profiles.find
 favorOnline=createFavorOnline({
   $,escapeHtml,prototypeIcon,openFluentDialog,
   togglePopover:()=>toggleResultPopover('favor-popover'),
-  getState:()=>({currentResultRun,resultTotal,selectionCount:selectionCount()}),
+  getState:()=>({currentResultRun,resultTotal,resultHasMore,loadedCount:variants.length,selectionCount:selectionCount()}),
+  resolveCurrentTotal:ensureExactResultTotal,
   collectFilteredAlleles:()=>filteredAlleleIds(new Set(),resultTotal),
   collectSelectedAlleles:()=>selectionMode==='filtered'?filteredSelectionAlleleIds():Promise.resolve([...selectedAlleles]),
   refreshResultSchema:refreshCurrentResultSchema,
@@ -972,19 +1063,20 @@ async function start(){
   await favorOnline.initialize().catch(error=>showResourceNotice(error.message));
   document.addEventListener('click',event=>{const install=event.target.closest('[data-install]'),core=event.target.closest('[data-core-install]'),jobButton=event.target.closest('[data-job-action]'),jobCard=jobButton?.closest('[data-download-job]'),annotationCard=jobButton?.closest('[data-annotation-task]');if(install)handleResourceCardInstall(install);if(core)startCoreInstall();if(jobButton&&jobCard)handleDownloadJobAction(jobCard.dataset.downloadJob,jobButton.dataset.jobAction,jobButton);if(jobButton&&annotationCard)handleAnnotationTaskAction(annotationCard.dataset.annotationTask,jobButton.dataset.jobAction,jobButton);const page=event.target.closest('[data-page-link]')?.dataset.pageLink;if(page){setupDismissed=true;showPage(page)}});
   document.querySelectorAll('[data-pick-storage]').forEach(button=>button.addEventListener('click',chooseSettingsFolder));
-  const savedProfile=localStorage.getItem('annocat.defaultProfile')||'wgs',showSetup=localStorage.getItem('annocat.showSetup')!=='false';
+  const savedProfile=localStorage.getItem('annocat.defaultProfile')||'wgs',showSetup=localStorage.getItem('annocat.showSetup')!=='false',calibratedEvidenceColorsSwitch=$('#use-calibrated-evidence-colors');
   localStorage.removeItem('annocat.resultDensity');
   document.body.classList.remove('compact-results');
-  $('#default-profile').value=savedProfile;$('#show-setup').checked=showSetup;
+  $('#default-profile').value=savedProfile;$('#show-setup').checked=showSetup;calibratedEvidenceColorsSwitch.checked=useCalibratedEvidenceColors;
   const profileOption=[...$('#profile').options].find(option=>option.value===savedProfile);if(profileOption){$('#profile').value=savedProfile;renderWizardSources()}
   setupDismissed=!showSetup;
   $('#show-setup').addEventListener('change',event=>{localStorage.setItem('annocat.showSetup',event.target.checked);setupDismissed=!event.target.checked;if(setupDismissed)$('#first-run').classList.remove('visible');else updateSetupModal(lastSetupReady)});
   $('#default-profile').addEventListener('change',event=>localStorage.setItem('annocat.defaultProfile',event.target.value));
-  $('#reset-preferences').addEventListener('click',()=>{localStorage.removeItem('annocat.showSetup');localStorage.removeItem('annocat.defaultProfile');localStorage.removeItem('annocat.installationConcurrency');localStorage.removeItem('annocat.sourceInputMode');favorOnline.resetConfirmation();$('#show-setup').checked=true;$('#default-profile').value='wgs';installationConcurrencySelect.value='1';sourceInputModeSelect.value='resumable'});
+  calibratedEvidenceColorsSwitch.addEventListener('change',event=>{useCalibratedEvidenceColors=event.target.checked;localStorage.setItem(CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY,String(useCalibratedEvidenceColors));refreshEvidencePresentation()});
+  $('#reset-preferences').addEventListener('click',()=>{localStorage.removeItem('annocat.showSetup');localStorage.removeItem('annocat.defaultProfile');localStorage.removeItem('annocat.installationConcurrency');localStorage.removeItem('annocat.sourceInputMode');localStorage.removeItem(CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY);favorOnline.resetConfirmation();useCalibratedEvidenceColors=true;$('#show-setup').checked=true;$('#default-profile').value='wgs';calibratedEvidenceColorsSwitch.checked=true;installationConcurrencySelect.value='1';sourceInputModeSelect.value='resumable';refreshEvidencePresentation()});
   await Promise.all([refreshAppStatus(),refreshCompletedRuns()]);
   setInterval(()=>refreshAppStatus().catch(console.error),1000);setInterval(()=>{if($('#browse').classList.contains('active-page'))refreshCompletedRuns().catch(console.error)},5000)
 }
-document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>{showPage(button.dataset.page);if(button.dataset.page==='browse')refreshCompletedRuns().catch(console.error)}));$('#open-demo').addEventListener('click',async()=>{variants=await fetch('/api/demo/variants').then(response=>response.json());renderTable();document.querySelector('#results .results-heading h1').textContent='Synthetic demonstration';document.querySelector('#results .results-heading p').textContent='No personal variant files are loaded.';showPage('results')});$('#back-to-browse').addEventListener('click',()=>{showPage('browse');refreshCompletedRuns().catch(console.error)});$('#choose-vcfs').addEventListener('click',()=>chooseVcfs().catch(error=>showResourceNotice(error.message)));$('#recover-annotation').addEventListener('click',()=>chooseRecoveryFiles().catch(error=>showResourceNotice(error.message)));$('#vcf-files').addEventListener('change',event=>{recoveryFiles=null;selectedPaths=[...event.target.files].map(file=>file.name);renderSelectedPaths()});$('#profile').addEventListener('change',applyProfile);$('#browse-output').addEventListener('click',chooseFolder);$('#output-directory-fallback').addEventListener('change',event=>{const file=event.target.files[0];if(file){const folder=file.webkitRelativePath.split('/')[0];$('#output-folder').value=folder;$('#folder-message').textContent=`Selected “${folder}” using compatibility mode.`;setStep(3)}});$('#output-folder').addEventListener('input',()=>setStep(3));$('#continue').addEventListener('click',()=>{if(currentStep<4)setStep(currentStep+1);else startAnnotation()});$('#back-step').addEventListener('click',()=>setStep(currentStep-1));$('#search').addEventListener('input',scheduleResultSearch);$('#columns').addEventListener('click',event=>{event.stopPropagation();toggleResultPopover('column-menu')});start().catch(error=>console.error(error));
+document.querySelectorAll('.nav-item').forEach(button=>button.addEventListener('click',()=>{showPage(button.dataset.page);if(button.dataset.page==='browse')refreshCompletedRuns().catch(console.error)}));$('#open-demo').addEventListener('click',async()=>{variants=await fetch('/api/demo/variants').then(response=>response.json());renderTable();document.querySelector('#results .results-heading h1').textContent='Synthetic demonstration';document.querySelector('#results .results-heading p').textContent='No personal variant files are loaded.';showPage('results')});$('#back-to-browse').addEventListener('click',()=>{showPage('browse');refreshCompletedRuns().catch(console.error)});$('#choose-vcfs').addEventListener('click',()=>chooseVcfs().catch(error=>showResourceNotice(error.message)));$('#recover-annotation').addEventListener('click',()=>chooseRecoveryFiles().catch(error=>showResourceNotice(error.message)));$('#vcf-files').addEventListener('change',event=>{recoveryFiles=null;selectedPaths=[...event.target.files].map(file=>file.name);renderSelectedPaths()});$('#profile').addEventListener('change',applyProfile);$('#browse-output').addEventListener('click',chooseFolder);$('#output-directory-fallback').addEventListener('change',event=>{const file=event.target.files[0];if(file){const folder=file.webkitRelativePath.split('/')[0];$('#output-folder').value=folder;$('#folder-message').textContent=`Selected “${folder}” using compatibility mode.`;setStep(3)}});$('#output-folder').addEventListener('input',()=>setStep(3));$('#continue').addEventListener('click',()=>{if(currentStep<4)setStep(currentStep+1);else startAnnotation()});$('#back-step').addEventListener('click',()=>setStep(currentStep-1));$('#search').addEventListener('input',()=>scheduleResultSearch());$('#search').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();scheduleResultSearch(true)}});$('#columns').addEventListener('click',event=>{event.stopPropagation();toggleResultPopover('column-menu')});start().catch(error=>console.error(error));
 document.addEventListener('click',event=>{const pageButton=event.target.closest('[data-status-page]'),disableButton=event.target.closest('[data-status-disable-source]'),dismissButton=event.target.closest('[data-status-dismiss]');if(pageButton)showPage(pageButton.dataset.statusPage);if(disableButton){const sourceId=disableButton.dataset.statusDisableSource,input=document.querySelector(`#wizard-sources input[data-source="${sourceId}"]`);if(input){input.checked=false;$('#profile').value='custom';$('#wizard-sources .profile-badge').forEach(badge=>badge.remove())}clearGlobalStatusNotice();showPage('annotate');setStep(4);refreshAppStatus().catch(console.error)}if(dismissButton)clearGlobalStatusNotice()});
 $('#setup-annotation').addEventListener('click',()=>{setupDismissed=true;$('#first-run').classList.add('hidden');showPage('resources')});$('#setup-open-results').addEventListener('click',openExistingResults);$('#setup-later').addEventListener('click',()=>{setupDismissed=true;$('#first-run').classList.add('hidden')});document.querySelector('#browse .choice:first-child').addEventListener('click',openExistingResults);
 document.addEventListener('click',event=>{const button=event.target.closest('[data-update]');if(button)checkSourceUpdate(button.dataset.update,button)});
@@ -1076,10 +1168,11 @@ const variantPresentation=createVariantPresentation({
   coreColumnPresentation,displayColumns,moveResultColumn,decodeEvidenceValue,resultColumnRawValue,
   renderTableBase,revealVariantDetail,consequenceValue,usefulVariantLinks,displayDetailValue,
   dbnsfpPredictionValue,evidenceFieldPresentationBase,
-  getState:()=>({resultFieldCatalog,evidenceCalibrations,variants,resultAlignmentGroups})
+  getState:()=>({resultFieldCatalog,evidenceCalibrations,variants,resultAlignmentGroups,useCalibratedEvidenceColors})
 });
 function evidenceFieldPresentation(...args){return variantPresentation.evidenceFieldPresentation(...args)}
 function consequenceTerms(...args){return variantPresentation.consequenceTerms(...args)}
 function evidenceValuePresentation(...args){return variantPresentation.evidenceValuePresentation(...args)}
 function renderVariantDetail(...args){return variantPresentation.renderVariantDetail(...args)}
 function renderTable(...args){return variantPresentation.renderTable(...args)}
+function refreshEvidencePresentation(){renderTable();if(selectedAlleleId)void openVariantDetail(selectedAlleleId)}

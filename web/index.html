@@ -131,7 +131,15 @@
         <article class="fui-card fui-card--content"><h2>Startup</h2><p>Control whether AnnoCAT offers setup when annotation data is unavailable.</p><label class="fui-checkbox-field"><input id="show-setup" class="fui-checkbox" type="checkbox" checked> Show the first-run setup prompt</label></article>
         <article class="fui-card fui-card--content"><h2>Default annotation profile</h2><p>Preselect a profile when starting a new annotation.</p><label><span>Profile</span><select id="default-profile" class="fui-select"><option value="wgs">Comprehensive</option><option value="standard">Minimal</option><option value="online">Core + FAVOR</option></select></label></article>
         <article class="fui-card fui-card--content"><h2>Source installation</h2><p>Choose resumable temporary parts or direct streaming, and how many sources may run together.</p><label><span>Download safety</span><select id="source-input-mode" class="fui-select"><option value="resumable">Resumable — Recommended</option><option value="pure-streaming">Pure streaming — Uses less temporary disk</option></select></label><label><span>Concurrent source installs</span><select id="installation-concurrency" class="fui-select"><option value="1">1 — Recommended</option><option value="2">2 — Faster</option><option value="3">3 — High resource use</option><option value="4">4 — Maximum resource use</option></select></label></article>
-        <article class="fui-card fui-card--content"><h2>Preferences</h2><p>Restore startup, profile, and installation choices to their defaults.</p><button id="reset-preferences" class="fui-button" type="button">Reset preferences</button></article>
+        <article class="fui-card fui-card--content">
+          <h2>Computational evidence</h2>
+          <p>Choose how prediction scores are interpreted throughout the results viewer.</p>
+          <label class="fui-switch-field" for="use-calibrated-evidence-colors">
+            <span class="fui-switch-field__label"><strong>Published calibration pills</strong><small>Turn off to use source-native and contextual text colors only. Raw scores do not change.</small></span>
+            <input id="use-calibrated-evidence-colors" class="fui-switch" type="checkbox" role="switch" checked>
+          </label>
+        </article>
+        <article class="fui-card fui-card--content"><h2>Preferences</h2><p>Restore these settings to their defaults.</p><button id="reset-preferences" class="fui-button" type="button">Reset preferences</button></article>
       </div>
     </section>
   </main>

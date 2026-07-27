@@ -8,14 +8,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const INDEX_SCHEMA_VERSION: u32 = 2;
 const INDEX_FILE: &str = "detail-row-groups.json";
 const MAX_INDEX_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ROW_GROUPS: usize = 100_000;
 const MAX_GROUPS_PER_LOOKUP: usize = 8;
+const MAX_CACHED_DETAIL_FILES: usize = 3;
 const LOGICAL_RANGE_ROWS: usize = 4_096;
 const BOUNDARY_CANDIDATES: usize = 64;
 
@@ -51,6 +52,19 @@ struct DetailIndex {
     variants: IndexedFile,
     consequences: IndexedFile,
     evidence: IndexedFile,
+    #[serde(skip)]
+    variant_has_alternate_count: bool,
+}
+
+struct CachedIndex {
+    path: PathBuf,
+    index: Arc<DetailIndex>,
+}
+
+struct CachedBatches {
+    ranges: Vec<RowGroupRange>,
+    fields: Vec<String>,
+    batches: Arc<Vec<RecordBatch>>,
 }
 
 struct AlleleBoundaries {
@@ -73,6 +87,32 @@ pub(crate) struct IndexedDetail {
 }
 
 static INDEX_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static INDEX_CACHE: OnceLock<Mutex<Option<CachedIndex>>> = OnceLock::new();
+static BATCH_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedBatches>>> = OnceLock::new();
+
+fn parquet_has_column(path: &Path, name: &str) -> Result<bool, String> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(
+        File::open(path).map_err(|error| format!("cannot open report table: {error}"))?,
+    )
+    .map_err(|error| format!("cannot read report table metadata: {error}"))?;
+    Ok(reader.schema().field_with_name(name).is_ok())
+}
+
+fn cache_index(
+    path: &Path,
+    variants: &Path,
+    mut index: DetailIndex,
+) -> Result<Arc<DetailIndex>, String> {
+    index.variant_has_alternate_count = parquet_has_column(variants, "alternate_count")?;
+    let index = Arc::new(index);
+    if let Ok(mut cache) = INDEX_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = Some(CachedIndex {
+            path: path.to_owned(),
+            index: Arc::clone(&index),
+        });
+    }
+    Ok(index)
+}
 
 fn stamp(path: &Path) -> Result<FileStamp, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
@@ -475,6 +515,7 @@ fn build_index(
         variants,
         consequences: resolve_detail_file(consequence_bounds, &records)?,
         evidence: resolve_detail_file(evidence_bounds, &records)?,
+        variant_has_alternate_count: false,
     })
 }
 
@@ -531,15 +572,21 @@ fn ensure_index(
     variants: &Path,
     consequences: &Path,
     evidence: &Path,
-) -> Result<DetailIndex, String> {
+) -> Result<Arc<DetailIndex>, String> {
     let directory = variants
         .parent()
         .ok_or("variants table has no parent directory")?;
     let path = directory.join(INDEX_FILE);
+    if let Ok(cache) = INDEX_CACHE.get_or_init(|| Mutex::new(None)).lock()
+        && let Some(cached) = cache.as_ref()
+        && cached.path == path
+    {
+        return Ok(Arc::clone(&cached.index));
+    }
     if let Ok(index) = read_index(&path)
         && index_is_valid(&index, variants, consequences, evidence)
     {
-        return Ok(index);
+        return cache_index(&path, variants, index);
     }
     let _guard = INDEX_BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -548,7 +595,7 @@ fn ensure_index(
     if let Ok(index) = read_index(&path)
         && index_is_valid(&index, variants, consequences, evidence)
     {
-        return Ok(index);
+        return cache_index(&path, variants, index);
     }
     let index = build_index(variants, consequences, evidence)?;
     let encoded = serde_json::to_vec(&index).map_err(|error| error.to_string())?;
@@ -561,10 +608,24 @@ fn ensure_index(
         fs::remove_file(&path).map_err(|error| format!("cannot replace detail index: {error}"))?;
     }
     fs::rename(&partial, &path).map_err(|error| format!("cannot finish detail index: {error}"))?;
-    Ok(index)
+    cache_index(&path, variants, index)
 }
 
 pub(crate) fn prepare(variants: &Path, consequences: &Path, evidence: &Path) -> Result<(), String> {
+    if let Ok(mut cache) = BATCH_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        cache.clear();
+    }
+    if let Some(directory) = variants.parent()
+        && let Ok(mut cache) = INDEX_CACHE.get_or_init(|| Mutex::new(None)).lock()
+        && cache
+            .as_ref()
+            .is_some_and(|cached| cached.path == directory.join(INDEX_FILE))
+    {
+        *cache = None;
+    }
     ensure_index(variants, consequences, evidence).map(|_| ())
 }
 
@@ -638,12 +699,55 @@ fn projected_reader(
         .map_err(|error| format!("cannot read indexed report rows: {error}"))
 }
 
+fn projected_batches(
+    path: &Path,
+    ranges: Vec<RowGroupRange>,
+    names: &[&str],
+    error_context: &str,
+) -> Result<Arc<Vec<RecordBatch>>, String> {
+    if let Ok(cache) = BATCH_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        && let Some(cached) = cache.get(path)
+        && cached.ranges == ranges
+        && cached
+            .fields
+            .iter()
+            .map(String::as_str)
+            .eq(names.iter().copied())
+    {
+        return Ok(Arc::clone(&cached.batches));
+    }
+    let batches = projected_reader(path, ranges.clone(), names)?
+        .map(|batch| batch.map_err(|error| format!("{error_context}: {error}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let batches = Arc::new(batches);
+    if let Ok(mut cache) = BATCH_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        if cache.len() >= MAX_CACHED_DETAIL_FILES && !cache.contains_key(path) {
+            cache.clear();
+        }
+        cache.insert(
+            path.to_owned(),
+            CachedBatches {
+                ranges,
+                fields: names.iter().map(|name| (*name).to_owned()).collect(),
+                batches: Arc::clone(&batches),
+            },
+        );
+    }
+    Ok(batches)
+}
+
 fn read_variant(
     path: &Path,
     groups: Vec<RowGroupRange>,
     allele_id: &str,
     record_number: i64,
     alt_index: i32,
+    has_alternate_count: bool,
 ) -> Result<Option<Value>, String> {
     const FIELDS: &[&str] = &[
         "allele_id",
@@ -667,13 +771,28 @@ fn read_variant(
         "samples_json",
         "consequences_json",
     ];
-    for batch in projected_reader(path, groups, FIELDS)? {
-        let batch =
-            batch.map_err(|error| format!("cannot decode indexed variant rows: {error}"))?;
-        let alleles = string_array(&batch, "allele_id")?;
-        let records = i64_array(&batch, "record_number")?;
-        let alternate_indices = i32_array(&batch, "alt_index")?;
+    let mut fields = FIELDS.to_vec();
+    if has_alternate_count {
+        fields.push("alternate_count");
+    }
+    let mut variant = None;
+    let mut maximum_alt_index = 0;
+    for batch in
+        projected_batches(path, groups, &fields, "cannot decode indexed variant rows")?.iter()
+    {
+        let alleles = string_array(batch, "allele_id")?;
+        let records = i64_array(batch, "record_number")?;
+        let alternate_indices = i32_array(batch, "alt_index")?;
+        let alternate_counts = has_alternate_count
+            .then(|| i32_array(batch, "alternate_count"))
+            .transpose()?;
         for row in 0..batch.num_rows() {
+            if !records.is_null(row)
+                && records.value(row) == record_number
+                && !alternate_indices.is_null(row)
+            {
+                maximum_alt_index = maximum_alt_index.max(alternate_indices.value(row));
+            }
             if !alleles.is_null(row)
                 && !records.is_null(row)
                 && alleles.value(row) == allele_id
@@ -681,17 +800,25 @@ fn read_variant(
                 && !alternate_indices.is_null(row)
                 && alternate_indices.value(row) == alt_index
             {
-                let string = |name| string_array(&batch, name);
+                let string = |name| string_array(batch, name);
                 let samples = string("samples_json")?;
                 let consequences = string("consequences_json")?;
                 let quality = f64_array(&batch, "quality")?;
                 let canonical = bool_array(&batch, "canonical")?;
-                return Ok(Some(json!({
+                let alternate_count = alternate_counts
+                    .map(|values| {
+                        (!values.is_null(row))
+                            .then(|| values.value(row))
+                            .ok_or("variant record has no ALT count")
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let mut value = json!({
                     "chromosome": string_value(string("chromosome")?, row).unwrap_or_default(),
-                    "position": i64_array(&batch, "position")?.value(row),
+                    "position": i64_array(batch, "position")?.value(row),
                     "reference": string_value(string("reference")?, row).unwrap_or_default(),
                     "alternate": string_value(string("alternate")?, row).unwrap_or_default(),
-                    "altIndex": i32_array(&batch, "alt_index")?.value(row),
+                    "altIndex": i32_array(batch, "alt_index")?.value(row),
                     "variantId": string_value(string("variant_id")?, row),
                     "quality": (!quality.is_null(row)).then(|| quality.value(row)),
                     "filter": string_value(string("filter")?, row).unwrap_or_default(),
@@ -709,11 +836,32 @@ fn read_variant(
                     "fallbackConsequences": string_value(consequences, row)
                         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
                         .unwrap_or_else(|| Value::Array(Vec::new())),
-                })));
+                });
+                if has_alternate_count {
+                    if alternate_count < alt_index {
+                        return Err("variant record has an invalid ALT count".into());
+                    }
+                    value
+                        .as_object_mut()
+                        .ok_or("indexed variant context is not an object")?
+                        .insert("alternateCount".into(), alternate_count.into());
+                    return Ok(Some(value));
+                }
+                variant = Some(value);
             }
         }
     }
-    Ok(None)
+    let Some(mut variant) = variant else {
+        return Ok(None);
+    };
+    if maximum_alt_index < alt_index {
+        return Err("variant record has an invalid ALT count".into());
+    }
+    variant
+        .as_object_mut()
+        .ok_or("indexed variant context is not an object")?
+        .insert("alternateCount".into(), maximum_alt_index.into());
+    Ok(Some(variant))
 }
 
 fn read_consequences(
@@ -722,17 +870,18 @@ fn read_consequences(
     allele_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
     let mut rows = Vec::new();
-    for batch in projected_reader(
+    for batch in projected_batches(
         path,
         groups,
         &["allele_id", "consequence_id", "ordinal", "consequence_json"],
-    )? {
-        let batch =
-            batch.map_err(|error| format!("cannot decode indexed consequence rows: {error}"))?;
-        let alleles = string_array(&batch, "allele_id")?;
-        let ids = string_array(&batch, "consequence_id")?;
-        let ordinals = i64_array(&batch, "ordinal")?;
-        let values = string_array(&batch, "consequence_json")?;
+        "cannot decode indexed consequence rows",
+    )?
+    .iter()
+    {
+        let alleles = string_array(batch, "allele_id")?;
+        let ids = string_array(batch, "consequence_id")?;
+        let ordinals = i64_array(batch, "ordinal")?;
+        let values = string_array(batch, "consequence_json")?;
         for row in 0..batch.num_rows() {
             if !alleles.is_null(row) && alleles.value(row) == allele_id {
                 rows.push((
@@ -770,31 +919,34 @@ fn read_evidence(
         "json_value",
     ];
     let mut rows = Vec::new();
-    for batch in projected_reader(path, groups, FIELDS)? {
-        let batch =
-            batch.map_err(|error| format!("cannot decode indexed evidence rows: {error}"))?;
-        let alleles = string_array(&batch, "allele_id")?;
+    for batch in
+        projected_batches(path, groups, FIELDS, "cannot decode indexed evidence rows")?.iter()
+    {
+        let alleles = string_array(batch, "allele_id")?;
         for row in 0..batch.num_rows() {
             if alleles.is_null(row) || alleles.value(row) != allele_id {
                 continue;
             }
-            let strings = |name| string_array(&batch, name);
+            let strings = |name| string_array(batch, name);
+            if strings("scope")?.value(row) == "selected" {
+                continue;
+            }
             let value_type = strings("value_type")?.value(row).to_owned();
             let value = match value_type.as_str() {
                 "string" => string_value(strings("string_value")?, row).map(Value::String),
                 "integer" => {
-                    let values = i64_array(&batch, "integer_value")?;
+                    let values = i64_array(batch, "integer_value")?;
                     (!values.is_null(row)).then(|| Value::Number(values.value(row).into()))
                 }
                 "number" => {
-                    let values = f64_array(&batch, "number_value")?;
+                    let values = f64_array(batch, "number_value")?;
                     (!values.is_null(row))
                         .then(|| values.value(row))
                         .and_then(serde_json::Number::from_f64)
                         .map(Value::Number)
                 }
                 "boolean" => {
-                    let values = bool_array(&batch, "boolean_value")?;
+                    let values = bool_array(batch, "boolean_value")?;
                     (!values.is_null(row)).then(|| Value::Bool(values.value(row)))
                 }
                 "json" => string_value(strings("json_value")?, row)
@@ -847,6 +999,7 @@ pub(crate) fn lookup(
         allele_id,
         record_number,
         alt_index,
+        index.variant_has_alternate_count,
     )?
     else {
         return Ok(None);

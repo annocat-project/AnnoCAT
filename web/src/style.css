@@ -31,12 +31,12 @@
 .results-panel .toolbar{position:static;margin:0;padding:0;border:0;border-radius:0;background:transparent}
 .table-wrap{margin-right:0;padding-right:0}
 .table-wrap th.selection-cell,.table-wrap td.selection-cell,.table-wrap th.candidate-cell,.table-wrap td.candidate-cell{position:static;background:inherit}
-.table-value{display:inline;padding:0;border-radius:0;background:transparent!important;font-weight:inherit;letter-spacing:inherit;line-height:inherit}
-.table-value.tone-adverse,.annotation-row.tone-adverse>b{color:var(--color-status-danger);font-weight:var(--font-weight-bold)}
-.table-value.tone-caution,.annotation-row.tone-caution>b{color:var(--color-status-warning);font-weight:var(--font-weight-bold)}
-.table-value.tone-reassuring,.annotation-row.tone-reassuring>b{color:var(--color-status-success);font-weight:var(--font-weight-bold)}
-.table-value.tone-informative,.annotation-row.tone-informative>b{color:var(--color-status-info);font-weight:var(--font-weight-bold)}
-.table-value.tone-missing,.annotation-row.tone-missing>b{color:var(--color-status-missing);font-weight:var(--font-weight-normal)}
+.table-value:not(.evidence-presentation-pill){display:inline;padding:0;border-radius:0;background:transparent!important;font-weight:inherit;letter-spacing:inherit;line-height:inherit}
+.table-value.tone-adverse,.annotation-row.tone-adverse>b{color:var(--color-tone-adverse);font-weight:var(--font-weight-normal)}
+.table-value.tone-caution,.annotation-row.tone-caution>b{color:var(--color-tone-caution);font-weight:var(--font-weight-normal)}
+.table-value.tone-reassuring,.annotation-row.tone-reassuring>b{color:var(--color-tone-reassuring);font-weight:var(--font-weight-normal)}
+.table-value.tone-informative,.annotation-row.tone-informative>b{color:var(--color-tone-informative);font-weight:var(--font-weight-normal)}
+.table-value.tone-missing,.annotation-row.tone-missing>b{color:var(--color-tone-missing);font-weight:var(--font-weight-normal)}
 .table-value.tone-neutral{color:inherit}
 
 .table-wrap{max-height:calc(100vh - 235px);margin:15px 0 0;padding:0;overflow:auto;scrollbar-gutter:stable}

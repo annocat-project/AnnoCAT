@@ -1,14 +1,15 @@
 use duckdb::{Connection, params};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-pub(crate) const FILE_NAME: &str = "evidence-resolution.parquet";
-const SCHEMA_VERSION: i32 = 1;
-const MAX_SIDECAR_BYTES: u64 = 512 * 1024 * 1024;
+const CACHE_PREFIX: &str = ".annocat-evidence-";
+const CACHE_VERSION: i32 = 1;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,9 +58,24 @@ struct AlignmentSpec {
     fields: BTreeSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestedResolutionKind {
+    AlignedTranscriptVector,
+    LegacyAllele,
+    SelectedFeature,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RequestedField {
+    pub scope: String,
+    pub biological_scope: String,
+    pub source_id: String,
+    pub field_path: String,
+    pub kind: RequestedResolutionKind,
+}
+
 static BUNDLED_SPEC: OnceLock<Result<AlignmentSpec, String>> = OnceLock::new();
 static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static READY_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 fn bundled_spec() -> Result<AlignmentSpec, String> {
     BUNDLED_SPEC
@@ -121,6 +137,65 @@ pub(crate) fn bundled_alignment_group(
     let spec = bundled_spec().ok()?;
     (spec.scope == scope && spec.source_id == source_id && spec.fields.contains(field_path))
         .then_some(spec.id)
+}
+
+pub(crate) fn alignment_key_field(scope: &str, source_id: &str) -> Option<String> {
+    let spec = bundled_spec().ok()?;
+    (spec.scope == scope && spec.source_id == source_id).then_some(spec.key_field)
+}
+
+pub(crate) fn select_aligned_value(
+    scope: &str,
+    source_id: &str,
+    field_path: &str,
+    transcript_vector: &str,
+    value_vector: &str,
+    selected_transcript: &str,
+) -> Option<String> {
+    let spec = bundled_spec().ok()?;
+    if spec.scope != scope || spec.source_id != source_id || !spec.fields.contains(field_path) {
+        return None;
+    }
+    let transcripts = transcript_vector
+        .split(&spec.separator)
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let values = value_vector
+        .split(&spec.separator)
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if transcripts.len() != values.len() {
+        return None;
+    }
+    let exact = transcripts
+        .iter()
+        .enumerate()
+        .filter(|(_, transcript)| **transcript == selected_transcript)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let index = if exact.len() == 1 {
+        exact[0]
+    } else if transcripts
+        .iter()
+        .all(|transcript| !transcript.contains('.'))
+    {
+        let stable = stable_transcript_id(selected_transcript);
+        let matches = transcripts
+            .iter()
+            .enumerate()
+            .filter(|(_, transcript)| stable_transcript_id(transcript) == stable)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        *matches.first().filter(|_| matches.len() == 1)?
+    } else {
+        return None;
+    };
+    let value = values[index];
+    (!spec.missing_values.iter().any(|missing| missing == value)).then(|| value.to_owned())
+}
+
+fn stable_transcript_id(value: &str) -> &str {
+    value.split_once('.').map_or(value, |(stable, _)| stable)
 }
 
 pub(crate) fn catalog_alignment_groups(fields: &[Value]) -> Vec<Value> {
@@ -292,237 +367,605 @@ fn sql_list(values: impl IntoIterator<Item = String>) -> String {
         .join(", ")
 }
 
-fn sidecar_path(evidence: &Path) -> Result<PathBuf, String> {
+fn report_table_path(evidence: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = evidence
+        .parent()
+        .ok_or("evidence table has no parent directory")?
+        .join(name);
+    path.is_file()
+        .then_some(path)
+        .ok_or_else(|| format!("report is missing {name}"))
+}
+
+fn input_fingerprint(evidence: &Path) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    let mut paths = vec![
+        report_table_path(evidence, "variants.parquet")?,
+        evidence.to_path_buf(),
+    ];
+    let consequences = evidence
+        .parent()
+        .ok_or("evidence table has no parent directory")?
+        .join("consequences.parquet");
+    if consequences.is_file() {
+        paths.insert(1, consequences);
+    }
+    for path in paths {
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |value| value.as_nanos());
+        digest.update(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        digest.update(metadata.len().to_le_bytes());
+        digest.update(modified.to_le_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize())[..16].to_owned())
+}
+
+fn kind_tag(kind: RequestedResolutionKind) -> &'static str {
+    match kind {
+        RequestedResolutionKind::AlignedTranscriptVector => "vector",
+        RequestedResolutionKind::LegacyAllele => "allele",
+        RequestedResolutionKind::SelectedFeature => "selected",
+    }
+}
+
+fn field_hash(field: &RequestedField) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        kind_tag(field.kind),
+        &field.scope,
+        &field.biological_scope,
+        &field.source_id,
+        &field.field_path,
+    ] {
+        digest.update(value.as_bytes());
+        digest.update([0]);
+    }
+    format!("{:x}", digest.finalize())[..16].to_owned()
+}
+
+fn cache_path(
+    evidence: &Path,
+    fingerprint: &str,
+    field: &RequestedField,
+) -> Result<PathBuf, String> {
     Ok(evidence
         .parent()
         .ok_or("evidence table has no parent directory")?
-        .join(FILE_NAME))
+        .join(format!(
+            "{CACHE_PREFIX}{fingerprint}-{}.parquet",
+            field_hash(field)
+        )))
 }
 
 pub(crate) fn available_path(evidence: &Path) -> Option<PathBuf> {
-    let path = sidecar_path(evidence).ok()?;
-    if path.is_file()
-        && READY_PATHS
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .ok()?
-            .contains(&path)
-    {
-        return Some(path);
-    }
-    if !sidecar_is_valid(&path) {
-        return None;
-    }
-    READY_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
+    let fingerprint = input_fingerprint(evidence).ok()?;
+    let parent = evidence.parent()?;
+    let prefix = format!("{CACHE_PREFIX}{fingerprint}-");
+    let exists = fs::read_dir(parent)
         .ok()?
-        .insert(path.clone());
-    Some(path)
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".parquet"))
+        });
+    exists.then(|| parent.join(format!("{prefix}*.parquet")))
 }
 
-fn sidecar_is_valid(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
+fn valid_requested_field(field: &RequestedField) -> bool {
+    [
+        &field.scope,
+        &field.biological_scope,
+        &field.source_id,
+        &field.field_path,
+    ]
+    .into_iter()
+    .all(|value| {
+        !value.is_empty()
+            && value.len() <= 200
+            && !value.bytes().any(|byte| byte.is_ascii_control())
+    })
+}
+
+fn cache_is_valid(path: &Path, fingerprint: &str, field: &RequestedField) -> bool {
+    let Ok(file) = File::open(path) else {
         return false;
     };
-    if metadata.len() == 0 || metadata.len() > MAX_SIDECAR_BYTES {
+    let Ok(builder) = ParquetRecordBatchReaderBuilder::try_new(file) else {
         return false;
+    };
+    let schema = builder.schema();
+    for name in [
+        "schema_version",
+        "input_fingerprint",
+        "allele_id",
+        "source_id",
+        "field_path",
+        "resolution_kind",
+        "resolved_string",
+        "resolved_number",
+    ] {
+        if schema.index_of(name).is_err() {
+            return false;
+        }
     }
     let Ok(connection) = Connection::open_in_memory() else {
         return false;
     };
     connection
         .query_row(
-            "SELECT count(*), min(schema_version), max(schema_version)
-             FROM read_parquet(?)",
-            params![path.to_string_lossy().as_ref()],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i32>>(1)?,
-                    row.get::<_, Option<i32>>(2)?,
-                ))
-            },
+            "SELECT coalesce(bool_and(
+                      schema_version=? AND input_fingerprint=?
+                      AND source_id=? AND field_path=?
+                    ), true)
+             FROM (SELECT * FROM read_parquet(?) LIMIT 1)",
+            params![
+                CACHE_VERSION,
+                fingerprint,
+                field.source_id,
+                field.field_path,
+                path.to_string_lossy().as_ref()
+            ],
+            |row| row.get::<_, bool>(0),
         )
-        .is_ok_and(|(rows, minimum, maximum)| {
-            rows == 0 || minimum == Some(SCHEMA_VERSION) && maximum == Some(SCHEMA_VERSION)
-        })
-}
-
-fn resolution_query(spec: &AlignmentSpec, variants: &Path, evidence: &Path) -> String {
-    let fields = sql_list(spec.fields.iter().cloned());
-    let missing = sql_list(spec.missing_values.iter().cloned());
-    let source = sql_literal(&spec.source_id);
-    let scope = sql_literal(&spec.scope);
-    let key = sql_literal(&spec.key_field);
-    let canonical = sql_literal(&spec.canonical_field);
-    let separator = sql_literal(&spec.separator);
-    let release = sql_literal(&spec.source_transcript_release);
-    let variants = sql_literal(&variants.to_string_lossy());
-    let evidence = sql_literal(&evidence.to_string_lossy());
-    format!(
-        r#"
-        WITH transcript_vectors AS MATERIALIZED (
-          SELECT allele_id,
-                 max(string_value) FILTER (WHERE field_path={key}) AS transcripts,
-                 max(string_value) FILTER (WHERE field_path={canonical}) AS canonical
-          FROM read_parquet({evidence})
-          WHERE scope={scope} AND source_id={source}
-            AND field_path IN ({key}, {canonical})
-          GROUP BY allele_id
-        ), joined AS MATERIALIZED (
-          SELECT v.allele_id,
-                 list_transform(string_split(t.transcripts, {separator}),
-                                x -> split_part(trim(x), '.', 1)) AS transcript_ids,
-                 split_part(trim(v.transcript_id), '.', 1) AS selected_transcript,
-                 list_position(string_split(t.canonical, {separator}), 'YES') AS source_canonical_index
-          FROM read_parquet({variants}) v
-          JOIN transcript_vectors t USING (allele_id)
-          WHERE t.transcripts IS NOT NULL
-        ), indexed AS MATERIALIZED (
-          SELECT allele_id,
-                 CASE WHEN selected_transcript <> ''
-                            AND list_count(list_filter(transcript_ids,
-                                x -> x=selected_transcript))=1
-                      THEN list_position(transcript_ids, selected_transcript)
-                 END AS selected_index,
-                 list_count(transcript_ids) AS transcript_count,
-                 source_canonical_index
-          FROM joined
-        ), candidate_values AS MATERIALIZED (
-          SELECT e.allele_id,
-                 e.field_path,
-                 i.selected_index,
-                 i.transcript_count,
-                 i.source_canonical_index,
-                 string_split(coalesce(e.string_value,
-                                       cast(e.integer_value AS VARCHAR),
-                                       cast(e.number_value AS VARCHAR),
-                                       cast(e.boolean_value AS VARCHAR)), {separator}) AS values,
-                 list_filter(string_split(coalesce(e.string_value,
-                                                   cast(e.integer_value AS VARCHAR),
-                                                   cast(e.number_value AS VARCHAR),
-                                                   cast(e.boolean_value AS VARCHAR)), {separator}),
-                             x -> trim(x) NOT IN ({missing})) AS reported_values
-          FROM read_parquet({evidence}) e
-          JOIN indexed i USING (allele_id)
-          WHERE e.scope={scope} AND e.source_id={source}
-            AND e.field_path IN ({fields})
-            AND coalesce(e.string_value,
-                         cast(e.integer_value AS VARCHAR),
-                         cast(e.number_value AS VARCHAR),
-                         cast(e.boolean_value AS VARCHAR)) IS NOT NULL
-        ), resolved AS (
-          SELECT allele_id,
-                 field_path,
-                 selected_index,
-                 source_canonical_index,
-                 list_count(reported_values) AS reported_value_count,
-                 list_unique(reported_values) AS distinct_value_count,
-                 CASE
-                   WHEN selected_index IS NOT NULL AND list_count(values)=transcript_count
-                     THEN CASE WHEN trim(list_extract(values, selected_index)) IN ({missing})
-                               THEN 'exact_missing' ELSE 'exact_transcript' END
-                   WHEN list_count(reported_values)=0 THEN 'not_reported'
-                   WHEN list_unique(reported_values)=1 THEN 'uniform'
-                   WHEN list_count(values)<>transcript_count THEN 'invalid_vector'
-                   ELSE 'ambiguous'
-                 END AS resolution_kind,
-                 CASE
-                   WHEN selected_index IS NOT NULL AND list_count(values)=transcript_count
-                     THEN nullif(nullif(trim(list_extract(values, selected_index)), '.'), '-')
-                   WHEN list_count(reported_values)>0 AND list_unique(reported_values)=1
-                     THEN list_extract(reported_values, 1)
-                 END AS resolved_string
-          FROM candidate_values
-        )
-        SELECT {SCHEMA_VERSION}::INTEGER AS schema_version,
-               allele_id,
-               {source}::VARCHAR AS source_id,
-               field_path,
-               {release}::VARCHAR AS source_transcript_release,
-               resolution_kind,
-               resolved_string,
-               try_cast(resolved_string AS DOUBLE) AS resolved_number,
-               cast(selected_index AS SMALLINT) AS selected_index,
-               cast(source_canonical_index AS SMALLINT) AS source_canonical_index,
-               cast(reported_value_count AS SMALLINT) AS reported_value_count,
-               cast(distinct_value_count AS SMALLINT) AS distinct_value_count
-        FROM resolved
-        "#
-    )
-}
-
-fn build_sidecar(
-    path: &Path,
-    variants: &Path,
-    evidence: &Path,
-    specs: &[AlignmentSpec],
-) -> Result<(), String> {
-    let queries = specs
-        .iter()
-        .filter(|spec| !spec.fields.is_empty())
-        .map(|spec| format!("({})", resolution_query(spec, variants, evidence)))
-        .collect::<Vec<_>>();
-    if queries.is_empty() {
-        return Ok(());
-    }
-    let partial = path.with_extension("parquet.partial");
-    let _ = fs::remove_file(&partial);
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
-    connection
-        .execute_batch("SET threads=4; SET preserve_insertion_order=false;")
-        .map_err(|error| format!("cannot configure evidence resolution: {error}"))?;
-    let sql = format!(
-        "COPY (SELECT * FROM ({}) resolved_union
-               ORDER BY source_id, field_path, allele_id)
-         TO {} (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
-        queries.join(" UNION ALL "),
-        sql_literal(&partial.to_string_lossy())
-    );
-    if let Err(error) = connection.execute_batch(&sql) {
-        let _ = fs::remove_file(&partial);
-        return Err(format!("cannot build transcript evidence index: {error}"));
-    }
-    if !sidecar_is_valid(&partial) {
-        let _ = fs::remove_file(&partial);
-        return Err("transcript evidence index failed validation".into());
-    }
-    if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| format!("cannot replace transcript evidence index: {error}"))?;
-    }
-    fs::rename(&partial, path)
-        .map_err(|error| format!("cannot publish transcript evidence index: {error}"))
+        .unwrap_or(false)
 }
 
 pub(crate) fn prepare(
     variants: &Path,
     evidence: &Path,
     catalog: &Path,
+    requested: &[RequestedField],
 ) -> Result<Option<PathBuf>, String> {
-    let path = sidecar_path(evidence)?;
-    if let Some(path) = available_path(evidence) {
-        return Ok(Some(path));
-    }
-    let specs = catalog_specs(catalog)?;
-    if specs.is_empty() {
+    if requested.is_empty() {
         return Ok(None);
     }
+    validate_catalog(catalog)?;
+    let fingerprint = input_fingerprint(evidence)?;
+    let mut seen = HashSet::new();
+    let fields = requested
+        .iter()
+        .filter(|field| {
+            seen.insert((
+                kind_tag(field.kind),
+                field.scope.as_str(),
+                field.biological_scope.as_str(),
+                field.source_id.as_str(),
+                field.field_path.as_str(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if fields.iter().any(|field| !valid_requested_field(field)) {
+        return Err("requested evidence field is invalid".into());
+    }
+    let consequences = evidence
+        .parent()
+        .ok_or("evidence table has no parent directory")?
+        .join("consequences.parquet");
+    if fields
+        .iter()
+        .any(|field| field.kind == RequestedResolutionKind::SelectedFeature)
+        && !consequences.is_file()
+    {
+        return Err("report is missing consequences.parquet".into());
+    }
+    // ponytail: one process-wide lock is enough until concurrent report queries are measured.
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| "transcript evidence index build lock failed")?;
-    if let Some(path) = available_path(evidence) {
-        return Ok(Some(path));
+        .map_err(|_| "evidence cache build lock failed")?;
+    for field in fields {
+        let path = cache_path(evidence, &fingerprint, field)?;
+        if cache_is_valid(&path, &fingerprint, field) {
+            continue;
+        }
+        build_cache(
+            &path,
+            &fingerprint,
+            variants,
+            &consequences,
+            evidence,
+            field,
+        )?;
     }
-    build_sidecar(&path, variants, evidence, &specs)?;
-    READY_PATHS
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map_err(|_| "transcript evidence index cache failed")?
-        .insert(path.clone());
-    Ok(Some(path))
+    available_path(evidence)
+        .ok_or_else(|| "requested evidence cache was not published".into())
+        .map(Some)
+}
+
+fn build_cache(
+    path: &Path,
+    fingerprint: &str,
+    variants: &Path,
+    consequences: &Path,
+    evidence: &Path,
+    field: &RequestedField,
+) -> Result<(), String> {
+    let partial = path.with_extension("parquet.partial");
+    let _ = fs::remove_file(&partial);
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(
+            "SET threads=4;
+             SET preserve_insertion_order=false;
+             SET memory_limit='1GB';",
+        )
+        .map_err(|error| format!("cannot configure evidence resolution: {error}"))?;
+    let query = match field.kind {
+        RequestedResolutionKind::AlignedTranscriptVector => {
+            aligned_query(fingerprint, variants, evidence, field)?
+        }
+        RequestedResolutionKind::LegacyAllele => legacy_allele_query(fingerprint, evidence, field),
+        RequestedResolutionKind::SelectedFeature => {
+            selected_feature_query(fingerprint, variants, consequences, evidence, field)
+        }
+    };
+    let sql = format!(
+        "COPY ({query}) TO {} (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
+        sql_literal(&partial.to_string_lossy())
+    );
+    if let Err(error) = connection.execute_batch(&sql) {
+        let _ = fs::remove_file(&partial);
+        return Err(format!("cannot build requested evidence cache: {error}"));
+    }
+    if !cache_is_valid(&partial, fingerprint, field) {
+        let _ = fs::remove_file(&partial);
+        return Err("requested evidence cache failed validation".into());
+    }
+    if let Err(error) = crate::library_metadata::publish_atomic_file(&partial, path) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn cache_projection(
+    fingerprint: &str,
+    source_id: &str,
+    field_path: &str,
+    release: &str,
+    body: &str,
+) -> String {
+    format!(
+        "SELECT {CACHE_VERSION}::INTEGER AS schema_version,
+                {}::VARCHAR AS input_fingerprint,
+                allele_id,
+                {}::VARCHAR AS source_id,
+                {}::VARCHAR AS field_path,
+                {}::VARCHAR AS source_transcript_release,
+                resolution_kind,
+                resolved_string,
+                try_cast(resolved_string AS DOUBLE) AS resolved_number,
+                cast(selected_index AS SMALLINT) AS selected_index,
+                cast(source_canonical_index AS SMALLINT) AS source_canonical_index,
+                cast(least(reported_value_count, 32767) AS SMALLINT) AS reported_value_count,
+                cast(least(distinct_value_count, 32767) AS SMALLINT) AS distinct_value_count
+         FROM ({body}) resolved",
+        sql_literal(fingerprint),
+        sql_literal(source_id),
+        sql_literal(field_path),
+        sql_literal(release),
+    )
+}
+
+fn aligned_query(
+    fingerprint: &str,
+    variants: &Path,
+    evidence: &Path,
+    field: &RequestedField,
+) -> Result<String, String> {
+    let spec = bundled_spec()?;
+    if spec.scope != field.scope
+        || spec.source_id != field.source_id
+        || !spec.fields.contains(&field.field_path)
+    {
+        return Err("requested aligned evidence field is outside its contract".into());
+    }
+    let missing = sql_list(spec.missing_values.iter().cloned());
+    let separator = sql_literal(&spec.separator);
+    let body = format!(
+        r#"
+        WITH vectors AS MATERIALIZED (
+          SELECT allele_id,
+                 max(coalesce(string_value, cast(integer_value AS VARCHAR),
+                              cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR)))
+                   FILTER (WHERE field_path={key}) AS transcripts,
+                 max(coalesce(string_value, cast(integer_value AS VARCHAR),
+                              cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR)))
+                   FILTER (WHERE field_path={field_path}) AS values
+          FROM read_parquet({evidence})
+          WHERE scope={scope} AND source_id={source}
+            AND field_path IN ({key}, {field_path})
+          GROUP BY allele_id
+        ), joined AS MATERIALIZED (
+          SELECT vectors.allele_id,
+                 list_transform(string_split(vectors.transcripts, {separator}), x -> trim(x))
+                   AS transcript_ids,
+                 string_split(vectors.values, {separator}) AS values,
+                 trim(coalesce(variants.transcript_id, '')) AS selected_transcript
+          FROM vectors
+          JOIN read_parquet({variants}) variants USING (allele_id)
+          WHERE vectors.transcripts IS NOT NULL AND vectors.values IS NOT NULL
+        ), indexed AS (
+          SELECT *,
+                 CASE
+                   WHEN selected_transcript<>''
+                     AND list_count(list_filter(transcript_ids, x -> x=selected_transcript))=1
+                     THEN list_position(transcript_ids, selected_transcript)
+                   WHEN selected_transcript<>''
+                     AND list_count(list_filter(transcript_ids, x -> strpos(x, '.')>0))=0
+                     AND list_count(list_filter(
+                       transcript_ids,
+                       x -> split_part(x, '.', 1)=split_part(selected_transcript, '.', 1)
+                     ))=1
+                     THEN list_position(
+                       list_transform(transcript_ids, x -> split_part(x, '.', 1)),
+                       split_part(selected_transcript, '.', 1)
+                     )
+                 END AS selected_index,
+                 CASE
+                   WHEN selected_transcript<>''
+                     AND list_count(list_filter(transcript_ids, x -> x=selected_transcript))=1
+                     THEN 'exact_transcript'
+                   WHEN selected_transcript<>''
+                     AND list_count(list_filter(transcript_ids, x -> strpos(x, '.')>0))=0
+                     AND list_count(list_filter(
+                       transcript_ids,
+                       x -> split_part(x, '.', 1)=split_part(selected_transcript, '.', 1)
+                     ))=1
+                     THEN 'stable_id_match'
+                 END AS selected_match_kind
+          FROM joined
+        ), classified AS (
+          SELECT allele_id,
+                 selected_index,
+                 NULL::INTEGER AS source_canonical_index,
+                 list_count(list_filter(values, x -> trim(x) NOT IN ({missing})))
+                   AS reported_value_count,
+                 list_unique(list_filter(values, x -> trim(x) NOT IN ({missing})))
+                   AS distinct_value_count,
+                 CASE
+                   WHEN list_count(values)<>list_count(transcript_ids) THEN 'invalid_vector'
+                   WHEN selected_index IS NULL THEN
+                     CASE WHEN list_count(list_filter(values, x -> trim(x) NOT IN ({missing})))=0
+                          THEN 'not_reported' ELSE 'unresolved_transcript' END
+                   WHEN trim(list_extract(values, selected_index)) IN ({missing})
+                     THEN 'exact_missing'
+                   ELSE selected_match_kind
+                 END AS resolution_kind,
+                 CASE
+                   WHEN selected_index IS NOT NULL
+                     AND list_count(values)=list_count(transcript_ids)
+                     AND trim(list_extract(values, selected_index)) NOT IN ({missing})
+                     THEN trim(list_extract(values, selected_index))
+                 END AS resolved_string
+          FROM indexed
+        )
+        SELECT * FROM classified
+        "#,
+        key = sql_literal(&spec.key_field),
+        field_path = sql_literal(&field.field_path),
+        evidence = sql_literal(&evidence.to_string_lossy()),
+        variants = sql_literal(&variants.to_string_lossy()),
+        scope = sql_literal(&field.scope),
+        source = sql_literal(&field.source_id),
+    );
+    Ok(cache_projection(
+        fingerprint,
+        &field.source_id,
+        &field.field_path,
+        &spec.source_transcript_release,
+        &body,
+    ))
+}
+
+fn legacy_allele_query(fingerprint: &str, evidence: &Path, field: &RequestedField) -> String {
+    let body = format!(
+        r#"
+        WITH candidates AS MATERIALIZED (
+          SELECT allele_id,
+                 scope IN ('allele', 'variant') AS direct,
+                 consequence_id,
+                 coalesce(string_value, cast(integer_value AS VARCHAR),
+                          cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
+                          json_value) AS candidate_value,
+                 CASE
+                   WHEN string_value IS NOT NULL THEN 's:' || trim(string_value)
+                   WHEN integer_value IS NOT NULL THEN 'i:' || cast(integer_value AS VARCHAR)
+                   WHEN number_value IS NOT NULL THEN 'n:' || cast(number_value AS VARCHAR)
+                   WHEN boolean_value IS NOT NULL THEN 'b:' || cast(boolean_value AS VARCHAR)
+                   WHEN json_value IS NOT NULL THEN 'j:' || trim(json_value)
+                 END AS comparison_value
+          FROM read_parquet({evidence})
+          WHERE source_id={source} AND field_path={field_path}
+            AND scope<>'selected'
+            AND coalesce(string_value, cast(integer_value AS VARCHAR),
+                         cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
+                         json_value) IS NOT NULL
+        ), aggregated AS (
+          SELECT allele_id,
+                 count(*) FILTER (WHERE direct) AS direct_count,
+                 count(DISTINCT comparison_value) FILTER (WHERE direct) AS direct_distinct,
+                 count(*) AS reported_value_count,
+                 count(DISTINCT comparison_value) AS distinct_value_count,
+                 first(candidate_value ORDER BY consequence_id NULLS FIRST)
+                   FILTER (WHERE direct) AS direct_value,
+                 first(candidate_value ORDER BY consequence_id NULLS FIRST) AS any_value
+          FROM candidates
+          GROUP BY allele_id
+        )
+        SELECT allele_id,
+               NULL::INTEGER AS selected_index,
+               NULL::INTEGER AS source_canonical_index,
+               reported_value_count,
+               distinct_value_count,
+               CASE
+                 WHEN direct_count>0 AND direct_distinct=1 THEN 'direct_allele'
+                 WHEN direct_count>0 THEN 'conflicting_allele_values'
+                 WHEN distinct_value_count=1 THEN 'legacy_allele_scope_recovered'
+                 ELSE 'conflicting_legacy_values'
+               END AS resolution_kind,
+               CASE
+                 WHEN direct_count>0 AND direct_distinct=1 THEN direct_value
+                 WHEN direct_count=0 AND distinct_value_count=1 THEN any_value
+               END AS resolved_string
+        FROM aggregated
+        "#,
+        evidence = sql_literal(&evidence.to_string_lossy()),
+        source = sql_literal(&field.source_id),
+        field_path = sql_literal(&field.field_path),
+    );
+    cache_projection(
+        fingerprint,
+        &field.source_id,
+        &field.field_path,
+        "legacy report",
+        &body,
+    )
+}
+
+fn selected_feature_query(
+    fingerprint: &str,
+    variants: &Path,
+    consequences: &Path,
+    evidence: &Path,
+    field: &RequestedField,
+) -> String {
+    let mode = match field.biological_scope.as_str() {
+        "gene" => "gene",
+        "feature"
+            if annocat_core::source_catalog::feature_identity(&field.source_id) == Some("gene") =>
+        {
+            "gene"
+        }
+        "feature" => "feature",
+        _ => "transcript",
+    };
+    let match_rank = match mode {
+        "gene" => "CASE WHEN selected_gene<>'' AND candidate_gene=selected_gene THEN 0 ELSE 99 END",
+        "feature" => {
+            "CASE
+               WHEN selected_transcript<>'' AND candidate_transcript=selected_transcript THEN 0
+               ELSE 99
+             END"
+        }
+        _ => {
+            "CASE
+               WHEN selected_transcript<>'' AND candidate_transcript=selected_transcript THEN 0
+               WHEN selected_transcript<>'' AND candidate_transcript<>''
+                 AND strpos(candidate_transcript, '.')=0
+                 AND split_part(candidate_transcript, '.', 1)
+                     = split_part(selected_transcript, '.', 1)
+                 AND versioned_candidates=0 AND stable_matches=1 THEN 1
+               ELSE 99
+             END"
+        }
+    };
+    let success_kind = match mode {
+        "gene" => "exact_gene",
+        "feature" => "policy_selected",
+        _ => "exact_transcript",
+    };
+    let body = format!(
+        r#"
+        WITH raw AS MATERIALIZED (
+          SELECT allele_id, consequence_id,
+                 coalesce(string_value, cast(integer_value AS VARCHAR),
+                          cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
+                          json_value) AS candidate_value,
+                 CASE
+                   WHEN string_value IS NOT NULL THEN 's:' || trim(string_value)
+                   WHEN integer_value IS NOT NULL THEN 'i:' || cast(integer_value AS VARCHAR)
+                   WHEN number_value IS NOT NULL THEN 'n:' || cast(number_value AS VARCHAR)
+                   WHEN boolean_value IS NOT NULL THEN 'b:' || cast(boolean_value AS VARCHAR)
+                   WHEN json_value IS NOT NULL THEN 'j:' || trim(json_value)
+                 END AS comparison_value
+          FROM read_parquet({evidence})
+          WHERE scope={scope} AND source_id={source} AND field_path={field_path}
+            AND consequence_id IS NOT NULL
+            AND coalesce(string_value, cast(integer_value AS VARCHAR),
+                         cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
+                         json_value) IS NOT NULL
+        ), joined AS MATERIALIZED (
+          SELECT raw.*,
+                 c.ordinal,
+                 trim(coalesce(c.transcript_id, '')) AS candidate_transcript,
+                 trim(coalesce(c.gene_id, '')) AS candidate_gene,
+                 trim(coalesce(v.transcript_id, '')) AS selected_transcript,
+                 trim(coalesce(v.gene_id, '')) AS selected_gene
+          FROM raw
+          JOIN read_parquet({consequences}) c USING (allele_id, consequence_id)
+          JOIN read_parquet({variants}) v USING (allele_id)
+        ), measured AS (
+          SELECT *,
+                 count(*) FILTER (
+                   WHERE candidate_transcript<>''
+                     AND strpos(candidate_transcript, '.')=0
+                     AND split_part(candidate_transcript, '.', 1)
+                         = split_part(selected_transcript, '.', 1)
+                 ) OVER (PARTITION BY allele_id) AS stable_matches,
+                 count(*) FILTER (
+                   WHERE candidate_transcript<>'' AND strpos(candidate_transcript, '.')>0
+                 ) OVER (PARTITION BY allele_id) AS versioned_candidates
+          FROM joined
+        ), ranked AS (
+          SELECT *, {match_rank} AS match_rank
+          FROM measured
+        ), chosen AS (
+          SELECT *, min(match_rank) OVER (PARTITION BY allele_id) AS best_rank
+          FROM ranked
+        ), aggregated AS (
+          SELECT allele_id,
+                 min(best_rank) AS best_rank,
+                 count(*) FILTER (WHERE match_rank=best_rank) AS reported_value_count,
+                 count(DISTINCT comparison_value) FILTER (WHERE match_rank=best_rank)
+                   AS distinct_value_count,
+                 first(candidate_value ORDER BY ordinal)
+                   FILTER (WHERE match_rank=best_rank) AS candidate_value
+          FROM chosen
+          GROUP BY allele_id
+        )
+        SELECT allele_id,
+               NULL::INTEGER AS selected_index,
+               NULL::INTEGER AS source_canonical_index,
+               reported_value_count,
+               distinct_value_count,
+               CASE
+                 WHEN best_rank>=99 THEN 'unresolved_feature'
+                 WHEN distinct_value_count>1 THEN 'conflicting_selected_values'
+                 WHEN best_rank=1 THEN 'stable_id_match'
+                 ELSE {success_kind}
+               END AS resolution_kind,
+               CASE WHEN best_rank<99 AND distinct_value_count=1 THEN candidate_value END
+                 AS resolved_string
+        FROM aggregated
+        "#,
+        evidence = sql_literal(&evidence.to_string_lossy()),
+        consequences = sql_literal(&consequences.to_string_lossy()),
+        variants = sql_literal(&variants.to_string_lossy()),
+        scope = sql_literal(&field.scope),
+        source = sql_literal(&field.source_id),
+        field_path = sql_literal(&field.field_path),
+        success_kind = sql_literal(success_kind),
+    );
+    cache_projection(
+        fingerprint,
+        &field.source_id,
+        &field.field_path,
+        "legacy report",
+        &body,
+    )
 }
 
 #[cfg(test)]
@@ -535,5 +978,32 @@ mod tests {
         assert!(bundled_alignment_group("allele", "dbnsfp", "REVEL_score").is_some());
         assert!(bundled_alignment_group("allele", "dbnsfp", "CADD_phred").is_none());
         assert!(bundled_alignment_group("allele", "dbnsfp", "GERP++_RS").is_none());
+    }
+
+    #[test]
+    fn aligned_values_require_an_exact_or_safe_unique_transcript() {
+        assert_eq!(
+            select_aligned_value(
+                "allele",
+                "dbnsfp",
+                "REVEL_score",
+                "ENST1;ENST2",
+                "0.1;0.8",
+                "ENST2.4"
+            )
+            .as_deref(),
+            Some("0.8")
+        );
+        assert!(
+            select_aligned_value(
+                "allele",
+                "dbnsfp",
+                "REVEL_score",
+                "ENST1.2;ENST2.4",
+                "0.1;0.8",
+                "ENST2"
+            )
+            .is_none()
+        );
     }
 }

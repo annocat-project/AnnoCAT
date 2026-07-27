@@ -249,7 +249,7 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
 }
 
 pub fn is_variant_alternate(value: &str) -> bool {
-    !matches!(value, "" | "." | "<NON_REF>" | "<*>")
+    !matches!(value, "" | "." | "*" | "<NON_REF>" | "<*>")
 }
 
 pub fn has_variant_alternate(value: &str) -> bool {
@@ -324,12 +324,12 @@ mod tests {
         let path = root.join("input.vcf");
         std::fs::write(
             &path,
-            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n",
+            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n1\t14\t.\tA\t*\t.\tPASS\t.\n",
         )
         .unwrap();
         let summary = inspect(&path).unwrap();
-        assert_eq!(summary.source_records, 4);
-        assert_eq!(summary.skipped_non_variant_records, 2);
+        assert_eq!(summary.source_records, 5);
+        assert_eq!(summary.skipped_non_variant_records, 3);
         assert_eq!(summary.records, 2);
         std::fs::remove_dir_all(root).unwrap();
     }

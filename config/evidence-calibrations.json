@@ -35,9 +35,19 @@
       "role": "primary",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original REVEL score; rank scores are excluded",
+      "nativeInterpretation": {
+        "kind": "source-derived",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumExclusive": 0.5, "label": "Likely benign range", "tone": "reassuring"},
+          {"minimumInclusive": 0.5, "maximumExclusive": 0.75, "label": "Likely disease-causing range", "tone": "adverse"},
+          {"minimumInclusive": 0.75, "label": "Higher-specificity likely disease-causing range", "tone": "adverse"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["revel"], "fieldNames": ["score"], "verificationStatus": "approved", "sourceVersion": "REVEL 1.3"},
         {"sourceIds": ["dbnsfp"], "fieldNames": ["REVEL_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingRevelScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: REVEL May 3, 2021 release", "reason": "The dbNSFP contract identifies the REVEL release, but the rolling FAVOR response does not immutably report its data release."},
         {"sourceIds": ["favor-online"], "fieldNames": ["revel"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream REVEL release."}
       ]
     },
@@ -50,9 +60,19 @@
       "role": "alternate",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original AlphaMissense pathogenicity score; developer categories and rank scores are excluded",
+      "nativeInterpretation": {
+        "kind": "developer",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumExclusive": 0.34, "label": "Likely benign range", "tone": "reassuring"},
+          {"minimumInclusive": 0.34, "maximumInclusive": 0.564, "label": "Uncertain range", "tone": "caution"},
+          {"minimumExclusive": 0.564, "label": "Likely pathogenic range", "tone": "adverse"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["alphamissense"], "fieldNames": ["score", "pathogenicity"], "verificationStatus": "unverified", "reason": "The planned adapter has no pinned AlphaMissense release contract."},
         {"sourceIds": ["dbnsfp"], "fieldNames": ["AlphaMissense_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingAlphaMissenseScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: AlphaMissense score (release unspecified)", "reason": "The dbNSFP README identifies the original AlphaMissense field but not a numbered upstream release or rounding contract, and the FAVOR response does not immutably report its data release."},
         {"sourceIds": ["favor-online"], "fieldNames": ["alphaMissense"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream AlphaMissense release."}
       ]
     },
@@ -65,8 +85,17 @@
       "role": "alternate",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "BayesDel no-AF score; allele-frequency and rank-score models are excluded",
+      "nativeInterpretation": {
+        "kind": "developer research cutoff",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumExclusive": -0.0570105, "label": "Tolerated by the research cutoff", "tone": "reassuring"},
+          {"minimumInclusive": -0.0570105, "label": "Deleterious by the research cutoff", "tone": "adverse"}
+        ]
+      },
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingBayesDelNoAfScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: BayesDel v1 no-AF score", "reason": "The score identity and source-native cutoff are documented, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -79,7 +108,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original VEST4 score; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["VEST4_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VEST4_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingVest4Score"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: VEST v4.0", "reason": "The predictor release is documented by dbNSFP, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -91,22 +121,42 @@
       "role": "alternate",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original PrimateAI score; categorical and rank-score fields are excluded",
+      "nativeInterpretation": {
+        "kind": "developer",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumExclusive": 0.6, "label": "Likely benign range", "tone": "reassuring"},
+          {"minimumInclusive": 0.6, "maximumInclusive": 0.8, "label": "Intermediate range", "tone": "caution"},
+          {"minimumExclusive": 0.8, "label": "Likely pathogenic range", "tone": "adverse"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["primateai"], "fieldNames": ["score"], "verificationStatus": "unverified", "reason": "The dedicated PrimateAI source is not yet backed by a pinned release contract."},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingPrimateAiScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PrimateAI (numbered release unspecified)", "reason": "The score identity and source-native thresholds are documented, but the README does not name a numbered release and the FAVOR response does not immutably report its data release."}
       ]
     },
     {
-      "id": "polyphen2-hdiv",
-      "label": "PolyPhen-2 HDIV",
+      "id": "polyphen2-hvar",
+      "label": "PolyPhen-2 HVAR",
       "calibrationStatus": "published",
-      "calibrationId": "polyphen2-hdiv-clingen-svi-2022-global",
+      "calibrationId": "polyphen2-hvar-clingen-svi-2022-global",
       "evidenceGroup": "missense-protein-effect",
       "role": "alternate",
       "variantClasses": ["missense_variant"],
-      "scoreIdentity": "Original PolyPhen-2 HumDiv score; HumVar, categorical, and rank-score fields are excluded",
+      "scoreIdentity": "Original PolyPhen-2 HumVar score; HumDiv, categorical, and rank-score fields are excluded",
+      "nativeInterpretation": {
+        "kind": "source-derived",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumInclusive": 0.446, "label": "Benign range", "tone": "reassuring"},
+          {"minimumExclusive": 0.446, "maximumInclusive": 0.908, "label": "Possibly damaging range", "tone": "caution"},
+          {"minimumExclusive": 0.908, "label": "Probably damaging range", "tone": "adverse"}
+        ]
+      },
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HDIV_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HVAR_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingPolyphen2HvarScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PolyPhen-2 v2.2.2 HumVar", "reason": "The score identity, model, and source-native categories are documented, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -118,8 +168,17 @@
       "role": "alternate",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original SIFT score; SIFT4G, categorical, converted, and rank-score fields are excluded",
+      "nativeInterpretation": {
+        "kind": "developer",
+        "variantClasses": ["missense_variant"],
+        "bands": [
+          {"maximumExclusive": 0.05, "label": "Deleterious range", "tone": "adverse"},
+          {"minimumInclusive": 0.05, "label": "Tolerated range", "tone": "reassuring"}
+        ]
+      },
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingSiftScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: SIFT Ensembl 66 (January 2015)", "reason": "The score identity and source-native cutoff are documented, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -131,9 +190,20 @@
       "role": "alternate",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "CADD PHRED score; raw and rank-score fields are excluded",
+      "nativeInterpretation": {
+        "kind": "contextual rank",
+        "variantClasses": ["any"],
+        "bands": [
+          {"maximumExclusive": 10.0, "label": "Below the top 10% genome-wide rank", "tone": "neutral"},
+          {"minimumInclusive": 10.0, "maximumExclusive": 20.0, "label": "Top 10% genome-wide rank", "tone": "caution"},
+          {"minimumInclusive": 20.0, "maximumExclusive": 30.0, "label": "Top 1% genome-wide rank", "tone": "adverse"},
+          {"minimumInclusive": 30.0, "label": "Top 0.1% genome-wide rank", "tone": "adverse"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["cadd"], "fieldNames": ["phred"], "verificationStatus": "approved", "sourceVersion": "CADD 1.7"},
         {"sourceIds": ["dbnsfp"], "fieldNames": ["CADD_phred"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a (CADD 1.7)"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingCaddPhred"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: CADD v1.7 PHRED", "reason": "The score identity and CADD release are documented, but the rolling FAVOR response does not immutably report its data release."},
         {"sourceIds": ["favor-online"], "fieldNames": ["caddPhred"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream CADD release."}
       ]
     },
@@ -147,7 +217,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original MPC score; rank scores are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["MPC_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["MPC_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingMpcScore"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: MPC release 1", "reason": "The predictor release is documented by dbNSFP, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -160,7 +231,8 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original VARITY_R rare-variant model score; VARITY_ER and rank-score fields are excluded",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["VARITY_R_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["VARITY_R_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingVarityRScore"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: VARITY_R rare-variant model (release unspecified)", "reason": "The score model is documented, but the README does not name a numbered release or rounding contract and the FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -172,9 +244,18 @@
       "role": "contextual",
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "phyloP 100-way vertebrate score for the variant position; rank scores are excluded",
+      "nativeInterpretation": {
+        "kind": "directional context",
+        "variantClasses": ["any"],
+        "bands": [
+          {"maximumExclusive": 0.0, "label": "Accelerated-change direction", "tone": "caution"},
+          {"minimumInclusive": 0.0, "label": "Nonnegative conservation direction", "tone": "neutral"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["phylop"], "fieldNames": ["score"], "verificationStatus": "approved", "sourceVersion": "UCSC hg38 phyloP 100-way"},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingPhyloP100way"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: UCSC hg38 phyloP 100-way vertebrate", "reason": "The score identity is available for directional display, but the rolling FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -188,7 +269,8 @@
       "scoreIdentity": "GERP++ rejected-substitution score; neutral-rate and rank-score fields are excluded",
       "matches": [
         {"sourceIds": ["gerp"], "fieldNames": ["score"], "verificationStatus": "unverified", "reason": "The dedicated GERP source is not yet backed by a pinned release contract."},
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["GERP++_RS"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["GERP++_RS"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingGerpRs"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: GERP++ rejected-substitution score", "reason": "The score identity is documented, but the README does not name a numbered release and the FAVOR response does not immutably report its data release."}
       ]
     },
     {
@@ -201,6 +283,16 @@
       "variantClasses": ["any"],
       "excludedVariantClasses": ["splice_acceptor_variant", "splice_donor_variant"],
       "scoreIdentity": "Maximum of DS_AG, DS_AL, DS_DG, and DS_DL for the selected allele; the generic calibration excludes canonical splice-site variants",
+      "nativeInterpretation": {
+        "kind": "developer",
+        "variantClasses": ["any"],
+        "bands": [
+          {"maximumExclusive": 0.2, "label": "Low splice-effect score", "tone": "neutral"},
+          {"minimumInclusive": 0.2, "maximumExclusive": 0.5, "label": "Intermediate splice-effect score", "tone": "caution"},
+          {"minimumInclusive": 0.5, "maximumExclusive": 0.8, "label": "High splice-effect score", "tone": "adverse"},
+          {"minimumInclusive": 0.8, "label": "High-precision splice-effect score", "tone": "adverse"}
+        ]
+      },
       "matches": [
         {"sourceIds": ["spliceai"], "fieldNames": ["maxDeltaScore"], "verificationStatus": "approved", "sourceVersion": "Ensembl MANE Select v1.4 masked SNV scores"},
         {"sourceIds": ["favor-online"], "fieldNames": ["spliceaiDsMax"], "verificationStatus": "unverified", "reason": "The rolling FAVOR response does not identify the upstream SpliceAI release or masking configuration."}
@@ -216,7 +308,21 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original ESM1b log-likelihood-ratio score; lower values predict greater functional impact",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"], "verificationStatus": "unverified", "reason": "dbNSFP 4.9a documents the original ESM1b LLR, but AnnoCat has not verified source precision and transcript mapping against the 2025 calibration input."}
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"], "verificationStatus": "unverified", "reason": "dbNSFP 4.9a documents the original ESM1b LLR, but AnnoCat has not verified source precision and transcript mapping against the 2025 calibration input."},
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingEsm1bScore"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: ESM1b LLR (release unspecified)", "reason": "The exact ESM1b score direction is documented, but its release, precision contract, and transcript mapping against the calibration input remain unverified."}
+      ]
+    },
+    {
+      "id": "mutpred2",
+      "label": "MutPred2",
+      "calibrationStatus": "published",
+      "calibrationId": "mutpred2-clingen-svi-2022-global",
+      "evidenceGroup": "missense-protein-effect",
+      "role": "alternate",
+      "variantClasses": ["missense_variant"],
+      "scoreIdentity": "Original MutPred2 score; legacy MutPred and rank-score fields are excluded",
+      "matches": [
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingMutPred2Score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: MutPred2", "reason": "The FAVOR coding response and dbNSFP contract identify the exact MutPred2 score calibrated by Pejaver et al. 2022."}
       ]
     },
     {
@@ -233,6 +339,125 @@
     }
   ],
   "categoricalPredictions": [
+    {
+      "sourceId": "favor-online",
+      "fieldName": "siftCat",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "FAVOR summary category; the standard response does not identify the contributing transcript.",
+      "codes": [
+        {"value": "deleterious", "label": "Deleterious", "tone": "adverse"},
+        {"value": "tolerated", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "polyphenCat",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "FAVOR summary category; the standard response does not identify the contributing transcript.",
+      "codes": [
+        {"value": "probably_damaging", "label": "Probably damaging", "tone": "adverse"},
+        {"value": "possibly_damaging", "label": "Possibly damaging", "tone": "caution"},
+        {"value": "benign", "label": "Benign", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "metasvmPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "FAVOR summary category; the standard response does not identify the contributing transcript.",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingAlphaMissensePred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
+      "codes": [
+        {"value": "B", "label": "Likely benign", "tone": "reassuring"},
+        {"value": "A", "label": "Uncertain", "tone": "caution"},
+        {"value": "P", "label": "Likely pathogenic", "tone": "adverse"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingSiftPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingPolyphen2HvarPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
+      "codes": [
+        {"value": "D", "label": "Probably damaging", "tone": "adverse"},
+        {"value": "P", "label": "Possibly damaging", "tone": "caution"},
+        {"value": "B", "label": "Benign", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingMetaSvmPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingPrimateAiPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
+      "codes": [
+        {"value": "D", "label": "Damaging", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingEsm1bPred",
+      "displayOnly": true,
+      "referenceUrl": "https://favor-beta.genohub.org/docs/data",
+      "note": "dbNSFP derives this source-native category at -7.5; the ESM1b authors did not recommend a binary threshold.",
+      "codes": [
+        {"value": "D", "label": "Deleterious", "tone": "adverse"},
+        {"value": "T", "label": "Tolerated", "tone": "reassuring"}
+      ]
+    },
+    {
+      "sourceId": "favor-online",
+      "fieldName": "codingMutPred2Pred",
+      "displayOnly": true,
+      "excludeFromSummary": true,
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "note": "ClinGen-calibrated MutPred2 category from dbNSFP for FAVOR's selected coding record. It is an optional alternative and is not counted as independent evidence alongside REVEL.",
+      "codes": [
+        {"value": "PS", "label": "Strong pathogenic computational evidence", "tone": "adverse"},
+        {"value": "PM", "label": "Moderate pathogenic computational evidence", "tone": "adverse"},
+        {"value": "PP", "label": "Supporting pathogenic computational evidence", "tone": "adverse"},
+        {"value": "UC", "label": "Uncertain", "tone": "neutral"},
+        {"value": "BP", "label": "Supporting benign computational evidence", "tone": "reassuring"},
+        {"value": "BM", "label": "Moderate benign computational evidence", "tone": "reassuring"},
+        {"value": "BS", "label": "Strong benign computational evidence", "tone": "reassuring"}
+      ]
+    },
     {
       "sourceId": "dbnsfp",
       "fieldName": "SIFT_pred",
@@ -429,8 +654,8 @@
       "note": "ALoFT predicts loss-of-function tolerance or inheritance context; Dominant and Recessive are not variant classifications.",
       "codes": [
         {"value": "Tolerant", "label": "Tolerant", "tone": "reassuring"},
-        {"value": "Recessive", "label": "Recessive loss-of-function context", "tone": "informative"},
-        {"value": "Dominant", "label": "Dominant loss-of-function context", "tone": "informative"}
+        {"value": "Recessive", "label": "Recessive loss-of-function context", "tone": "neutral"},
+        {"value": "Dominant", "label": "Dominant loss-of-function context", "tone": "neutral"}
       ]
     },
     {
@@ -459,7 +684,7 @@
         {"minimumExclusive": 0.016, "maximumInclusive": 0.183, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.183, "maximumInclusive": 0.29, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.29, "maximumExclusive": 0.644, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.644, "maximumExclusive": 0.773, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.644, "maximumExclusive": 0.773, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 0.773, "maximumExclusive": 0.932, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
         {"minimumInclusive": 0.932, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
@@ -471,15 +696,17 @@
       "scope": "global missense calibration",
       "geneSpecific": false,
       "singlePredictorOnly": true,
+      "intervalPolicy": "published-discrete",
+      "scorePrecision": 3,
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
         {"maximumInclusive": 0.07, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"},
-        {"minimumExclusive": 0.07, "maximumInclusive": 0.099, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
-        {"minimumExclusive": 0.099, "maximumInclusive": 0.169, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
-        {"minimumExclusive": 0.169, "maximumExclusive": 0.792, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.792, "maximumExclusive": 0.906, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
-        {"minimumInclusive": 0.906, "maximumExclusive": 0.972, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumInclusive": 0.972, "maximumExclusive": 0.99, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
+        {"minimumInclusive": 0.071, "maximumInclusive": 0.099, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumInclusive": 0.1, "maximumInclusive": 0.169, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumInclusive": 0.17, "maximumInclusive": 0.791, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.792, "maximumInclusive": 0.905, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
+        {"minimumInclusive": 0.906, "maximumInclusive": 0.971, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.972, "maximumInclusive": 0.989, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
         {"minimumInclusive": 0.99, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
     },
@@ -494,7 +721,7 @@
         {"maximumInclusive": -0.36, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": -0.36, "maximumInclusive": -0.18, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": -0.18, "maximumExclusive": 0.13, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.13, "maximumExclusive": 0.27, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.13, "maximumExclusive": 0.27, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 0.27, "maximumExclusive": 0.5, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
         {"minimumInclusive": 0.5, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
@@ -511,9 +738,27 @@
         {"maximumInclusive": 0.302, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.302, "maximumInclusive": 0.449, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.449, "maximumExclusive": 0.764, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.764, "maximumExclusive": 0.861, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.764, "maximumExclusive": 0.861, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 0.861, "maximumExclusive": 0.965, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
         {"minimumInclusive": 0.965, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
+      ]
+    },
+    {
+      "id": "mutpred2-clingen-svi-2022-global",
+      "reference": "Pejaver et al. 2022, PMID 36413997",
+      "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
+      "scope": "global missense calibration",
+      "geneSpecific": false,
+      "singlePredictorOnly": true,
+      "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
+      "bands": [
+        {"maximumInclusive": 0.01, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
+        {"minimumExclusive": 0.01, "maximumInclusive": 0.197, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumExclusive": 0.197, "maximumInclusive": 0.391, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumExclusive": 0.391, "maximumExclusive": 0.737, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.737, "maximumExclusive": 0.829, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
+        {"minimumInclusive": 0.829, "maximumExclusive": 0.932, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.932, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
     },
     {
@@ -528,12 +773,12 @@
         {"maximumInclusive": 0.362, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.362, "maximumInclusive": 0.483, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.483, "maximumExclusive": 0.79, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.79, "maximumExclusive": 0.867, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.79, "maximumExclusive": 0.867, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 0.867, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     },
     {
-      "id": "polyphen2-hdiv-clingen-svi-2022-global",
+      "id": "polyphen2-hvar-clingen-svi-2022-global",
       "reference": "Pejaver et al. 2022, PMID 36413997",
       "referenceUrl": "https://pubmed.ncbi.nlm.nih.gov/36413997/",
       "scope": "global missense calibration",
@@ -544,7 +789,7 @@
         {"maximumInclusive": 0.009, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.009, "maximumInclusive": 0.113, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.113, "maximumExclusive": 0.978, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.978, "maximumExclusive": 0.999, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 0.978, "maximumExclusive": 0.999, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 0.999, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     },
@@ -558,7 +803,7 @@
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
         {"maximumInclusive": 0.0, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumExclusive": 0.0, "maximumInclusive": 0.001, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumExclusive": 0.0, "maximumInclusive": 0.001, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumExclusive": 0.001, "maximumExclusive": 0.08, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
         {"minimumInclusive": 0.08, "maximumExclusive": 0.327, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumInclusive": 0.327, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"}
@@ -576,7 +821,7 @@
         {"minimumExclusive": 0.15, "maximumInclusive": 17.3, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 17.3, "maximumInclusive": 22.7, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 22.7, "maximumExclusive": 25.3, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 25.3, "maximumExclusive": 28.1, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 25.3, "maximumExclusive": 28.1, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 28.1, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     },
@@ -589,7 +834,7 @@
       "singlePredictorOnly": true,
       "bands": [
         {"maximumExclusive": 1.36, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 1.36, "maximumExclusive": 1.828, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 1.36, "maximumExclusive": 1.828, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 1.828, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     },
@@ -600,16 +845,18 @@
       "scope": "global missense calibration",
       "geneSpecific": false,
       "singlePredictorOnly": true,
+      "intervalPolicy": "published-discrete",
+      "scorePrecision": 3,
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
         {"maximumInclusive": 0.036, "label": "Strong benign computational evidence", "direction": "benign", "strength": "strong", "tone": "reassuring"},
-        {"minimumExclusive": 0.036, "maximumInclusive": 0.063, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"},
-        {"minimumExclusive": 0.063, "maximumInclusive": 0.116, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
-        {"minimumExclusive": 0.116, "maximumInclusive": 0.251, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
-        {"minimumExclusive": 0.251, "maximumExclusive": 0.675, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.675, "maximumExclusive": 0.842, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
-        {"minimumInclusive": 0.842, "maximumExclusive": 0.915, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumInclusive": 0.915, "maximumExclusive": 0.965, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
+        {"minimumInclusive": 0.037, "maximumInclusive": 0.063, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"},
+        {"minimumInclusive": 0.064, "maximumInclusive": 0.116, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumInclusive": 0.117, "maximumInclusive": 0.251, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumInclusive": 0.252, "maximumInclusive": 0.674, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": 0.675, "maximumInclusive": 0.841, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
+        {"minimumInclusive": 0.842, "maximumInclusive": 0.914, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": 0.915, "maximumInclusive": 0.964, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
         {"minimumInclusive": 0.965, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"}
       ]
     },
@@ -620,15 +867,17 @@
       "scope": "global missense calibration",
       "geneSpecific": false,
       "singlePredictorOnly": true,
+      "intervalPolicy": "published-discrete",
+      "scorePrecision": 1,
       "bands": [
         {"maximumInclusive": -24.0, "label": "Strong pathogenic computational evidence", "direction": "pathogenic", "strength": "strong", "tone": "adverse"},
-        {"minimumExclusive": -24.0, "maximumInclusive": -14.0, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
-        {"minimumExclusive": -14.0, "maximumInclusive": -12.2, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
-        {"minimumExclusive": -12.2, "maximumInclusive": -10.7, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
-        {"minimumExclusive": -10.7, "maximumInclusive": -6.2, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumExclusive": -6.2, "maximumInclusive": -3.2, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
-        {"minimumExclusive": -3.2, "maximumInclusive": 8.7, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
-        {"minimumExclusive": 8.7, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"}
+        {"minimumInclusive": -23.9, "maximumInclusive": -14.0, "label": "3-point pathogenic computational interval", "direction": "pathogenic", "strength": "3-point", "tone": "adverse"},
+        {"minimumInclusive": -13.9, "maximumInclusive": -12.2, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"},
+        {"minimumInclusive": -12.1, "maximumInclusive": -10.7, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
+        {"minimumInclusive": -10.6, "maximumInclusive": -6.4, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
+        {"minimumInclusive": -6.3, "maximumInclusive": -3.2, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
+        {"minimumInclusive": -3.1, "maximumInclusive": 8.7, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"minimumInclusive": 8.8, "label": "3-point benign computational interval", "direction": "benign", "strength": "3-point", "tone": "reassuring"}
       ]
     },
     {
@@ -642,7 +891,7 @@
         {"maximumInclusive": 0.021, "label": "Moderate benign computational evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.021, "maximumInclusive": 1.879, "label": "Supporting benign computational evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 1.879, "maximumExclusive": 7.367, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 7.367, "maximumExclusive": 9.741, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"},
+        {"minimumInclusive": 7.367, "maximumExclusive": 9.741, "label": "Supporting pathogenic computational evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"},
         {"minimumInclusive": 9.741, "label": "Moderate pathogenic computational evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     },
@@ -670,31 +919,31 @@
       "bands": [
         {"maximumInclusive": 0.1, "label": "Supporting benign splice-effect evidence", "direction": "benign", "strength": "supporting", "tone": "reassuring"},
         {"minimumExclusive": 0.1, "maximumExclusive": 0.2, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.2, "label": "Supporting pathogenic splice-effect evidence", "direction": "pathogenic", "strength": "supporting", "tone": "caution"}
+        {"minimumInclusive": 0.2, "label": "Supporting pathogenic splice-effect evidence", "direction": "pathogenic", "strength": "supporting", "tone": "adverse"}
       ]
     }
   ],
   "displayPolicies": {
     "alleleFrequency": {
       "interpretation": "Population frequency is context, not an independent pathogenic or benign classification.",
-      "availableTone": "informative",
-      "rareTone": "informative",
-      "commonTone": "informative"
+      "availableTone": "neutral",
+      "rareTone": "neutral",
+      "commonTone": "neutral"
     },
     "cadd": {
       "interpretation": "CADD is rank-scaled. Its published clinical calibration applies only to missense variants and is not the primary AnnoCat missense interpretation.",
-      "tone": "informative"
+      "tone": "neutral"
     },
     "conservation": {
       "interpretation": "Conservation is contextual. Published missense calibration is shown when applicable but is not stacked with REVEL.",
-      "conservedTone": "informative",
+      "conservedTone": "neutral",
       "acceleratedTone": "caution",
       "neutralTone": "neutral"
     },
     "quality": {
       "interpretation": "Without a versioned assay- and caller-specific profile, quality values are context rather than inferred pass or failure states.",
       "profileStatus": "not-configured",
-      "contextTone": "informative",
+      "contextTone": "neutral",
       "passTone": "reassuring",
       "failureTone": "adverse",
       "missingTone": "missing"

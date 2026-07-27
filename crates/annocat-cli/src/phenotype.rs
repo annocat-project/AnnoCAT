@@ -1045,7 +1045,7 @@ fn monarch_request_payload(observed: &[PhenotypeTerm], limit: usize) -> serde_js
 }
 
 fn parse_monarch_genes(response: &[u8]) -> Result<Vec<MonarchRankedGene>, String> {
-    let response: serde_json::Value = serde_json::from_slice(&response)
+    let response: serde_json::Value = serde_json::from_slice(response)
         .map_err(|error| format!("Monarch returned invalid gene-ranking data: {error}"))?;
     let rows = response
         .as_array()

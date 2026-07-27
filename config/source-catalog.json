@@ -8,6 +8,7 @@
       "purpose": "Gene, transcript, consequence, HGVS, and regulatory annotation",
       "defaultEnabled": true,
       "fastvepSource": null,
+      "evidenceScope": "feature",
       "delivery": "bundled-engine",
       "assembly": "GRCh38",
       "licensePolicy": "bundled-open-source"
@@ -18,6 +19,7 @@
       "purpose": "Transcript-linked missense predictors, protein context, and selected functional fields",
       "defaultEnabled": true,
       "fastvepSource": "dbnsfp",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -28,6 +30,7 @@
       "purpose": "Clinical significance, review status, conditions, and accessions",
       "defaultEnabled": true,
       "fastvepSource": "clinvar",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -38,6 +41,7 @@
       "purpose": "Reference SNP identifiers, merged-ID context, and per-allele frequency metadata",
       "defaultEnabled": false,
       "fastvepSource": "dbsnp",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -48,6 +52,7 @@
       "purpose": "Dosage sensitivity and expert-curated gene/variant evidence",
       "defaultEnabled": true,
       "fastvepSource": null,
+      "evidenceScope": "gene",
       "delivery": "adapter-required",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -58,6 +63,7 @@
       "purpose": "Gene-disease validity and inheritance-mode evidence",
       "defaultEnabled": true,
       "fastvepSource": null,
+      "evidenceScope": "gene",
       "delivery": "adapter-required",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -68,6 +74,7 @@
       "purpose": "Current exome population frequencies and ancestry-specific frequency context",
       "defaultEnabled": false,
       "fastvepSource": "gnomad",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -78,6 +85,7 @@
       "purpose": "Full genome-wide population frequencies, including non-coding regions",
       "defaultEnabled": false,
       "fastvepSource": "gnomad",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -88,6 +96,8 @@
       "purpose": "Ensembl MANE Select v1.4 masked splice-effect scores for GRCh38 SNVs",
       "defaultEnabled": false,
       "fastvepSource": "spliceai",
+      "evidenceScope": "feature",
+      "featureIdentity": "gene",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -98,6 +108,7 @@
       "purpose": "Genome-wide raw and PHRED-scaled deleteriousness scores",
       "defaultEnabled": false,
       "fastvepSource": "cadd",
+      "evidenceScope": "allele",
       "delivery": "managed-public-noncommercial",
       "assembly": "GRCh38",
       "licensePolicy": "noncommercial-restricted"
@@ -108,6 +119,7 @@
       "purpose": "Genome-wide base-level evolutionary conservation scores",
       "defaultEnabled": false,
       "fastvepSource": "phylop",
+      "evidenceScope": "allele",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -118,6 +130,7 @@
       "purpose": "Dedicated genome-wide evolutionary constraint scores",
       "defaultEnabled": false,
       "fastvepSource": "gerp",
+      "evidenceScope": "allele",
       "delivery": "catalog-pending",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -128,6 +141,7 @@
       "purpose": "Missense pathogenicity scores from a dedicated pinned release",
       "defaultEnabled": false,
       "fastvepSource": "revel",
+      "evidenceScope": "transcript",
       "delivery": "managed-public",
       "assembly": "GRCh38",
       "licensePolicy": "publisher-terms"
@@ -138,6 +152,7 @@
       "purpose": "Dedicated primate-informed missense pathogenicity scores",
       "defaultEnabled": false,
       "fastvepSource": "primateai",
+      "evidenceScope": "transcript",
       "delivery": "catalog-pending",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -148,6 +163,7 @@
       "purpose": "Dedicated genome-wide deleteriousness scores",
       "defaultEnabled": false,
       "fastvepSource": "dann",
+      "evidenceScope": "allele",
       "delivery": "catalog-pending",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -158,6 +174,7 @@
       "purpose": "Planned adapter for a future pinned AlphaMissense release",
       "defaultEnabled": false,
       "fastvepSource": null,
+      "evidenceScope": "transcript",
       "delivery": "adapter-required",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -168,6 +185,7 @@
       "purpose": "Gene-level loss-of-function and missense constraint metrics",
       "defaultEnabled": false,
       "fastvepSource": "gnomad_genes",
+      "evidenceScope": "gene",
       "delivery": "catalog-pending",
       "assembly": "GRCh38",
       "licensePolicy": "pending-review"
@@ -178,6 +196,7 @@
       "purpose": "Licensed user-supplied gene-disease relationships",
       "defaultEnabled": false,
       "fastvepSource": "omim",
+      "evidenceScope": "gene",
       "delivery": "user-supplied-licensed",
       "assembly": "GRCh38",
       "licensePolicy": "user-supplied-license"
@@ -188,6 +207,7 @@
       "purpose": "Local phenotype terminology, disease profiles, and disease-gene associations for experimental phenotype similarity",
       "defaultEnabled": false,
       "fastvepSource": null,
+      "evidenceScope": "gene",
       "delivery": "managed-public",
       "assembly": "Assembly independent",
       "licensePolicy": "publisher-terms"
@@ -198,6 +218,7 @@
       "purpose": "Licensed user-supplied somatic variant evidence",
       "defaultEnabled": false,
       "fastvepSource": "cosmic",
+      "evidenceScope": "allele",
       "delivery": "user-supplied-licensed",
       "assembly": "GRCh38",
       "licensePolicy": "user-supplied-license"
@@ -218,6 +239,7 @@
       "provider": "FAVOR",
       "purpose": "Online GRCh38 annotations for selected or filtered result sets",
       "apiUrl": "https://api-v2.genohub.org/api/v1/variants/batch",
+      "codingApiUrl": "https://api-v2.genohub.org/api/v1/variants/batch/coding",
       "providerUrl": "https://favor-beta.genohub.org/",
       "timeoutSeconds": 60,
       "maxResults": 10000

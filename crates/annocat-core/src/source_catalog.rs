@@ -26,6 +26,9 @@ pub struct Source {
     pub purpose: String,
     pub default_enabled: bool,
     pub fastvep_source: Option<String>,
+    pub evidence_scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_identity: Option<String>,
     pub delivery: String,
     pub assembly: String,
     pub license_policy: String,
@@ -38,6 +41,8 @@ pub struct Service {
     pub provider: String,
     pub purpose: String,
     pub api_url: String,
+    #[serde(default)]
+    pub coding_api_url: Option<String>,
     pub provider_url: String,
     pub timeout_seconds: u64,
     pub max_results: usize,
@@ -120,6 +125,10 @@ pub fn resource(id: &str) -> Option<&'static Resource> {
 
 pub fn source(id: &str) -> Option<&'static Source> {
     catalog().sources.iter().find(|source| source.id == id)
+}
+
+pub fn feature_identity(id: &str) -> Option<&'static str> {
+    source(id)?.feature_identity.as_deref()
 }
 
 pub fn service(id: &str) -> Option<&'static Service> {
@@ -272,6 +281,14 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 .fastvep_source
                 .as_deref()
                 .is_some_and(|id| !safe_id(id))
+            || !matches!(
+                source.evidence_scope.as_str(),
+                "allele" | "transcript" | "feature" | "gene"
+            )
+            || source.feature_identity.as_deref().is_some_and(|identity| {
+                source.evidence_scope != "feature"
+                    || !matches!(identity, "gene" | "selectedFeature")
+            })
         {
             return Err(format!("source {} has invalid metadata", source.id));
         }
@@ -283,6 +300,10 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             || service.provider.trim().is_empty()
             || service.purpose.trim().is_empty()
             || !service.api_url.starts_with("https://")
+            || service
+                .coding_api_url
+                .as_deref()
+                .is_some_and(|url| !url.starts_with("https://"))
             || !service.provider_url.starts_with("https://")
             || !(1..=120).contains(&service.timeout_seconds)
             || !(1..=10_000).contains(&service.max_results)
@@ -530,12 +551,12 @@ fn validate_evidence_calibrations() -> Result<(), String> {
             .as_str()
             .filter(|url| url.starts_with("https://"))
             .ok_or_else(|| format!("evidence calibration {id} has an invalid reference URL"))?;
-        if !calibration["reference"]
+        if calibration["reference"]
             .as_str()
-            .is_some_and(|text| !text.is_empty())
-            || !calibration["scope"]
+            .is_none_or(|text| text.is_empty())
+            || calibration["scope"]
                 .as_str()
-                .is_some_and(|text| !text.is_empty())
+                .is_none_or(|text| text.is_empty())
             || calibration["geneSpecific"].as_bool() != Some(false)
             || !calibration["singlePredictorOnly"].is_boolean()
         {
@@ -568,6 +589,22 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                 "evidence calibration {id} has an invalid score range"
             ));
         }
+        let interval_policy = calibration
+            .get("intervalPolicy")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("continuous");
+        if !matches!(interval_policy, "continuous" | "published-discrete")
+            || interval_policy == "published-discrete"
+                && !calibration
+                    .get("scorePrecision")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|precision| (1..=12).contains(&precision))
+        {
+            return Err(format!(
+                "evidence calibration {id} has an invalid interval policy"
+            ));
+        }
+        let allow_published_gaps = interval_policy == "published-discrete";
         let mut previous_maximum: Option<(f64, bool)> = None;
         for (index, band) in bands.iter().enumerate() {
             if !band["label"].is_string()
@@ -588,6 +625,16 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                 })
             {
                 return Err(format!("evidence calibration {id} has an invalid band"));
+            }
+            let direction = band["direction"].as_str().unwrap();
+            let tone = band["tone"].as_str().unwrap();
+            if direction == "pathogenic" && tone != "adverse"
+                || direction == "benign" && tone != "reassuring"
+                || direction == "none" && tone != "neutral"
+            {
+                return Err(format!(
+                    "evidence calibration {id} has a tone that conflicts with its direction"
+                ));
             }
             let minimum_inclusive = band
                 .get("minimumInclusive")
@@ -640,7 +687,14 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                     || range_minimum.is_some_and(|range_minimum| minimum < range_minimum)
                     || index > 0
                         && previous_maximum.is_none_or(|(previous, previous_inclusive)| {
-                            previous != minimum || previous_inclusive == minimum_inclusive
+                            if allow_published_gaps {
+                                previous > minimum
+                                    || previous == minimum
+                                        && previous_inclusive
+                                        && minimum_inclusive
+                            } else {
+                                previous != minimum || previous_inclusive == minimum_inclusive
+                            }
                         })
                 {
                     return Err(format!(
@@ -686,12 +740,12 @@ fn validate_evidence_calibrations() -> Result<(), String> {
             .filter(|status| matches!(*status, "published" | "unverified" | "none"))
             .ok_or_else(|| format!("evidence predictor {id} has an invalid calibration status"))?;
         if !predictor_ids.insert(id)
-            || !predictor["label"]
+            || predictor["label"]
                 .as_str()
-                .is_some_and(|value| !value.is_empty())
-            || !predictor["scoreIdentity"]
+                .is_none_or(|value| value.is_empty())
+            || predictor["scoreIdentity"]
                 .as_str()
-                .is_some_and(|value| !value.is_empty())
+                .is_none_or(|value| value.is_empty())
             || !predictor["evidenceGroup"]
                 .as_str()
                 .is_some_and(|value| matches!(value, "missense-protein-effect" | "splicing"))
@@ -745,18 +799,18 @@ fn validate_evidence_calibrations() -> Result<(), String> {
                 })?;
             match verification_status {
                 "approved"
-                    if !field_match["sourceVersion"]
+                    if field_match["sourceVersion"]
                         .as_str()
-                        .is_some_and(|value| !value.trim().is_empty()) =>
+                        .is_none_or(|value| value.trim().is_empty()) =>
                 {
                     return Err(format!(
                         "approved evidence predictor {id} has no source version"
                     ));
                 }
                 "unverified"
-                    if !field_match["reason"]
+                    if field_match["reason"]
                         .as_str()
-                        .is_some_and(|value| !value.trim().is_empty()) =>
+                        .is_none_or(|value| value.trim().is_empty()) =>
                 {
                     return Err(format!("unverified evidence predictor {id} has no reason"));
                 }
@@ -1023,6 +1077,15 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), catalog().sources.len());
         assert_eq!(json[0]["id"], "fastvep");
         assert_eq!(json[0]["defaultEnabled"], true);
+        let spliceai = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|source| source["id"] == "spliceai")
+            .unwrap();
+        assert_eq!(spliceai["evidenceScope"], "feature");
+        assert_eq!(spliceai["featureIdentity"], "gene");
+        assert!(json[0].get("featureIdentity").is_none());
     }
 
     #[test]
@@ -1200,7 +1263,7 @@ mod tests {
         assert_eq!(dbnsfp_revel_match["verificationStatus"], "approved");
         assert_eq!(
             manifest["categoricalPredictions"].as_array().unwrap().len(),
-            20
+            30
         );
     }
 
@@ -1239,7 +1302,7 @@ mod tests {
                             .is_none_or(|maximum| score < maximum)
                 })
                 .and_then(|band| band["label"].as_str())
-                .unwrap()
+                .unwrap_or("Uncalibrated precision gap")
                 .to_owned()
         };
 
@@ -1264,7 +1327,11 @@ mod tests {
             "3-point benign computational interval"
         );
         assert_eq!(
-            label_at(alpha_missense, 0.070_000_1),
+            label_at(alpha_missense, 0.0705),
+            "Uncalibrated precision gap"
+        );
+        assert_eq!(
+            label_at(alpha_missense, 0.071),
             "Moderate benign computational evidence"
         );
         assert_eq!(
@@ -1289,8 +1356,9 @@ mod tests {
             label_at(varity_r, 0.036),
             "Strong benign computational evidence"
         );
+        assert_eq!(label_at(varity_r, 0.0365), "Uncalibrated precision gap");
         assert_eq!(
-            label_at(varity_r, 0.036_000_1),
+            label_at(varity_r, 0.037),
             "3-point benign computational interval"
         );
         assert_eq!(
@@ -1319,7 +1387,12 @@ mod tests {
             label_at(esm1b, -10.7),
             "Supporting pathogenic computational evidence"
         );
-        assert_eq!(label_at(esm1b, -6.2), "Indeterminate calibrated range");
+        assert_eq!(label_at(esm1b, -6.35), "Uncalibrated precision gap");
+        assert_eq!(label_at(esm1b, -6.4), "Indeterminate calibrated range");
+        assert_eq!(
+            label_at(esm1b, -6.3),
+            "Supporting benign computational evidence"
+        );
         assert_eq!(
             label_at(esm1b, 8.8),
             "3-point benign computational interval"
@@ -1335,6 +1408,29 @@ mod tests {
             label_at(splice_ai, 0.200),
             "Supporting pathogenic splice-effect evidence"
         );
+
+        for calibration in manifest["calibrations"].as_array().unwrap() {
+            for band in calibration["bands"].as_array().unwrap() {
+                if band["direction"] == "pathogenic" {
+                    assert_eq!(
+                        band["tone"], "adverse",
+                        "{} uses a non-adverse pathogenic tone",
+                        calibration["id"]
+                    );
+                }
+            }
+        }
+
+        let polyphen = manifest["predictors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|predictor| predictor["id"] == "polyphen2-hvar")
+            .unwrap();
+        assert_eq!(
+            polyphen["matches"][0]["fieldNames"],
+            serde_json::json!(["Polyphen2_HVAR_score"])
+        );
     }
 
     #[test]
@@ -1347,6 +1443,11 @@ mod tests {
         );
         assert_eq!(monarch.timeout_seconds, 45);
         assert_eq!(monarch.max_results, 50);
+        let favor = service("favor-variant-annotation").unwrap();
+        assert_eq!(
+            favor.coding_api_url.as_deref(),
+            Some("https://api-v2.genohub.org/api/v1/variants/batch/coding")
+        );
     }
 
     #[test]

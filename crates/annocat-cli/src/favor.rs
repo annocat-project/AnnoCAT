@@ -1,6 +1,7 @@
 use duckdb::types::Value as SqlValue;
 use duckdb::{Connection, appender_params_from_iter, params, params_from_iter};
 use reqwest::StatusCode;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -42,6 +43,7 @@ pub struct EnrichSummary {
     not_found: u64,
     ambiguous: u64,
     errors: u64,
+    coding_found: u64,
     total_cached: u64,
     latest_fetch: String,
 }
@@ -58,9 +60,19 @@ struct ApiRequest<'a> {
     depth: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+struct CodingApiRequest<'a> {
+    references: &'a [String],
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     items: Vec<ApiItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodingApiResponse {
+    items: Vec<CodingApiItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +80,15 @@ struct ApiItem {
     reference: String,
     status: String,
     variant: Option<ApiVariant>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodingApiItem {
+    reference: String,
+    status: String,
+    coding: Option<Value>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -102,6 +123,7 @@ struct StoredItem {
     status: String,
     error: Option<String>,
     variant: Option<ApiVariant>,
+    coding: Option<Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -183,6 +205,106 @@ const FIELDS: &[FieldDefinition] = &[
         path: "apcProteinFunction",
         value_type: "number",
     },
+    FieldDefinition {
+        path: "codingTranscriptBasis",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingGene",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingHgvsp",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingCaddPhred",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingRevelScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingAlphaMissenseScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingAlphaMissensePred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingSiftScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingSiftPred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingPolyphen2HvarScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingPolyphen2HvarPred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingMetaSvmScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingMetaSvmPred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingBayesDelNoAfScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingVest4Score",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingMutPred2Score",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingMutPred2Pred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingPrimateAiScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingPrimateAiPred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingMpcScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingVarityRScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingEsm1bScore",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingEsm1bPred",
+        value_type: "string",
+    },
+    FieldDefinition {
+        path: "codingGerpRs",
+        value_type: "number",
+    },
+    FieldDefinition {
+        path: "codingPhyloP100way",
+        value_type: "number",
+    },
 ];
 
 pub fn enrich(
@@ -196,6 +318,10 @@ pub fn enrich(
     validate_assembly(run_directory)?;
     let service = annocat_core::source_catalog::service(SERVICE_ID)
         .ok_or("FAVOR service configuration is missing")?;
+    let coding_endpoint = service
+        .coding_api_url
+        .as_deref()
+        .ok_or("FAVOR coding service configuration is missing")?;
     if request.allele_ids.len() > service.max_results {
         return Err(format!(
             "FAVOR enrichment is limited to {} variants per operation",
@@ -219,6 +345,7 @@ pub fn enrich(
                 status: "error".into(),
                 error: Some("This allele representation is not supported by FAVOR".into()),
                 variant: None,
+                coding: None,
             });
         }
     }
@@ -230,6 +357,7 @@ pub fn enrich(
             &unsupported,
             &fetched_at,
             service.api_url.as_str(),
+            coding_endpoint,
         )?;
     }
     for chunk in supported.chunks(REQUEST_CHUNK) {
@@ -237,12 +365,26 @@ pub fn enrich(
             .iter()
             .map(|coordinate| coordinate.reference.clone())
             .collect::<Vec<_>>();
-        let response = call_api(
-            service.api_url.as_str(),
-            service.timeout_seconds,
-            &references,
-        )?;
-        let items = validate_response(chunk, response)?;
+        let (standard_response, coding_response) = std::thread::scope(|scope| {
+            let standard = scope.spawn(|| {
+                call_standard_api(
+                    service.api_url.as_str(),
+                    service.timeout_seconds,
+                    &references,
+                )
+            });
+            let coding = scope
+                .spawn(|| call_coding_api(coding_endpoint, service.timeout_seconds, &references));
+            let standard = standard
+                .join()
+                .map_err(|_| "FAVOR standard request stopped unexpectedly".to_string())??;
+            let coding = coding
+                .join()
+                .map_err(|_| "FAVOR coding request stopped unexpectedly".to_string())??;
+            Ok::<_, String>((standard, coding))
+        })?;
+        let mut items = validate_response(chunk, standard_response)?;
+        merge_coding_response(chunk, &mut items, coding_response)?;
         publish_items(
             run_directory,
             canonical_evidence,
@@ -250,6 +392,7 @@ pub fn enrich(
             &items,
             &fetched_at,
             service.api_url.as_str(),
+            coding_endpoint,
         )?;
     }
     summary(run_directory, request.allele_ids.len(), &fetched_at)
@@ -270,10 +413,12 @@ pub fn status(run_directory: &Path, enabled: bool) -> Result<Value, String> {
             "notFound": 0,
             "ambiguous": 0,
             "errors": 0,
+            "codingFound": 0,
             "latestFetch": null
         }));
     }
     let counts = status_counts(&status_path)?;
+    let coding_found = coding_evidence_count(&run_directory.join(EVIDENCE_FILE))?;
     Ok(json!({
         "enabled": enabled,
         "hasData": true,
@@ -284,6 +429,7 @@ pub fn status(run_directory: &Path, enabled: bool) -> Result<Value, String> {
         "notFound": counts.not_found,
         "ambiguous": counts.ambiguous,
         "errors": counts.errors,
+        "codingFound": coding_found,
         "latestFetch": counts.latest_fetch
     }))
 }
@@ -487,17 +633,37 @@ fn valid_sequence(value: &str) -> bool {
             .all(|byte| matches!(byte, b'A' | b'C' | b'G' | b'T' | b'N'))
 }
 
-fn call_api(
+fn call_standard_api(
     endpoint: &str,
     timeout_seconds: u64,
     references: &[String],
 ) -> Result<ApiResponse, String> {
+    post_api(
+        endpoint,
+        timeout_seconds,
+        &ApiRequest {
+            references,
+            depth: "standard",
+        },
+    )
+}
+
+fn call_coding_api(
+    endpoint: &str,
+    timeout_seconds: u64,
+    references: &[String],
+) -> Result<CodingApiResponse, String> {
+    post_api(endpoint, timeout_seconds, &CodingApiRequest { references })
+}
+
+fn post_api<T: DeserializeOwned>(
+    endpoint: &str,
+    timeout_seconds: u64,
+    request: &impl Serialize,
+) -> Result<T, String> {
     let client = super::http_client::source()?;
-    let body = serde_json::to_vec(&ApiRequest {
-        references,
-        depth: "standard",
-    })
-    .map_err(|error| format!("cannot serialize FAVOR request: {error}"))?;
+    let body = serde_json::to_vec(request)
+        .map_err(|error| format!("cannot serialize FAVOR request: {error}"))?;
     let mut response = client
         .post(endpoint)
         .timeout(Duration::from_secs(timeout_seconds))
@@ -566,9 +732,39 @@ fn validate_response(
                 status: item.status,
                 error: item.error,
                 variant: item.variant,
+                coding: None,
             })
         })
         .collect()
+}
+
+fn merge_coding_response(
+    coordinates: &[Coordinate],
+    items: &mut [StoredItem],
+    response: CodingApiResponse,
+) -> Result<(), String> {
+    if response.items.len() != coordinates.len() || items.len() != coordinates.len() {
+        return Err("FAVOR coding response did not preserve the requested variant count".into());
+    }
+    for ((coordinate, stored), item) in coordinates.iter().zip(items).zip(response.items) {
+        if item.reference != coordinate.reference || stored.reference != coordinate.reference {
+            return Err("FAVOR coding response order or variant identity changed".into());
+        }
+        if !matches!(
+            item.status.as_str(),
+            "found" | "not_coding" | "not_found" | "ambiguous" | "error"
+        ) {
+            return Err("FAVOR returned an unknown coding item status".into());
+        }
+        if item.status == "found" && item.coding.is_none() {
+            return Err("FAVOR returned a found coding item without annotations".into());
+        }
+        if item.status == "error" && stored.error.is_none() {
+            stored.error = item.error;
+        }
+        stored.coding = (item.status == "found").then_some(item.coding).flatten();
+    }
+    Ok(())
 }
 
 fn publish_items(
@@ -577,7 +773,8 @@ fn publish_items(
     canonical_catalog: &Path,
     items: &[StoredItem],
     fetched_at: &str,
-    endpoint: &str,
+    standard_endpoint: &str,
+    coding_endpoint: &str,
 ) -> Result<(), String> {
     if items.is_empty() {
         return Ok(());
@@ -657,14 +854,30 @@ fn publish_items(
     publish_table(&connection, "evidence", &evidence_path)?;
     publish_table(&connection, "statuses", &status_path)?;
     let provenance = json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "sourceId": SOURCE_ID,
         "serviceId": SERVICE_ID,
         "provider": "FAVOR",
         "assembly": "GRCh38",
         "requestDepth": "standard",
+        "codingContract": "dbNSFP 5.3.1a (FAVOR live API schema)",
+        "codingPredictorVersions": {
+            "bayesDel": "v1",
+            "cadd": "v1.7",
+            "mpc": "release 1",
+            "mutPred2": "MutPred2",
+            "polyphen2": "v2.2.2",
+            "revel": "May 3, 2021 release",
+            "sift": "Ensembl 66, January 2015",
+            "vest": "v4.0"
+        },
         "releasePolicy": "rolling",
-        "endpoint": endpoint,
+        "endpoints": {
+            "standard": standard_endpoint,
+            "coding": coding_endpoint
+        },
+        "catalogReference": "https://favor-beta.genohub.org/docs/data",
+        "versionNote": "FAVOR's live coding API and public data catalog currently identify different dbNSFP releases; AnnoCAT therefore applies source-native interpretations but does not assume calibrated release equivalence.",
         "latestFetch": fetched_at
     });
     super::library_metadata::atomic_write(
@@ -679,64 +892,228 @@ fn append_evidence(connection: &Connection, items: &[StoredItem]) -> Result<(), 
         .appender("evidence")
         .map_err(|error| format!("cannot append FAVOR evidence: {error}"))?;
     for item in items {
-        let Some(variant) = &item.variant else {
-            continue;
-        };
-        let strings = [
-            ("rsid", variant.rsid.as_deref()),
-            ("vcf", variant.vcf.as_deref()),
-            ("gene", variant.gene.as_deref()),
-            ("consequence", variant.consequence.as_deref()),
-            (
-                "clinicalSignificance",
-                variant.clinical_significance.as_deref(),
-            ),
-            ("siftCat", variant.sift_cat.as_deref()),
-            ("polyphenCat", variant.polyphen_cat.as_deref()),
-            ("metasvmPred", variant.metasvm_pred.as_deref()),
-        ];
-        for (field, value) in strings {
-            let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
-                continue;
-            };
-            append_evidence_row(
-                &mut appender,
-                &item.allele_id,
-                field,
-                "string",
-                Some(value),
-                None,
-            )?;
+        if let Some(variant) = &item.variant {
+            let strings = [
+                ("rsid", variant.rsid.as_deref()),
+                ("vcf", variant.vcf.as_deref()),
+                ("gene", variant.gene.as_deref()),
+                ("consequence", variant.consequence.as_deref()),
+                (
+                    "clinicalSignificance",
+                    variant.clinical_significance.as_deref(),
+                ),
+                ("siftCat", variant.sift_cat.as_deref()),
+                ("polyphenCat", variant.polyphen_cat.as_deref()),
+                ("metasvmPred", variant.metasvm_pred.as_deref()),
+            ];
+            for (field, value) in strings {
+                let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+                    continue;
+                };
+                append_evidence_row(
+                    &mut appender,
+                    &item.allele_id,
+                    field,
+                    "string",
+                    Some(value),
+                    None,
+                )?;
+            }
+            let numbers = [
+                ("caddPhred", variant.cadd_phred),
+                ("revel", variant.revel),
+                ("alphaMissense", variant.alpha_missense),
+                ("spliceaiDsMax", variant.spliceai_ds_max),
+                ("gnomadAf", variant.gnomad_af),
+                ("bravoAf", variant.bravo_af),
+                ("tgAll", variant.tg_all),
+                ("apcConservation", variant.apc_conservation),
+                ("apcEpigenetics", variant.apc_epigenetics),
+                ("apcProteinFunction", variant.apc_protein_function),
+            ];
+            for (field, value) in numbers {
+                let Some(value) = value.filter(|value| value.is_finite()) else {
+                    continue;
+                };
+                append_evidence_row(
+                    &mut appender,
+                    &item.allele_id,
+                    field,
+                    "number",
+                    None,
+                    Some(value),
+                )?;
+            }
         }
-        let numbers = [
-            ("caddPhred", variant.cadd_phred),
-            ("revel", variant.revel),
-            ("alphaMissense", variant.alpha_missense),
-            ("spliceaiDsMax", variant.spliceai_ds_max),
-            ("gnomadAf", variant.gnomad_af),
-            ("bravoAf", variant.bravo_af),
-            ("tgAll", variant.tg_all),
-            ("apcConservation", variant.apc_conservation),
-            ("apcEpigenetics", variant.apc_epigenetics),
-            ("apcProteinFunction", variant.apc_protein_function),
-        ];
-        for (field, value) in numbers {
-            let Some(value) = value.filter(|value| value.is_finite()) else {
-                continue;
-            };
-            append_evidence_row(
-                &mut appender,
-                &item.allele_id,
-                field,
-                "number",
-                None,
-                Some(value),
-            )?;
+        if let Some(coding) = &item.coding {
+            append_coding_evidence(&mut appender, &item.allele_id, coding)?;
         }
     }
     appender
         .flush()
         .map_err(|error| format!("cannot flush FAVOR evidence: {error}"))
+}
+
+fn append_coding_evidence(
+    appender: &mut duckdb::Appender<'_>,
+    allele_id: &str,
+    coding: &Value,
+) -> Result<(), String> {
+    let mane = coding_string(coding, &["/dbnsfp/annotation/mane"]);
+    let canonical = coding_string(coding, &["/dbnsfp/annotation/vep_canonical"]);
+    let basis = if mane.is_some_and(|value| value.eq_ignore_ascii_case("select")) {
+        "MANE Select"
+    } else if mane.is_some_and(|value| value.to_ascii_lowercase().contains("clinical")) {
+        "MANE Plus Clinical"
+    } else if canonical.is_some_and(|value| value.eq_ignore_ascii_case("yes")) {
+        "Canonical transcript"
+    } else {
+        "FAVOR coding record"
+    };
+    let strings = [
+        ("codingTranscriptBasis", Some(basis)),
+        (
+            "codingGene",
+            coding_string(coding, &["/dbnsfp/annotation/genename"]),
+        ),
+        (
+            "codingHgvsp",
+            coding_string(coding, &["/dbnsfp/annotation/hgvsp_vep"]),
+        ),
+        (
+            "codingAlphaMissensePred",
+            coding_string(coding, &["/dbnsfp/alphamissense/pred"]),
+        ),
+        (
+            "codingSiftPred",
+            coding_string(coding, &["/dbnsfp/sift/pred"]),
+        ),
+        (
+            "codingPolyphen2HvarPred",
+            coding_string(coding, &["/dbnsfp/polyphen2_hvar/pred"]),
+        ),
+        (
+            "codingMetaSvmPred",
+            coding_string(coding, &["/dbnsfp/metasvm/pred"]),
+        ),
+        (
+            "codingPrimateAiPred",
+            coding_string(coding, &["/dbnsfp/primate_ai/pred"]),
+        ),
+        (
+            "codingEsm1bPred",
+            coding_string(coding, &["/dbnsfp/esm1b/pred"]),
+        ),
+        (
+            "codingMutPred2Pred",
+            coding_string(coding, &["/dbnsfp/mutpred2/pred"]),
+        ),
+    ];
+    for (field, value) in strings {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            continue;
+        };
+        append_evidence_row(appender, allele_id, field, "string", Some(value), None)?;
+    }
+    let numbers = [
+        (
+            "codingCaddPhred",
+            coding_number(coding, &["/dbnsfp/cadd/phred"]),
+        ),
+        (
+            "codingRevelScore",
+            coding_number(coding, &["/dbnsfp/revel/score"]),
+        ),
+        (
+            "codingAlphaMissenseScore",
+            coding_number(coding, &["/dbnsfp/alphamissense/score"]),
+        ),
+        (
+            "codingSiftScore",
+            coding_number(coding, &["/dbnsfp/sift/score"]),
+        ),
+        (
+            "codingPolyphen2HvarScore",
+            coding_number(coding, &["/dbnsfp/polyphen2_hvar/score"]),
+        ),
+        (
+            "codingMetaSvmScore",
+            coding_number(coding, &["/dbnsfp/metasvm/score"]),
+        ),
+        (
+            "codingBayesDelNoAfScore",
+            coding_number(coding, &["/dbnsfp/bayesdel_noaf/score"]),
+        ),
+        (
+            "codingVest4Score",
+            coding_number(coding, &["/dbnsfp/vest4/score"]),
+        ),
+        (
+            "codingMutPred2Score",
+            coding_number(coding, &["/dbnsfp/mutpred2/score"]),
+        ),
+        (
+            "codingPrimateAiScore",
+            coding_number(coding, &["/dbnsfp/primate_ai/score"]),
+        ),
+        (
+            "codingMpcScore",
+            coding_number(coding, &["/dbnsfp/mpc/score"]),
+        ),
+        (
+            "codingVarityRScore",
+            coding_number(coding, &["/dbnsfp/varity_r/score"]),
+        ),
+        (
+            "codingEsm1bScore",
+            coding_number(coding, &["/dbnsfp/esm1b/score"]),
+        ),
+        (
+            "codingGerpRs",
+            coding_number(coding, &["/dbnsfp/conservation/gerp_rs"]),
+        ),
+        (
+            "codingPhyloP100way",
+            coding_number(
+                coding,
+                &[
+                    "/dbnsfp/conservation/phylop_100v",
+                    "/dbnsfp/conservation/phylop100way_vertebrate",
+                ],
+            ),
+        ),
+    ];
+    for (field, value) in numbers {
+        let Some(value) = value.filter(|value| value.is_finite()) else {
+            continue;
+        };
+        append_evidence_row(appender, allele_id, field, "number", None, Some(value))?;
+    }
+    Ok(())
+}
+
+fn coding_string<'a>(coding: &'a Value, pointers: &[&str]) -> Option<&'a str> {
+    pointers.iter().find_map(|pointer| {
+        let value = coding.pointer(pointer)?;
+        value
+            .as_str()
+            .or_else(|| value.as_array()?.iter().find_map(Value::as_str))
+    })
+}
+
+fn coding_number(coding: &Value, pointers: &[&str]) -> Option<f64> {
+    pointers.iter().find_map(|pointer| {
+        let value = coding.pointer(pointer)?;
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse().ok())
+            .or_else(|| {
+                value
+                    .as_array()?
+                    .iter()
+                    .find_map(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+            })
+    })
 }
 
 fn append_evidence_row(
@@ -751,7 +1128,7 @@ fn append_evidence_row(
         SqlValue::Int(annocat_core::RESULT_SCHEMA_VERSION),
         allele_id.to_owned().into(),
         SqlValue::Null,
-        "allele".to_owned().into(),
+        field_physical_scope(field).to_owned().into(),
         SOURCE_ID.to_owned().into(),
         field.to_owned().into(),
         value_type.to_owned().into(),
@@ -808,20 +1185,48 @@ fn field_occurrences(connection: &Connection) -> Result<BTreeMap<String, u64>, S
     .collect()
 }
 
+fn field_physical_scope(field_path: &str) -> &'static str {
+    match field_path {
+        "codingCaddPhred" | "codingGerpRs" | "codingPhyloP100way" => "allele",
+        value if value.starts_with("coding") => "selected",
+        _ => "allele",
+    }
+}
+
+fn field_biological_scope(field_path: &str) -> &'static str {
+    (field_physical_scope(field_path) == "selected")
+        .then_some("feature")
+        .unwrap_or("allele")
+}
+
+fn field_resolution_policy(field_path: &str) -> &'static str {
+    (field_physical_scope(field_path) == "selected")
+        .then_some("materializedSelected")
+        .unwrap_or("direct")
+}
+
 fn catalog_json(occurrences: &BTreeMap<String, u64>) -> Value {
     let fields = FIELDS
         .iter()
         .filter_map(|field| {
             let count = occurrences.get(field.path).copied().unwrap_or(0);
             (count > 0).then(|| {
-                json!({
-                    "scope": "allele",
+                let mut value = json!({
+                    "scope": field_biological_scope(field.path),
+                    "biologicalScope": field_biological_scope(field.path),
+                    "physicalScope": field_physical_scope(field.path),
                     "sourceId": SOURCE_ID,
                     "fieldPath": field.path,
                     "valueType": field.value_type,
                     "observedTypes": [field.value_type],
-                    "occurrences": count
-                })
+                    "occurrences": count,
+                    "storageEncoding": "scalar",
+                    "resolutionPolicy": field_resolution_policy(field.path)
+                });
+                if field_physical_scope(field.path) == "selected" {
+                    value["selectionOrigin"] = Value::String("provider".into());
+                }
+                value
             })
         })
         .collect::<Vec<_>>();
@@ -841,7 +1246,33 @@ fn publish_table(connection: &Connection, table: &str, destination: &Path) -> Re
             sql_path(&temporary)
         ))
         .map_err(|error| format!("cannot write {}: {error}", destination.display()))?;
-    super::library_metadata::publish_atomic_file(&temporary, destination)
+    let schema_query = match table {
+        "evidence" => {
+            "SELECT schema_version, allele_id, consequence_id, scope, source_id, field_path,
+                    value_type, string_value, integer_value, number_value, boolean_value,
+                    json_value FROM read_parquet(?) LIMIT 0"
+        }
+        "statuses" => {
+            "SELECT schema_version, allele_id, reference, status, fetched_at, error
+             FROM read_parquet(?) LIMIT 0"
+        }
+        _ => return Err("cannot publish an unknown FAVOR table".into()),
+    };
+    if let Err(error) = connection
+        .prepare(schema_query)
+        .and_then(|mut statement| statement.exists(params![temporary.to_string_lossy().as_ref()]))
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!(
+            "cannot validate {}: {error}",
+            destination.display()
+        ));
+    }
+    if let Err(error) = super::library_metadata::publish_atomic_file(&temporary, destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn publish_hard_link(source: &Path, destination: &Path) -> Result<(), String> {
@@ -927,18 +1358,36 @@ fn status_counts(path: &Path) -> Result<StatusCounts, String> {
         .map_err(|error| format!("cannot read FAVOR status: {error}"))
 }
 
+fn coding_evidence_count(path: &Path) -> Result<u64, String> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT count(DISTINCT allele_id)
+             FROM read_parquet(?)
+             WHERE source_id=? AND field_path='codingTranscriptBasis'",
+            params![path.to_string_lossy().as_ref(), SOURCE_ID],
+            |row| Ok(row.get::<_, i64>(0)?.max(0) as u64),
+        )
+        .map_err(|error| format!("cannot count FAVOR coding evidence: {error}"))
+}
+
 fn summary(
     run_directory: &Path,
     requested: usize,
     fetched_at: &str,
 ) -> Result<EnrichSummary, String> {
     let counts = status_counts(&run_directory.join(STATUS_FILE))?;
+    let coding_found = coding_evidence_count(&run_directory.join(EVIDENCE_FILE))?;
     Ok(EnrichSummary {
         requested,
         found: counts.found,
         not_found: counts.not_found,
         ambiguous: counts.ambiguous,
         errors: counts.errors,
+        coding_found,
         total_cached: counts.total,
         latest_fetch: fetched_at.into(),
     })
@@ -976,6 +1425,112 @@ mod tests {
             items[0].variant.as_ref().unwrap().rsid.as_deref(),
             Some("rs7412")
         );
+    }
+
+    #[test]
+    fn coding_response_is_merged_without_synthesizing_missing_scores() {
+        let coordinates = vec![
+            Coordinate {
+                allele_id: "allele-one".into(),
+                reference: "19-44908822-C-T".into(),
+            },
+            Coordinate {
+                allele_id: "allele-two".into(),
+                reference: "22-17008105-G-A".into(),
+            },
+        ];
+        let standard: ApiResponse = serde_json::from_value(json!({
+            "items": [
+                {"reference": "19-44908822-C-T", "status": "found", "variant": {"rsid": "rs7412"}},
+                {"reference": "22-17008105-G-A", "status": "found", "variant": {"rsid": "rs-test"}}
+            ]
+        }))
+        .unwrap();
+        let coding: CodingApiResponse = serde_json::from_value(json!({
+            "items": [
+                {
+                    "reference": "19-44908822-C-T",
+                    "status": "found",
+                    "coding": {
+                        "dbnsfp": {
+                            "annotation": {"mane": "Select", "hgvsp_vep": "p.Arg176Cys"},
+                            "revel": {"score": 0.42},
+                            "cadd": {"phred": 25.1},
+                            "mutpred2": {"score": 0.465, "pred": "UC"},
+                            "conservation": {"phylop_100v": 0.906}
+                        }
+                    }
+                },
+                {"reference": "22-17008105-G-A", "status": "not_coding", "coding": null}
+            ]
+        }))
+        .unwrap();
+        let mut items = validate_response(&coordinates, standard).unwrap();
+        merge_coding_response(&coordinates, &mut items, coding).unwrap();
+        assert_eq!(
+            coding_number(items[0].coding.as_ref().unwrap(), &["/dbnsfp/revel/score"]),
+            Some(0.42)
+        );
+        assert_eq!(
+            coding_number(items[0].coding.as_ref().unwrap(), &["/dbnsfp/cadd/phred"]),
+            Some(25.1)
+        );
+        assert_eq!(
+            coding_number(
+                items[0].coding.as_ref().unwrap(),
+                &["/dbnsfp/mutpred2/score"]
+            ),
+            Some(0.465)
+        );
+        assert_eq!(
+            coding_string(
+                items[0].coding.as_ref().unwrap(),
+                &["/dbnsfp/mutpred2/pred"]
+            ),
+            Some("UC")
+        );
+        assert_eq!(
+            coding_number(
+                items[0].coding.as_ref().unwrap(),
+                &["/dbnsfp/conservation/phylop_100v"]
+            ),
+            Some(0.906)
+        );
+        assert!(items[1].coding.is_none());
+    }
+
+    #[test]
+    fn catalog_distinguishes_position_and_source_selected_coding_fields() {
+        let occurrences = BTreeMap::from([
+            ("gnomadAf".to_owned(), 1),
+            ("codingRevelScore".to_owned(), 1),
+            ("codingCaddPhred".to_owned(), 1),
+            ("codingGerpRs".to_owned(), 1),
+            ("codingPhyloP100way".to_owned(), 1),
+        ]);
+        let catalog = catalog_json(&occurrences);
+        let fields = catalog["fields"].as_array().unwrap();
+        let field = |path: &str| {
+            fields
+                .iter()
+                .find(|field| field["fieldPath"] == path)
+                .unwrap()["resolutionPolicy"]
+                .clone()
+        };
+        assert_eq!(field("gnomadAf"), "direct");
+        assert_eq!(field("codingRevelScore"), "materializedSelected");
+        assert_eq!(field("codingCaddPhred"), "direct");
+        assert_eq!(field("codingGerpRs"), "direct");
+        assert_eq!(field("codingPhyloP100way"), "direct");
+        let revel = fields
+            .iter()
+            .find(|field| field["fieldPath"] == "codingRevelScore")
+            .unwrap();
+        assert_eq!(revel["scope"], "feature");
+        assert_eq!(revel["physicalScope"], "selected");
+        assert_eq!(revel["selectionOrigin"], "provider");
+        assert_eq!(field_physical_scope("codingRevelScore"), "selected");
+        assert_eq!(field_physical_scope("codingCaddPhred"), "allele");
     }
 
     #[test]
