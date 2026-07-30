@@ -12,6 +12,8 @@ const LOCAL_MANIFEST_LIMIT: u64 = 1024 * 1024;
 struct RunManifest {
     schema_version: u32,
     canonical_schema_version: u32,
+    #[serde(default)]
+    representative_selection_contract: Option<String>,
     state: String,
     run_id: String,
     name: String,
@@ -105,6 +107,7 @@ pub fn create_with_display_name(
         "packageFormat": "annocat-report",
         "packageVersion": 1,
         "schemaVersion": manifest.canonical_schema_version,
+        "representativeSelectionContract": manifest.representative_selection_contract,
         "runId": manifest.run_id,
         "displayName": display_name,
         "originalDisplayName": manifest.name,
@@ -280,7 +283,7 @@ mod tests {
         }
         fs::write(
             run.join("manifest.json"),
-            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"state":"completed","runId":"run-package","name":"Package fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":2,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
+            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"representativeSelectionContract":"allele-gene-severity-v1","state":"completed","runId":"run-package","name":"Package fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":2,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
         )
         .unwrap();
         let destination = root.join("shared.zip");
@@ -290,6 +293,16 @@ mod tests {
         assert_eq!(inspection.file_count, 5);
         let mut archive = zip::ZipArchive::new(File::open(&destination).unwrap()).unwrap();
         assert!(archive.by_name("annotated.vcf").is_err());
+        let mut manifest = String::new();
+        archive
+            .by_name("annocat-manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&manifest).unwrap()["representativeSelectionContract"],
+            "allele-gene-severity-v1"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

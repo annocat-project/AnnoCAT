@@ -1,5 +1,6 @@
 use annocat_core::normalization::{
-    CanonicalAllele, IndexedReference, ReferenceSequence, canonical_chromosome, canonicalize,
+    CanonicalAllele, IndexedReference, NormalizeError, ReferenceSequence, canonical_chromosome,
+    canonicalize,
 };
 use duckdb::arrow::array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
@@ -26,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 pub const SCHEMA_VERSION: i32 = annocat_core::RESULT_SCHEMA_VERSION;
+pub const REPRESENTATIVE_SELECTION_CONTRACT: &str = "allele-gene-severity-v1";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +60,7 @@ struct ActivePageQuery {
 }
 
 static ACTIVE_PAGE_QUERIES: OnceLock<Mutex<HashMap<String, ActivePageQuery>>> = OnceLock::new();
+static REPRESENTATIVE_OVERRIDE_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct PageQueryGuard {
     key: String,
@@ -121,12 +124,14 @@ fn cancellable_page_connection(
 pub struct CanonicalSummary {
     pub rows: u64,
     pub records: u64,
+    pub excluded_auxiliary_records: u64,
     pub samples: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredSummary {
     pub records: u64,
+    pub excluded_auxiliary_records: u64,
     pub consequences: u64,
     pub evidence: u64,
     pub fields: usize,
@@ -135,7 +140,7 @@ pub struct StructuredSummary {
 }
 
 const VARIANT_CHUNK_RECORDS: usize = 32_768;
-const STRUCTURED_CHUNK_RECORDS: usize = 1_024;
+const STRUCTURED_CHUNK_RECORDS: usize = 4_096;
 
 struct VariantRecord {
     line_number: usize,
@@ -219,6 +224,32 @@ struct EvidenceBatch {
     number_value: Vec<Option<f64>>,
     boolean_value: Vec<Option<bool>>,
     json_value: Vec<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RepresentativeFields {
+    gene_symbol: Option<String>,
+    gene_id: Option<String>,
+    transcript_id: Option<String>,
+    consequence: Option<String>,
+    impact: Option<String>,
+    canonical: bool,
+    mane_select: Option<String>,
+}
+
+#[derive(Default)]
+struct RepresentativeOverrideBatch {
+    schema_version: Vec<i32>,
+    input_fingerprint: Vec<String>,
+    selection_contract: Vec<String>,
+    allele_id: Vec<String>,
+    gene_symbol: Vec<Option<String>>,
+    gene_id: Vec<Option<String>>,
+    transcript_id: Vec<Option<String>>,
+    consequence: Vec<Option<String>>,
+    impact: Vec<Option<String>>,
+    canonical: Vec<bool>,
+    mane_select: Vec<Option<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -526,6 +557,79 @@ impl ConsequenceBatch {
     }
 }
 
+impl RepresentativeOverrideBatch {
+    fn len(&self) -> usize {
+        self.allele_id.len()
+    }
+
+    fn push(&mut self, fingerprint: &str, allele_id: &str, fields: RepresentativeFields) {
+        self.schema_version.push(SCHEMA_VERSION);
+        self.input_fingerprint.push(fingerprint.to_owned());
+        self.selection_contract
+            .push(REPRESENTATIVE_SELECTION_CONTRACT.to_owned());
+        self.allele_id.push(allele_id.to_owned());
+        self.gene_symbol.push(fields.gene_symbol);
+        self.gene_id.push(fields.gene_id);
+        self.transcript_id.push(fields.transcript_id);
+        self.consequence.push(fields.consequence);
+        self.impact.push(fields.impact);
+        self.canonical.push(fields.canonical);
+        self.mane_select.push(fields.mane_select);
+    }
+
+    fn into_record_batch(self) -> Result<RecordBatch, String> {
+        record_batch(vec![
+            (
+                "schema_version",
+                Arc::new(Int32Array::from(self.schema_version)),
+                false,
+            ),
+            (
+                "input_fingerprint",
+                Arc::new(StringArray::from(self.input_fingerprint)),
+                false,
+            ),
+            (
+                "selection_contract",
+                Arc::new(StringArray::from(self.selection_contract)),
+                false,
+            ),
+            (
+                "allele_id",
+                Arc::new(StringArray::from(self.allele_id)),
+                false,
+            ),
+            (
+                "gene_symbol",
+                Arc::new(StringArray::from(self.gene_symbol)),
+                true,
+            ),
+            ("gene_id", Arc::new(StringArray::from(self.gene_id)), true),
+            (
+                "transcript_id",
+                Arc::new(StringArray::from(self.transcript_id)),
+                true,
+            ),
+            (
+                "consequence",
+                Arc::new(StringArray::from(self.consequence)),
+                true,
+            ),
+            ("impact", Arc::new(StringArray::from(self.impact)), true),
+            (
+                "canonical",
+                Arc::new(BooleanArray::from(self.canonical)),
+                false,
+            ),
+            (
+                "mane_select",
+                Arc::new(StringArray::from(self.mane_select)),
+                true,
+            ),
+        ])
+    }
+}
+
 impl EvidenceBatch {
     fn len(&self) -> usize {
         self.allele_id.len()
@@ -764,10 +868,8 @@ fn parse_variant_record(
         let canonical = &input.canonical_alleles[alt_offset];
         let matching = matching_consequences(&consequences, columns[3], alternate, columns[4]);
         let best = best_consequence(&matching);
-        let best_value = |name: &str| {
-            best.and_then(|entry| entry.get(name))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
+        let best_value = |names: &[&str]| {
+            best.and_then(|entry| consequence_text(entry, names))
                 .map(str::to_owned)
         };
         batch.schema_version.push(SCHEMA_VERSION);
@@ -798,15 +900,23 @@ fn parse_variant_record(
         batch.variant_id.push(optional_vcf(columns[2]));
         batch.quality.push(quality);
         batch.filter.push(columns[6].to_owned());
-        batch.gene_symbol.push(best_value("SYMBOL"));
-        batch.gene_id.push(best_value("Gene"));
-        batch.transcript_id.push(best_value("Feature"));
-        batch.consequence.push(best_value("Consequence"));
-        batch.impact.push(best_value("IMPACT"));
+        batch
+            .gene_symbol
+            .push(best_value(&["SYMBOL", "gene_symbol"]));
+        batch.gene_id.push(best_value(&["Gene", "gene_id"]));
+        batch
+            .transcript_id
+            .push(best_value(&["Feature", "transcript_id"]));
+        batch
+            .consequence
+            .push(best_value(&["Consequence", "primary_consequence"]));
+        batch.impact.push(best_value(&["IMPACT", "impact"]));
         batch
             .canonical
-            .push(best_value("CANONICAL").is_some_and(|value| value == "YES"));
-        batch.mane_select.push(best_value("MANE_SELECT"));
+            .push(best.is_some_and(|entry| consequence_truthy(entry, &["CANONICAL", "canonical"])));
+        batch
+            .mane_select
+            .push(best_value(&["MANE_SELECT", "mane_select", "MANE", "mane"]));
         batch.sample_names_json.push(sample_names_json.to_owned());
         batch
             .format
@@ -834,16 +944,70 @@ fn fallback_canonical_allele(
     })
 }
 
+fn canonicalize_or_preserve_auxiliary<R: ReferenceSequence>(
+    reference_source: &mut R,
+    chromosome: &str,
+    position: u64,
+    reference: &str,
+    alternate: &str,
+) -> Result<CanonicalAllele, NormalizeError> {
+    match canonicalize(reference_source, chromosome, position, reference, alternate) {
+        Err(NormalizeError::MissingChromosome(_)) if !is_main_grch38_chromosome(chromosome) => {
+            Ok(CanonicalAllele {
+                chromosome: canonical_chromosome(chromosome),
+                position,
+                reference: reference.to_ascii_uppercase(),
+                alternate: alternate.to_ascii_uppercase(),
+            })
+        }
+        result => result,
+    }
+}
+
+fn is_excluded_auxiliary_contig(chromosome: &str) -> bool {
+    let chromosome = chromosome.to_ascii_lowercase();
+    chromosome == "ebv"
+        || chromosome == "chrebv"
+        || chromosome == "hs37d5"
+        || chromosome.contains("decoy")
+}
+
+fn is_main_grch38_chromosome(chromosome: &str) -> bool {
+    let chromosome = chromosome
+        .strip_prefix("chr")
+        .unwrap_or(chromosome)
+        .to_ascii_uppercase();
+    if matches!(chromosome.as_str(), "X" | "Y" | "M" | "MT")
+        || chromosome
+            .parse::<u8>()
+            .is_ok_and(|value| (1..=22).contains(&value))
+    {
+        return true;
+    }
+    let accession = chromosome.split('.').next().unwrap_or(&chromosome);
+    accession
+        .strip_prefix("NC_")
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|value| (1..=24).contains(&value) || value == 12_920)
+        || accession
+            .strip_prefix("CM")
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|value| (663..=686).contains(&value))
+}
+
 fn canonical_alleles_for_vcf_line(
     line_number: usize,
     line: &str,
     reference_source: Option<&mut IndexedReference>,
-) -> Result<Vec<CanonicalAllele>, String> {
+) -> Result<Option<Vec<CanonicalAllele>>, String> {
     let columns = line.split('\t').take(5).collect::<Vec<_>>();
     if columns.len() < 5 {
         return Err(format!(
             "VCF record on line {line_number} has fewer than 5 columns"
         ));
+    }
+    if is_excluded_auxiliary_contig(columns[0]) {
+        return Ok(None);
     }
     let position = columns[1]
         .parse::<i64>()
@@ -862,7 +1026,7 @@ fn canonical_alleles_for_vcf_line(
                     columns[0], position, columns[3], alternate,
                 );
             };
-            canonicalize(
+            canonicalize_or_preserve_auxiliary(
                 source,
                 columns[0],
                 u64::try_from(position).map_err(|_| "VCF position must be positive")?,
@@ -876,7 +1040,8 @@ fn canonical_alleles_for_vcf_line(
                 )
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn parse_and_write_variant_chunk(
@@ -1014,6 +1179,8 @@ struct StructuredDocument {
     start: i64,
     seq_region_name: String,
     #[serde(default)]
+    alleles: Option<Vec<Map<String, Value>>>,
+    #[serde(default)]
     most_severe_consequence: Option<String>,
     #[serde(default)]
     transcript_consequences: Option<Vec<Map<String, Value>>>,
@@ -1065,13 +1232,10 @@ impl ParsedStructuredRecord {
 
 fn canonical_structured_alleles(
     line_number: usize,
-    line: &str,
+    identity: &StructuredIdentity,
     canonical_record: Option<&[CanonicalAllele]>,
     reference_source: Option<&mut IndexedReference>,
 ) -> Result<BTreeMap<String, CanonicalAllele>, String> {
-    let identity: StructuredIdentity = serde_json::from_str(line).map_err(|error| {
-        format!("invalid structured output identity on record {line_number}: {error}")
-    })?;
     let alleles = identity.allele_string.split('/').collect::<Vec<_>>();
     if alleles.len() < 2 {
         return Ok(BTreeMap::new());
@@ -1133,7 +1297,7 @@ fn canonical_structured_alleles(
                 }
                 (reference, alternate) => (start, reference.to_owned(), alternate.to_owned()),
             };
-            canonicalize(
+            canonicalize_or_preserve_auxiliary(
                 source,
                 &identity.seq_region_name,
                 position,
@@ -1188,12 +1352,11 @@ impl CanonicalVcfRecords {
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
-            return canonical_alleles_for_vcf_line(
-                self.line_number,
-                &line,
-                Some(&mut self.reference),
-            )
-            .map(Some);
+            let canonical_alleles =
+                canonical_alleles_for_vcf_line(self.line_number, &line, Some(&mut self.reference))?;
+            if canonical_alleles.is_some() {
+                return Ok(canonical_alleles);
+            }
         }
         Ok(None)
     }
@@ -1213,6 +1376,7 @@ fn parse_structured_record(
         allele_string,
         start,
         seq_region_name,
+        alleles: supplementary_alleles,
         most_severe_consequence,
         transcript_consequences,
         regulatory_feature_consequences,
@@ -1241,6 +1405,8 @@ fn parse_structured_record(
     let mut catalog = BTreeMap::new();
     let mut allele_evidence = BTreeMap::<(String, String, String), Value>::new();
     let mut conflicting_allele_evidence = BTreeSet::<(String, String, String)>::new();
+    let mut record_lists = BTreeMap::<(String, String), Value>::new();
+    let mut conflicting_record_lists = BTreeSet::<(String, String)>::new();
     for (key, value) in &extra_fields {
         if !TOP_LEVEL_FIELDS.contains(&key.as_str()) {
             let source_id = source_aliases.get(key).unwrap_or(key);
@@ -1250,6 +1416,16 @@ fn parse_structured_record(
                     .get(*alternate)
                     .map(canonical_allele_id)
                     .unwrap_or_else(|| allele_id(&seq_region_name, start, reference, alternate));
+                if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+                    merge_record_list(
+                        &mut record_lists,
+                        &mut conflicting_record_lists,
+                        &id,
+                        source_id,
+                        value,
+                    );
+                    continue;
+                }
                 if let Some(scope) = source_evidence_scope(source_id)
                     && scope != SourceEvidenceScope::Allele
                 {
@@ -1327,7 +1503,7 @@ fn parse_structured_record(
     }
     let mut consequences = ConsequenceBatch::default();
     let mut linked_evidence_written = BTreeSet::new();
-    let mut selected_consequences = HashMap::<String, usize>::new();
+    let mut consequence_indices = HashMap::<String, Vec<usize>>::new();
     for (ordinal, (feature_type, consequence_object)) in structured_consequences.iter().enumerate()
     {
         let alternate = consequence_object
@@ -1349,11 +1525,10 @@ fn parse_structured_record(
             .get(alternate)
             .map(canonical_allele_id)
             .unwrap_or_else(|| allele_id(&seq_region_name, start, reference, alternate));
-        if selected_consequences.get(&id).is_none_or(|selected| {
-            compare_consequences(consequence_object, &structured_consequences[*selected].1).is_lt()
-        }) {
-            selected_consequences.insert(id.clone(), ordinal);
-        }
+        consequence_indices
+            .entry(id.clone())
+            .or_default()
+            .push(ordinal);
         let consequence_id = format!("local:{ordinal}");
         let terms = consequence_object
             .get("consequence_terms")
@@ -1440,6 +1615,16 @@ fn parse_structured_record(
         for (key, value) in consequence_object {
             if !CONSEQUENCE_FIELDS.contains(&key.as_str()) {
                 let source_id = source_aliases.get(key).unwrap_or(key);
+                if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+                    merge_record_list(
+                        &mut record_lists,
+                        &mut conflicting_record_lists,
+                        &id,
+                        source_id,
+                        value,
+                    );
+                    continue;
+                }
                 let declared_scope = source_evidence_scope(source_id);
                 let (scope, linked_consequence) = match declared_scope {
                     Some(SourceEvidenceScope::Allele) => {
@@ -1496,6 +1681,122 @@ fn parse_structured_record(
             }
         }
     }
+    let mut seen_supplementary_alleles = BTreeSet::new();
+    for mut allele_object in supplementary_alleles.unwrap_or_default() {
+        let alternate = allele_object
+            .remove("allele")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                format!(
+                    "structured supplementary allele on record {} has no allele",
+                    record.line_number
+                )
+            })?;
+        if !real_alternates.contains(&alternate.as_str()) {
+            return Err(format!(
+                "structured supplementary allele {alternate} on record {} is not a variant alternate",
+                record.line_number
+            ));
+        }
+        if !seen_supplementary_alleles.insert(alternate.clone()) {
+            return Err(format!(
+                "structured record {} has duplicate supplementary allele {alternate}",
+                record.line_number
+            ));
+        }
+        let id = record
+            .canonical_alleles
+            .get(&alternate)
+            .map(canonical_allele_id)
+            .unwrap_or_else(|| allele_id(&seq_region_name, start, reference, &alternate));
+        for (key, value) in &allele_object {
+            let source_id = source_aliases.get(key).unwrap_or(key);
+            if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+                merge_record_list(
+                    &mut record_lists,
+                    &mut conflicting_record_lists,
+                    &id,
+                    source_id,
+                    value,
+                );
+                continue;
+            }
+            let declared_scope = source_evidence_scope(source_id);
+            if declared_scope == Some(SourceEvidenceScope::Allele) {
+                merge_allele_evidence(
+                    &mut allele_evidence,
+                    &mut conflicting_allele_evidence,
+                    &id,
+                    source_id,
+                    value,
+                );
+                continue;
+            }
+            let linked_index = match declared_scope {
+                Some(SourceEvidenceScope::Transcript) => explicit_source_transcript(value)
+                    .and_then(|transcript| {
+                        matching_transcript_consequence(
+                            &structured_consequences,
+                            &alternate,
+                            transcript,
+                        )
+                    }),
+                Some(SourceEvidenceScope::Gene) => explicit_source_gene(value).and_then(|gene| {
+                    matching_gene_consequence(&structured_consequences, &alternate, gene)
+                }),
+                Some(SourceEvidenceScope::Feature)
+                    if annocat_core::source_catalog::feature_identity(source_id)
+                        == Some("gene") =>
+                {
+                    explicit_source_gene(value).and_then(|gene| {
+                        matching_gene_consequence(&structured_consequences, &alternate, gene)
+                    })
+                }
+                Some(SourceEvidenceScope::Feature) => {
+                    explicit_source_transcript(value).and_then(|transcript| {
+                        matching_transcript_consequence(
+                            &structured_consequences,
+                            &alternate,
+                            transcript,
+                        )
+                    })
+                }
+                Some(SourceEvidenceScope::Allele) => unreachable!(),
+                None => None,
+            };
+            let linked_consequence = linked_index.map(|index| format!("local:{index}"));
+            let scope = linked_index
+                .map(|index| structured_consequences[index].0)
+                .unwrap_or_else(|| {
+                    declared_scope
+                        .map(SourceEvidenceScope::unresolved_scope)
+                        .unwrap_or("unresolved_feature")
+                });
+            let identity = (
+                id.clone(),
+                source_id.clone(),
+                scope.to_owned(),
+                linked_consequence.clone(),
+            );
+            if !linked_evidence_written.insert(identity) {
+                continue;
+            }
+            let context = EvidenceContext {
+                allele_id: &id,
+                consequence_id: linked_consequence.as_deref(),
+                scope,
+                source_id,
+            };
+            append_evidence_tree(&mut evidence, &mut catalog, &context, "", value)?;
+        }
+    }
+    let selected_consequences = consequence_indices
+        .into_iter()
+        .filter_map(|(allele_id, indices)| {
+            best_structured_consequence_index(&structured_consequences, &indices)
+                .map(|index| (allele_id, index))
+        })
+        .collect::<HashMap<_, _>>();
     for (allele_id, ordinal) in &selected_consequences {
         let consequence_id = format!("local:{ordinal}");
         if let Some(index) = consequences
@@ -1505,6 +1806,57 @@ fn parse_structured_record(
             .position(|(allele, consequence)| allele == allele_id && consequence == &consequence_id)
         {
             consequences.selected[index] = true;
+        }
+    }
+    for ((allele_id, source_id), value) in record_lists {
+        if conflicting_record_lists.contains(&(allele_id.clone(), source_id.clone())) {
+            continue;
+        }
+        let Some(selected_index) = selected_consequences.get(&allele_id).copied() else {
+            continue;
+        };
+        let Some(resolved) = crate::evidence_resolution::resolve_bundled_record_list(
+            &source_id,
+            &value,
+            &structured_consequences[selected_index].1,
+        )?
+        else {
+            continue;
+        };
+        let raw_context = EvidenceContext {
+            allele_id: &allele_id,
+            consequence_id: None,
+            scope: "source_records",
+            source_id: &source_id,
+        };
+        let mut hidden_catalog = BTreeMap::new();
+        append_evidence_tree(
+            &mut evidence,
+            &mut hidden_catalog,
+            &raw_context,
+            &resolved.raw_field_path,
+            &resolved.raw_value,
+        )?;
+        for field in resolved.fields {
+            let (scope, consequence_id) = match field.scope {
+                crate::evidence_resolution::ResolvedRecordScope::Allele => ("allele", None),
+                crate::evidence_resolution::ResolvedRecordScope::Selected => {
+                    ("selected", Some(format!("local:{selected_index}")))
+                }
+            };
+            let context = EvidenceContext {
+                allele_id: &allele_id,
+                consequence_id: consequence_id.as_deref(),
+                scope,
+                source_id: &source_id,
+            };
+            append_evidence_tree(
+                &mut evidence,
+                &mut catalog,
+                &context,
+                &field.field_path,
+                &field.value,
+            )?;
         }
     }
     for ((id, source_id, field_path), value) in &allele_evidence {
@@ -1743,6 +2095,8 @@ fn convert_structured_with_workers(
     let mut consequence_batch = ConsequenceBatch::default();
     let mut evidence_batch = EvidenceBatch::default();
     let mut records = Vec::with_capacity(STRUCTURED_CHUNK_RECORDS);
+    let mut processed_records = 0_u64;
+    let mut excluded_auxiliary_records = 0_u64;
     let mut previous_bytes = 0_u64;
     let mut previous_records = 0_u64;
     let mut previous_at = Instant::now();
@@ -1753,6 +2107,17 @@ fn convert_structured_with_workers(
         }
         let line = line.map_err(|error| format!("cannot read structured output: {error}"))?;
         if line.trim().is_empty() {
+            continue;
+        }
+        processed_records += 1;
+        let identity: StructuredIdentity = serde_json::from_str(&line).map_err(|error| {
+            format!(
+                "invalid structured output identity on record {}: {error}",
+                record_index + 1
+            )
+        })?;
+        if is_excluded_auxiliary_contig(&identity.seq_region_name) {
+            excluded_auxiliary_records += 1;
             continue;
         }
         let canonical_record = if let Some(records) = canonical_records.as_mut() {
@@ -1767,7 +2132,7 @@ fn convert_structured_with_workers(
         };
         let canonical_alleles = canonical_structured_alleles(
             record_index + 1,
-            &line,
+            &identity,
             canonical_record.as_deref(),
             reference_source.as_mut(),
         )?;
@@ -1793,11 +2158,11 @@ fn convert_structured_with_workers(
         if cancelled() {
             return Err("cancelled".into());
         }
-        if counts.records.saturating_sub(previous_records) >= 10_000 {
+        if processed_records.saturating_sub(previous_records) >= 10_000 {
             report_structured_progress(
                 outputs.consequences,
                 outputs.evidence,
-                &counts,
+                processed_records,
                 progress,
                 &mut previous_bytes,
                 &mut previous_records,
@@ -1855,12 +2220,13 @@ fn convert_structured_with_workers(
         + fs::metadata(outputs.evidence)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-    progress(counts.records, true, output_bytes, 0.0, 0.0);
+    progress(processed_records, true, output_bytes, 0.0, 0.0);
 
     write_structured_catalog(outputs.catalog, &catalog)?;
     let source_value_counts = source_value_counts(&catalog);
     Ok(StructuredSummary {
         records: counts.records,
+        excluded_auxiliary_records,
         consequences: counts.consequences,
         evidence: counts.evidence,
         fields: catalog.len(),
@@ -1872,7 +2238,7 @@ fn convert_structured_with_workers(
 fn report_structured_progress(
     consequences_parquet: &Path,
     evidence_parquet: &Path,
-    counts: &StructuredCounts,
+    processed_records: u64,
     progress: &mut impl FnMut(u64, bool, u64, f64, f64),
     previous_bytes: &mut u64,
     previous_records: &mut u64,
@@ -1891,19 +2257,19 @@ fn report_structured_progress(
         0.0
     };
     let records_per_second = if elapsed > 0.0 {
-        counts.records.saturating_sub(*previous_records) as f64 / elapsed
+        processed_records.saturating_sub(*previous_records) as f64 / elapsed
     } else {
         0.0
     };
     progress(
-        counts.records,
+        processed_records,
         true,
         bytes,
         bytes_per_second,
         records_per_second,
     );
     *previous_bytes = bytes;
-    *previous_records = counts.records;
+    *previous_records = processed_records;
     *previous_at = now;
 }
 
@@ -1922,7 +2288,21 @@ fn write_structured_catalog(
                 "observedTypes": entry.types,
                 "occurrences": entry.occurrences,
             });
-            if let Some(group) = crate::evidence_resolution::bundled_alignment_group(
+            if let Some(biological_scope) =
+                crate::evidence_resolution::bundled_record_field_scope(source_id, field_path)
+            {
+                let selected = scope == "selected";
+                field["biologicalScope"] = Value::String(biological_scope.into());
+                field["physicalScope"] =
+                    Value::String(if selected { "selected" } else { scope }.into());
+                field["storageEncoding"] = Value::String("scalar".into());
+                field["rawStorageEncoding"] = Value::String("recordList".into());
+                field["resolutionPolicy"] =
+                    Value::String(if selected { "materializedSelected" } else { "direct" }.into());
+                if selected {
+                    field["selectionOrigin"] = Value::String("report".into());
+                }
+            } else if let Some(group) = crate::evidence_resolution::bundled_alignment_group(
                 scope,
                 source_id,
                 field_path,
@@ -2068,6 +2448,8 @@ fn convert_vcf_inner(
     let mut sample_names = Vec::new();
     let mut sample_names_json = "[]".to_owned();
     let mut record_number = 0_i64;
+    let mut processed_records = 0_u64;
+    let mut excluded_auxiliary_records = 0_u64;
     let mut rows = 0_u64;
     {
         let mut records = Vec::with_capacity(VARIANT_CHUNK_RECORDS);
@@ -2098,9 +2480,14 @@ fn convert_vcf_inner(
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
+            processed_records += 1;
+            let Some(canonical_alleles) =
+                canonical_alleles_for_vcf_line(line_index + 1, &line, reference_source.as_mut())?
+            else {
+                excluded_auxiliary_records += 1;
+                continue;
+            };
             record_number += 1;
-            let canonical_alleles =
-                canonical_alleles_for_vcf_line(line_index + 1, &line, reference_source.as_mut())?;
             records.push(VariantRecord {
                 line_number: line_index + 1,
                 record_number,
@@ -2132,19 +2519,19 @@ fn convert_vcf_inner(
                     0.0
                 };
                 let records_per_second = if elapsed > 0.0 {
-                    (record_number as u64).saturating_sub(previous_records) as f64 / elapsed
+                    processed_records.saturating_sub(previous_records) as f64 / elapsed
                 } else {
                     0.0
                 };
                 progress(
-                    record_number as u64,
+                    processed_records,
                     true,
                     bytes,
                     bytes_per_second,
                     records_per_second,
                 );
                 previous_bytes = bytes;
-                previous_records = record_number as u64;
+                previous_records = processed_records;
                 previous_at = now;
             }
         }
@@ -2176,7 +2563,7 @@ fn convert_vcf_inner(
         .close()
         .map_err(|error| format!("cannot finish canonical Parquet result: {error}"))?;
     progress(
-        record_number as u64,
+        processed_records,
         true,
         fs::metadata(parquet).map(|value| value.len()).unwrap_or(0),
         0.0,
@@ -2186,6 +2573,7 @@ fn convert_vcf_inner(
     Ok(CanonicalSummary {
         rows,
         records: record_number as u64,
+        excluded_auxiliary_records,
         samples: sample_names,
     })
 }
@@ -2838,6 +3226,7 @@ fn page_json_internal(
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    register_report_variants(&connection, parquet)?;
     let query = PageQuery {
         variants: parquet,
         evidence,
@@ -2879,6 +3268,7 @@ fn page_result_internal(
         .expect("every result page has an input-order sort");
     let sort_key = primary_sort.key.clone();
     let direction = primary_sort.direction.as_str();
+    let can_use_parquet_input_order = report_uses_current_selection_contract(parquet)?;
     let candidate_sql = candidate_ids
         .map(|_| " AND v.allele_id IN (SELECT allele_id FROM candidate_alleles)")
         .unwrap_or_default();
@@ -2911,7 +3301,11 @@ fn page_result_internal(
         .then_some(primary_sort.evidence.as_ref())
         .flatten();
     if request.known_total.is_none() && !request.exact_total && optimized_evidence_sort.is_none() {
-        let order_sql = if page_sorts.len() == 1 && sort_key == "input" && direction == "ASC" {
+        let order_sql = if page_sorts.len() == 1
+            && sort_key == "input"
+            && direction == "ASC"
+            && can_use_parquet_input_order
+        {
             String::new()
         } else {
             let terms = page_sorts
@@ -2924,7 +3318,7 @@ fn page_result_internal(
         };
         let sql = format!(
             "SELECT {RESULT_PAGE_COLUMNS}
-             FROM read_parquet(?) v
+             FROM annocat_variants(?) v
              WHERE {where_sql}
              {order_sql}
              LIMIT ? OFFSET ?"
@@ -2970,7 +3364,7 @@ fn page_result_internal(
     } else {
         let mut count_statement = connection
             .prepare(&format!(
-                "SELECT count(*) FROM read_parquet(?) v WHERE {where_sql}"
+                "SELECT count(*) FROM annocat_variants(?) v WHERE {where_sql}"
             ))
             .map_err(|error| format!("cannot prepare result count: {error}"))?;
         let mut count_params = core_page_params(path.as_ref(), request, &core_filters);
@@ -3030,7 +3424,11 @@ fn page_result_internal(
             limit,
         )?
     } else {
-        let order_sql = if page_sorts.len() == 1 && sort_key == "input" && direction == "ASC" {
+        let order_sql = if page_sorts.len() == 1
+            && sort_key == "input"
+            && direction == "ASC"
+            && can_use_parquet_input_order
+        {
             String::new()
         } else {
             let terms = page_sorts
@@ -3043,7 +3441,7 @@ fn page_result_internal(
         };
         let sql = format!(
             "SELECT {RESULT_PAGE_COLUMNS}
-             FROM read_parquet(?) v
+             FROM annocat_variants(?) v
              WHERE {where_sql}
              {order_sql}
              LIMIT ? OFFSET ?"
@@ -3354,7 +3752,7 @@ fn evidence_sorted_page_rows(
         "{cte}
          SELECT {RESULT_PAGE_COLUMNS}
          FROM scored_evidence ev_order
-         JOIN read_parquet(?) v ON v.allele_id = ev_order.allele_id
+         JOIN annocat_variants(?) v ON v.allele_id = ev_order.allele_id
          WHERE {where_sql}
          ORDER BY ev_order.sort_value {direction}, v.record_number ASC, v.alt_index ASC
          LIMIT ? OFFSET ?"
@@ -3382,7 +3780,7 @@ fn evidence_sorted_page_rows(
             "{cte}
              SELECT count(*)
              FROM scored_evidence ev_order
-             JOIN read_parquet(?) v ON v.allele_id = ev_order.allele_id
+             JOIN annocat_variants(?) v ON v.allele_id = ev_order.allele_id
              WHERE {where_sql}"
         );
         let mut count_params = evidence_sort_parameters(sort);
@@ -3406,7 +3804,7 @@ fn evidence_sorted_page_rows(
     let missing_sql = format!(
         "{cte}
          SELECT {RESULT_PAGE_COLUMNS}
-         FROM read_parquet(?) v
+         FROM annocat_variants(?) v
          WHERE {where_sql}
            AND NOT EXISTS (
              SELECT 1 FROM scored_evidence ev_order WHERE ev_order.allele_id = v.allele_id
@@ -3467,7 +3865,7 @@ fn filtered_evidence_sorted_page_rows(
     };
     let sql = format!(
         "WITH matched_variants AS MATERIALIZED (
-           SELECT v.* FROM read_parquet(?) v WHERE {where_sql}
+           SELECT v.* FROM annocat_variants(?) v WHERE {where_sql}
          ), evidence_values AS (
            SELECT ev_sort.allele_id,
                   {selection} AS sort_value
@@ -3852,6 +4250,7 @@ fn page_json_with_evidence_internal(
 ) -> Result<String, String> {
     prepare_requested_evidence_resolution(variants, evidence, catalog, request)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    register_report_variants(&connection, variants)?;
     let query = PageQuery {
         variants,
         evidence,
@@ -4183,6 +4582,7 @@ fn page_json_with_details_query(query_key: &str, query: PageQuery<'_>) -> Result
     };
     let (connection, _guard) =
         cancellable_page_connection(&session_key, query.request.request_generation)?;
+    register_report_variants(&connection, query.variants)?;
     let page = page_with_evidence_result(&connection, &query)?;
     serde_json::to_string(&page).map_err(|error| error.to_string())
 }
@@ -4196,6 +4596,7 @@ fn selected_evidence_columns(
     if metadata.len() == 0 || metadata.len() > 5 * 1024 * 1024 {
         return Err("field catalog has an invalid size".into());
     }
+    let current_selection_contract = report_uses_current_selection_contract(catalog)?;
     let catalog: Value = serde_json::from_slice(
         &fs::read(catalog).map_err(|error| format!("cannot read field catalog: {error}"))?,
     )
@@ -4243,11 +4644,16 @@ fn selected_evidence_columns(
                 && field["selectionOrigin"].as_str() == Some("provider")
             {
                 EvidenceResolutionStrategy::SourceSelected
-            } else if physical_scope == "selected" {
+            } else if physical_scope == "selected" && current_selection_contract {
                 EvidenceResolutionStrategy::MaterializedSelected
+            } else if physical_scope == "selected" {
+                EvidenceResolutionStrategy::SelectedConsequence
             } else if aligned || resolution_policy == Some("alignedTranscriptVector") {
                 EvidenceResolutionStrategy::AlignedTranscriptVector
-            } else if resolution_policy == Some("sourceSelectedCodingRecord") {
+            } else if matches!(
+                resolution_policy,
+                Some("sourceSelectedCodingRecord" | "providerSelected")
+            ) {
                 EvidenceResolutionStrategy::SourceSelected
             } else if matches!(
                 resolution_policy,
@@ -4265,7 +4671,13 @@ fn selected_evidence_columns(
             };
             Ok(SelectedEvidenceColumn {
                 index: *index,
-                scope: physical_scope.to_owned(),
+                scope: if resolution == EvidenceResolutionStrategy::SelectedConsequence
+                    && physical_scope == "selected"
+                {
+                    logical_scope.to_owned()
+                } else {
+                    physical_scope.to_owned()
+                },
                 biological_scope: biological_scope.to_owned(),
                 equivalent_scopes,
                 source_id: source_id.to_owned(),
@@ -4304,23 +4716,28 @@ pub fn export_filtered_rows_with_details(
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, catalog, request)?;
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
-    let where_sql =
-        format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}");
     let requested = export_columns(columns)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    register_report_variants(&connection, parquet)?;
+    let (search_sql, mut search_params) =
+        displayed_field_search_sql(&connection, evidence, catalog, request, &filters.search)?;
+    let where_sql = format!(
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
+    );
+    search_params.extend(excluded_params);
     let path = parquet.to_string_lossy();
     let mut statement = connection
         .prepare(&format!(
             "SELECT chromosome, position, reference, alternate, variant_id, quality, filter,
                     gene_symbol, gene_id, transcript_id, consequence, impact, canonical, mane_select
-             FROM read_parquet(?) v WHERE {where_sql}
+             FROM annocat_variants(?) v WHERE {where_sql}
              ORDER BY record_number ASC, alt_index ASC"
         ))
         .map_err(|error| format!("cannot prepare filtered row export: {error}"))?;
     let mut params = core_page_params(path.as_ref(), request, &filters);
     params.extend(core_rule_params);
     params.extend(evidence_rule_params);
-    params.extend(excluded_params);
+    params.extend(search_params);
     let mut rows = statement
         .query(params_from_iter(params.iter()))
         .map_err(|error| format!("cannot read filtered rows: {error}"))?;
@@ -4391,14 +4808,19 @@ pub fn export_filtered_genes_with_details(
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, catalog, request)?;
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
-    let where_sql =
-        format!("{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}");
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    register_report_variants(&connection, parquet)?;
+    let (search_sql, mut search_params) =
+        displayed_field_search_sql(&connection, evidence, catalog, request, &filters.search)?;
+    let where_sql = format!(
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
+    );
+    search_params.extend(excluded_params);
     let path = parquet.to_string_lossy();
     let mut statement = connection
         .prepare(&format!(
             "SELECT DISTINCT trim(gene_symbol) AS gene
-             FROM read_parquet(?) v WHERE {where_sql}
+             FROM annocat_variants(?) v WHERE {where_sql}
                AND gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
              ORDER BY upper(gene), gene"
         ))
@@ -4406,7 +4828,7 @@ pub fn export_filtered_genes_with_details(
     let mut params = core_page_params(path.as_ref(), request, &filters);
     params.extend(core_rule_params);
     params.extend(evidence_rule_params);
-    params.extend(excluded_params);
+    params.extend(search_params);
     let mut rows = statement
         .query(params_from_iter(params.iter()))
         .map_err(|error| format!("cannot read filtered genes: {error}"))?;
@@ -4787,9 +5209,20 @@ fn read_evidence_rows(
     let evidence_path = evidence_parquet.to_string_lossy();
     let mut statement = connection
         .prepare(
-            "SELECT consequence_id, scope, source_id, field_path, value_type,
+            "WITH rows AS MATERIALIZED (
+               SELECT * FROM read_parquet(?)
+               WHERE allele_id = ? AND scope <> 'source_records'
+             )
+             SELECT consequence_id, scope, source_id, field_path, value_type,
                     string_value, integer_value, number_value, boolean_value, json_value
-             FROM read_parquet(?) WHERE allele_id = ? AND scope <> 'selected'
+             FROM rows evidence
+             WHERE scope = 'selected' OR NOT EXISTS (
+               SELECT 1 FROM rows selected
+               WHERE selected.scope = 'selected'
+                 AND selected.source_id = evidence.source_id
+                 AND selected.field_path = evidence.field_path
+                 AND selected.consequence_id IS NOT DISTINCT FROM evidence.consequence_id
+             )
              ORDER BY scope, source_id, field_path, consequence_id LIMIT 5001",
         )
         .map_err(|error| format!("cannot prepare evidence detail query: {error}"))?;
@@ -4837,6 +5270,10 @@ fn supplemental_evidence_rows(evidence: &Path, allele_id: &str) -> Result<Vec<Va
         .filter(|path| {
             path.extension().and_then(|extension| extension.to_str()) == Some("parquet")
                 && path.file_name().and_then(|name| name.to_str()) != Some("canonical.parquet")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".annocat-"))
         })
         .collect::<Vec<_>>();
     paths.sort();
@@ -4934,6 +5371,11 @@ pub fn complete_detail_json_at(
             };
             if let Some(supplemental) = supplemental {
                 indexed.evidence.extend(supplemental);
+                apply_representative_override_to_variant(
+                    variants_parquet,
+                    allele_id,
+                    &mut indexed.variant,
+                )?;
                 let embedded_consequences = indexed
                     .variant
                     .get("fallbackConsequences")
@@ -4952,13 +5394,14 @@ pub fn complete_detail_json_at(
         }
     }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    register_report_variants(&connection, variants_parquet)?;
     let path = variants_parquet.to_string_lossy();
     let context = connection
         .query_row(
             "SELECT record_number, chromosome, position, reference, alternate, alt_index, variant_id, quality, filter,
                     gene_symbol, gene_id, transcript_id, consequence, impact, canonical,
                     mane_select, format, samples_json, consequences_json
-             FROM read_parquet(?) WHERE allele_id = ? LIMIT 1",
+             FROM annocat_variants(?) WHERE allele_id = ? LIMIT 1",
             params![path.as_ref(), allele_id],
             |row| {
                 let samples_json = row.get::<_, String>(17)?;
@@ -5137,6 +5580,7 @@ fn parse_consequences(info: &str, fields: &[String]) -> Result<Vec<Map<String, V
 }
 
 const TOP_LEVEL_FIELDS: &[&str] = &[
+    "alleles",
     "allele_string",
     "end",
     "id",
@@ -5209,6 +5653,28 @@ struct EvidenceContext<'a> {
     consequence_id: Option<&'a str>,
     scope: &'a str,
     source_id: &'a str,
+}
+
+fn merge_record_list(
+    record_lists: &mut BTreeMap<(String, String), Value>,
+    conflicts: &mut BTreeSet<(String, String)>,
+    allele_id: &str,
+    source_id: &str,
+    value: &Value,
+) {
+    let key = (allele_id.to_owned(), source_id.to_owned());
+    if conflicts.contains(&key) {
+        return;
+    }
+    if record_lists
+        .get(&key)
+        .is_some_and(|previous| previous != value)
+    {
+        record_lists.remove(&key);
+        conflicts.insert(key);
+    } else {
+        record_lists.entry(key).or_insert_with(|| value.clone());
+    }
 }
 
 fn merge_allele_evidence(
@@ -5539,6 +6005,14 @@ fn explicit_source_transcript(value: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+fn explicit_source_gene(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    ["gene", "geneSymbol", "gene_symbol", "geneId", "gene_id"]
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
+        .filter(|value| !value.is_empty())
+}
+
 fn stable_transcript_id(value: &str) -> &str {
     value.split_once('.').map_or(value, |(stable, _)| stable)
 }
@@ -5578,6 +6052,25 @@ fn matching_transcript_consequence(
     (stable.len() == 1).then(|| stable[0])
 }
 
+fn matching_gene_consequence(
+    consequences: &[(&str, Map<String, Value>)],
+    alternate: &str,
+    gene: &str,
+) -> Option<usize> {
+    let matches = consequences
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, object))| {
+            object.get("variant_allele").and_then(Value::as_str) == Some(alternate)
+                && ["gene_id", "gene_symbol", "Gene"]
+                    .iter()
+                    .any(|field| object.get(*field).and_then(Value::as_str) == Some(gene))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    best_structured_consequence_index(consequences, &matches)
+}
+
 fn consequence_impact(term: &str) -> &'static str {
     match term {
         "transcript_ablation"
@@ -5608,8 +6101,18 @@ fn consequence_text<'a>(consequence: &'a Map<String, Value>, names: &[&str]) -> 
         consequence
             .get(*name)
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .and_then(valid_annotation_text)
     })
+}
+
+fn valid_annotation_text(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && !matches!(
+            value.to_ascii_uppercase().as_str(),
+            "." | "-" | "NA" | "N/A" | "NONE" | "NULL"
+        ))
+    .then_some(value)
 }
 
 fn consequence_truthy(consequence: &Map<String, Value>, names: &[&str]) -> bool {
@@ -5626,6 +6129,51 @@ fn consequence_truthy(consequence: &Map<String, Value>, names: &[&str]) -> bool 
             })
         })
     })
+}
+
+fn valid_mane_value(value: &Value) -> bool {
+    if value.as_bool() == Some(true) || value.as_i64() == Some(1) {
+        return true;
+    }
+    let Some(value) = value.as_str().and_then(valid_annotation_text) else {
+        return false;
+    };
+    if matches!(
+        value.to_ascii_uppercase().as_str(),
+        "YES" | "Y" | "TRUE" | "1"
+    ) {
+        return true;
+    }
+    let suffix = ["ENST", "NM_", "NR_", "XM_", "XR_"]
+        .iter()
+        .find_map(|prefix| value.strip_prefix(prefix));
+    let Some(suffix) = suffix else {
+        return false;
+    };
+    let mut parts = suffix.split('.');
+    parts
+        .next()
+        .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts
+            .next()
+            .is_none_or(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.next().is_none()
+}
+
+fn has_valid_mane(consequence: &Map<String, Value>, names: &[&str]) -> bool {
+    names
+        .iter()
+        .any(|name| consequence.get(*name).is_some_and(valid_mane_value))
+}
+
+fn mane_rank(consequence: &Map<String, Value>) -> u8 {
+    if has_valid_mane(consequence, &["MANE_SELECT", "mane_select", "MANE", "mane"]) {
+        0
+    } else if has_valid_mane(consequence, &["MANE_PLUS_CLINICAL", "mane_plus_clinical"]) {
+        1
+    } else {
+        2
+    }
 }
 
 fn appris_rank(consequence: &Map<String, Value>) -> u8 {
@@ -5687,41 +6235,51 @@ fn consequence_severity_rank(consequence: &Map<String, Value>) -> u8 {
             "stop_lost" => 5,
             "start_lost" => 6,
             "transcript_amplification" => 7,
-            "inframe_insertion" => 8,
-            "inframe_deletion" => 9,
-            "missense_variant" => 10,
-            "protein_altering_variant" => 11,
-            "splice_donor_5th_base_variant" => 12,
-            "splice_region_variant" => 13,
-            "splice_donor_region_variant" => 14,
-            "splice_polypyrimidine_tract_variant" => 15,
-            "incomplete_terminal_codon_variant" => 16,
-            "start_retained_variant" => 17,
-            "stop_retained_variant" => 18,
-            "synonymous_variant" => 19,
-            "coding_sequence_variant" => 20,
-            "mature_miRNA_variant" => 21,
-            "5_prime_UTR_variant" => 22,
-            "3_prime_UTR_variant" => 23,
-            "non_coding_transcript_exon_variant" => 24,
-            "intron_variant" => 25,
-            "NMD_transcript_variant" => 26,
-            "non_coding_transcript_variant" => 27,
-            "upstream_gene_variant" => 28,
-            "downstream_gene_variant" => 29,
-            "TFBS_ablation" => 30,
-            "TFBS_amplification" => 31,
-            "TF_binding_site_variant" => 32,
-            "regulatory_region_ablation" => 33,
-            "regulatory_region_amplification" => 34,
-            "feature_elongation" => 35,
-            "regulatory_region_variant" => 36,
-            "feature_truncation" => 37,
-            "intergenic_variant" => 38,
-            _ => 39,
+            "feature_elongation" => 8,
+            "feature_truncation" => 9,
+            "inframe_insertion" => 10,
+            "inframe_deletion" => 11,
+            "missense_variant" => 12,
+            "protein_altering_variant" => 13,
+            "splice_region_variant" => 14,
+            "splice_donor_5th_base_variant" => 15,
+            "splice_donor_region_variant" => 16,
+            "splice_polypyrimidine_tract_variant" => 17,
+            "incomplete_terminal_codon_variant" => 18,
+            "start_retained_variant" => 19,
+            "stop_retained_variant" => 20,
+            "synonymous_variant" => 21,
+            "coding_sequence_variant" => 22,
+            "mature_miRNA_variant" => 23,
+            "5_prime_UTR_variant" => 24,
+            "3_prime_UTR_variant" => 25,
+            "non_coding_transcript_exon_variant" => 26,
+            "intron_variant" => 27,
+            "NMD_transcript_variant" => 28,
+            "non_coding_transcript_variant" => 29,
+            "coding_transcript_variant" => 30,
+            "upstream_gene_variant" => 31,
+            "downstream_gene_variant" => 32,
+            "TFBS_ablation" => 33,
+            "TFBS_amplification" => 34,
+            "TF_binding_site_variant" => 35,
+            "regulatory_region_ablation" => 36,
+            "regulatory_region_amplification" => 37,
+            "regulatory_region_variant" => 38,
+            "intergenic_variant" => 39,
+            "sequence_variant" => 40,
+            "copy_number_change" => 41,
+            "copy_number_increase" => 42,
+            "copy_number_decrease" => 43,
+            "short_tandem_repeat_change" => 44,
+            "short_tandem_repeat_expansion" => 45,
+            "short_tandem_repeat_contraction" => 46,
+            "unidirectional_gene_fusion" => 47,
+            "transcript_variant" => 48,
+            _ => u8::MAX,
         })
         .min()
-        .unwrap_or(36)
+        .unwrap_or(u8::MAX)
 }
 
 fn consequence_length(consequence: &Map<String, Value>) -> i64 {
@@ -5734,56 +6292,273 @@ fn consequence_length(consequence: &Map<String, Value>) -> i64 {
         "length",
     ]
     .iter()
-    .find_map(|name| consequence.get(*name).and_then(Value::as_i64))
+    .find_map(|name| {
+        consequence.get(*name).and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+    })
     .unwrap_or(0)
 }
 
-fn compare_consequences(left: &Map<String, Value>, right: &Map<String, Value>) -> Ordering {
-    let boolean_rank = |consequence: &Map<String, Value>, names: &[&str]| {
-        u8::from(!consequence_truthy(consequence, names))
-    };
-    let present_rank = |consequence: &Map<String, Value>, names: &[&str]| {
-        u8::from(consequence_text(consequence, names).is_none())
-    };
-    present_rank(left, &["MANE_SELECT", "mane_select"])
-        .cmp(&present_rank(right, &["MANE_SELECT", "mane_select"]))
-        .then_with(|| {
-            present_rank(left, &["MANE_PLUS_CLINICAL", "mane_plus_clinical"]).cmp(&present_rank(
-                right,
-                &["MANE_PLUS_CLINICAL", "mane_plus_clinical"],
-            ))
-        })
-        .then_with(|| {
-            boolean_rank(left, &["CANONICAL", "canonical"])
-                .cmp(&boolean_rank(right, &["CANONICAL", "canonical"]))
-        })
-        .then_with(|| appris_rank(left).cmp(&appris_rank(right)))
-        .then_with(|| tsl_rank(left).cmp(&tsl_rank(right)))
-        .then_with(|| {
-            u8::from(consequence_text(left, &["BIOTYPE", "biotype"]) != Some("protein_coding")).cmp(
-                &u8::from(
-                    consequence_text(right, &["BIOTYPE", "biotype"]) != Some("protein_coding"),
-                ),
-            )
-        })
-        .then_with(|| {
-            present_rank(left, &["CCDS", "ccds"]).cmp(&present_rank(right, &["CCDS", "ccds"]))
-        })
-        .then_with(|| consequence_severity_rank(left).cmp(&consequence_severity_rank(right)))
-        .then_with(|| consequence_length(right).cmp(&consequence_length(left)))
-        .then_with(|| {
-            optional_stable_id(left, &["Gene", "gene_id"])
-                .cmp(&optional_stable_id(right, &["Gene", "gene_id"]))
-        })
-        .then_with(|| {
-            optional_stable_id(left, &["Feature", "transcript_id", "feature_id"]).cmp(
-                &optional_stable_id(right, &["Feature", "transcript_id", "feature_id"]),
-            )
-        })
+fn canonical_rank(consequence: &Map<String, Value>) -> u8 {
+    u8::from(!consequence_truthy(
+        consequence,
+        &["CANONICAL", "canonical"],
+    ))
+}
+
+fn protein_coding_rank(consequence: &Map<String, Value>) -> u8 {
+    u8::from(
+        consequence_text(consequence, &["BIOTYPE", "biotype"])
+            .is_none_or(|value| !value.eq_ignore_ascii_case("protein_coding")),
+    )
+}
+
+fn ccds_rank(consequence: &Map<String, Value>) -> u8 {
+    u8::from(consequence_text(consequence, &["CCDS", "ccds"]).is_none())
 }
 
 fn optional_stable_id<'a>(consequence: &'a Map<String, Value>, names: &[&str]) -> (u8, &'a str) {
-    consequence_text(consequence, names).map_or((1, ""), |value| (0, value))
+    consequence_text(consequence, names)
+        .map(stable_transcript_id)
+        .map_or((1, ""), |value| (0, value))
+}
+
+#[derive(Clone, Copy)]
+struct ConsequenceCandidate<'a> {
+    index: usize,
+    ordinal: usize,
+    feature_type: &'static str,
+    consequence: &'a Map<String, Value>,
+}
+
+fn compare_gene_fallback(
+    left: &ConsequenceCandidate<'_>,
+    right: &ConsequenceCandidate<'_>,
+) -> Ordering {
+    canonical_rank(left.consequence)
+        .cmp(&canonical_rank(right.consequence))
+        .then_with(|| appris_rank(left.consequence).cmp(&appris_rank(right.consequence)))
+        .then_with(|| tsl_rank(left.consequence).cmp(&tsl_rank(right.consequence)))
+        .then_with(|| {
+            protein_coding_rank(left.consequence).cmp(&protein_coding_rank(right.consequence))
+        })
+        .then_with(|| ccds_rank(left.consequence).cmp(&ccds_rank(right.consequence)))
+        .then_with(|| {
+            consequence_severity_rank(left.consequence)
+                .cmp(&consequence_severity_rank(right.consequence))
+        })
+        .then_with(|| {
+            consequence_length(right.consequence).cmp(&consequence_length(left.consequence))
+        })
+        .then_with(|| {
+            optional_stable_id(
+                left.consequence,
+                &[
+                    "Feature",
+                    "transcript_id",
+                    "feature_id",
+                    "regulatory_feature_id",
+                    "motif_feature_id",
+                ],
+            )
+            .cmp(&optional_stable_id(
+                right.consequence,
+                &[
+                    "Feature",
+                    "transcript_id",
+                    "feature_id",
+                    "regulatory_feature_id",
+                    "motif_feature_id",
+                ],
+            ))
+        })
+        .then_with(|| left.ordinal.cmp(&right.ordinal))
+}
+
+fn normalized_feature_type(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "transcript" => "transcript",
+        "regulatoryfeature" | "regulatory" => "regulatory",
+        "motiffeature" | "motif" => "motif",
+        "intergenic" => "intergenic",
+        _ => "unresolved",
+    }
+}
+
+fn consequence_feature_type(
+    consequence: &Map<String, Value>,
+    declared: Option<&str>,
+) -> &'static str {
+    let feature_type = declared
+        .or_else(|| consequence_text(consequence, &["Feature_type", "feature_type"]))
+        .map(normalized_feature_type)
+        .unwrap_or("unresolved");
+    if feature_type == "unresolved"
+        && consequence_text(consequence, &["Feature", "transcript_id"]).is_some()
+    {
+        "transcript"
+    } else {
+        feature_type
+    }
+}
+
+fn normalized_gene_symbol(consequence: &Map<String, Value>) -> Option<String> {
+    consequence_text(consequence, &["SYMBOL", "gene_symbol"])
+        .map(|value| value.to_ascii_uppercase())
+}
+
+fn consequence_group_key(
+    candidate: &ConsequenceCandidate<'_>,
+    symbol_gene_ids: &BTreeMap<String, BTreeSet<String>>,
+) -> String {
+    if candidate.feature_type == "transcript" {
+        if let Some(gene_id) =
+            consequence_text(candidate.consequence, &["Gene", "gene_id"]).map(stable_transcript_id)
+        {
+            return format!("gene:{gene_id}");
+        }
+        if let Some(symbol) = normalized_gene_symbol(candidate.consequence) {
+            if let Some(ids) = symbol_gene_ids.get(&symbol)
+                && ids.len() == 1
+            {
+                return format!("gene:{}", ids.first().expect("one gene ID"));
+            }
+            if symbol_gene_ids.get(&symbol).is_none_or(BTreeSet::is_empty) {
+                return format!("symbol:{symbol}");
+            }
+        }
+        return format!("unresolved-transcript:{}", candidate.ordinal);
+    }
+    let feature_id = consequence_text(
+        candidate.consequence,
+        &[
+            "Feature",
+            "feature_id",
+            "regulatory_feature_id",
+            "motif_feature_id",
+        ],
+    )
+    .map(stable_transcript_id);
+    feature_id.map_or_else(
+        || {
+            format!(
+                "unresolved-feature:{}:{}",
+                candidate.feature_type, candidate.ordinal
+            )
+        },
+        |feature_id| format!("feature:{}:{feature_id}", candidate.feature_type),
+    )
+}
+
+fn compare_allele_candidates(
+    left: &ConsequenceCandidate<'_>,
+    right: &ConsequenceCandidate<'_>,
+) -> Ordering {
+    consequence_severity_rank(left.consequence)
+        .cmp(&consequence_severity_rank(right.consequence))
+        .then_with(|| mane_rank(left.consequence).cmp(&mane_rank(right.consequence)))
+        .then_with(|| canonical_rank(left.consequence).cmp(&canonical_rank(right.consequence)))
+        .then_with(|| appris_rank(left.consequence).cmp(&appris_rank(right.consequence)))
+        .then_with(|| tsl_rank(left.consequence).cmp(&tsl_rank(right.consequence)))
+        .then_with(|| {
+            protein_coding_rank(left.consequence).cmp(&protein_coding_rank(right.consequence))
+        })
+        .then_with(|| ccds_rank(left.consequence).cmp(&ccds_rank(right.consequence)))
+        .then_with(|| {
+            consequence_length(right.consequence).cmp(&consequence_length(left.consequence))
+        })
+        .then_with(|| {
+            optional_stable_id(left.consequence, &["Gene", "gene_id"])
+                .cmp(&optional_stable_id(right.consequence, &["Gene", "gene_id"]))
+        })
+        .then_with(|| {
+            optional_stable_id(
+                left.consequence,
+                &[
+                    "Feature",
+                    "transcript_id",
+                    "feature_id",
+                    "regulatory_feature_id",
+                    "motif_feature_id",
+                ],
+            )
+            .cmp(&optional_stable_id(
+                right.consequence,
+                &[
+                    "Feature",
+                    "transcript_id",
+                    "feature_id",
+                    "regulatory_feature_id",
+                    "motif_feature_id",
+                ],
+            ))
+        })
+        .then_with(|| left.ordinal.cmp(&right.ordinal))
+}
+
+fn select_representative(candidates: &[ConsequenceCandidate<'_>]) -> Option<usize> {
+    let mut symbol_gene_ids = BTreeMap::<String, BTreeSet<String>>::new();
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.feature_type == "transcript")
+    {
+        if let (Some(symbol), Some(gene_id)) = (
+            normalized_gene_symbol(candidate.consequence),
+            consequence_text(candidate.consequence, &["Gene", "gene_id"]).map(stable_transcript_id),
+        ) {
+            symbol_gene_ids
+                .entry(symbol)
+                .or_default()
+                .insert(gene_id.to_owned());
+        }
+    }
+    let mut groups = BTreeMap::<String, Vec<ConsequenceCandidate<'_>>>::new();
+    for candidate in candidates {
+        groups
+            .entry(consequence_group_key(candidate, &symbol_gene_ids))
+            .or_default()
+            .push(*candidate);
+    }
+    let mut gene_candidates = Vec::with_capacity(groups.len());
+    for group in groups.values() {
+        let mane = group
+            .iter()
+            .copied()
+            .filter(|candidate| mane_rank(candidate.consequence) < 2)
+            .collect::<Vec<_>>();
+        if mane.is_empty() {
+            if let Some(candidate) = group.iter().copied().min_by(compare_gene_fallback) {
+                gene_candidates.push(candidate);
+            }
+        } else {
+            gene_candidates.extend(mane);
+        }
+    }
+    gene_candidates
+        .iter()
+        .min_by(|left, right| compare_allele_candidates(left, right))
+        .map(|candidate| candidate.index)
+}
+
+fn best_structured_consequence_index(
+    entries: &[(&str, Map<String, Value>)],
+    indices: &[usize],
+) -> Option<usize> {
+    let candidates = indices
+        .iter()
+        .copied()
+        .map(|index| ConsequenceCandidate {
+            index,
+            ordinal: index,
+            feature_type: consequence_feature_type(&entries[index].1, Some(entries[index].0)),
+            consequence: &entries[index].1,
+        })
+        .collect::<Vec<_>>();
+    select_representative(&candidates)
 }
 
 fn matching_consequences(
@@ -5827,13 +6602,404 @@ fn vep_allele(reference: &str, alternate: &str) -> String {
 }
 
 fn best_consequence(entries: &[Map<String, Value>]) -> Option<&Map<String, Value>> {
-    entries
+    let candidates = entries
         .iter()
         .enumerate()
-        .min_by(|(left_ordinal, left), (right_ordinal, right)| {
-            compare_consequences(left, right).then_with(|| left_ordinal.cmp(right_ordinal))
+        .map(|(index, consequence)| ConsequenceCandidate {
+            index,
+            ordinal: index,
+            feature_type: consequence_feature_type(consequence, None),
+            consequence,
         })
-        .map(|(_, consequence)| consequence)
+        .collect::<Vec<_>>();
+    select_representative(&candidates).and_then(|index| entries.get(index))
+}
+
+fn representative_fields(
+    feature_type: &str,
+    consequence: &Map<String, Value>,
+) -> RepresentativeFields {
+    let consequence_term = consequence
+        .get("consequence_terms")
+        .and_then(Value::as_array)
+        .and_then(|terms| terms.first())
+        .and_then(Value::as_str)
+        .or_else(|| {
+            consequence_text(consequence, &["primary_consequence", "Consequence"])
+                .and_then(|value| value.split('&').next())
+        })
+        .map(str::to_owned);
+    let feature_type = consequence_feature_type(consequence, Some(feature_type));
+    let transcript_id = if feature_type == "transcript" {
+        consequence_text(consequence, &["transcript_id", "Feature"])
+    } else {
+        consequence_text(
+            consequence,
+            &[
+                "feature_id",
+                "regulatory_feature_id",
+                "motif_feature_id",
+                "Feature",
+            ],
+        )
+    }
+    .map(str::to_owned);
+    let mane_select = has_valid_mane(consequence, &["MANE_SELECT", "mane_select", "MANE", "mane"])
+        .then(|| consequence_text(consequence, &["MANE_SELECT", "mane_select", "MANE", "mane"]))
+        .flatten()
+        .map(str::to_owned);
+    RepresentativeFields {
+        gene_symbol: consequence_text(consequence, &["SYMBOL", "gene_symbol"]).map(str::to_owned),
+        gene_id: consequence_text(consequence, &["Gene", "gene_id"]).map(str::to_owned),
+        transcript_id,
+        impact: consequence_text(consequence, &["IMPACT", "impact"])
+            .map(str::to_owned)
+            .or_else(|| {
+                consequence_term
+                    .as_deref()
+                    .map(consequence_impact)
+                    .map(str::to_owned)
+            }),
+        consequence: consequence_term,
+        canonical: consequence_truthy(consequence, &["CANONICAL", "canonical"]),
+        mane_select,
+    }
+}
+
+fn flush_representative_override(
+    fingerprint: &str,
+    allele_id: &str,
+    entries: &[(String, Map<String, Value>)],
+    existing: &RepresentativeFields,
+    output: &mut RepresentativeOverrideBatch,
+) {
+    let candidates = entries
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (feature_type, consequence))| ConsequenceCandidate {
+                index,
+                ordinal: index,
+                feature_type: consequence_feature_type(consequence, Some(feature_type)),
+                consequence,
+            },
+        )
+        .collect::<Vec<_>>();
+    let Some(selected) = select_representative(&candidates) else {
+        return;
+    };
+    let fields = representative_fields(&entries[selected].0, &entries[selected].1);
+    if &fields != existing {
+        output.push(fingerprint, allele_id, fields);
+    }
+}
+
+fn representative_override_fingerprint(
+    variants: &Path,
+    consequences: &Path,
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(REPRESENTATIVE_SELECTION_CONTRACT.as_bytes());
+    for path in [variants, consequences] {
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |value| value.as_nanos());
+        digest.update(metadata.len().to_le_bytes());
+        digest.update(modified.to_le_bytes());
+    }
+    Ok(format!("{:x}", digest.finalize())[..16].to_owned())
+}
+
+fn representative_override_is_valid(path: &Path, fingerprint: &str) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(reader) = ParquetRecordBatchReaderBuilder::try_new(file) else {
+        return false;
+    };
+    for name in [
+        "schema_version",
+        "input_fingerprint",
+        "selection_contract",
+        "allele_id",
+        "gene_symbol",
+        "gene_id",
+        "transcript_id",
+        "consequence",
+        "impact",
+        "canonical",
+        "mane_select",
+    ] {
+        if reader.schema().index_of(name).is_err() {
+            return false;
+        }
+    }
+    let Ok(connection) = Connection::open_in_memory() else {
+        return false;
+    };
+    connection
+        .query_row(
+            "SELECT coalesce(bool_and(
+                      schema_version=? AND input_fingerprint=?
+                      AND selection_contract=?
+                    ), true)
+             FROM read_parquet(?)",
+            params![
+                SCHEMA_VERSION,
+                fingerprint,
+                REPRESENTATIVE_SELECTION_CONTRACT,
+                path.to_string_lossy().as_ref()
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+fn build_representative_override(
+    variants: &Path,
+    consequences: &Path,
+    fingerprint: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    let partial = destination.with_extension("parquet.partial");
+    let _ = fs::remove_file(&partial);
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(
+            "SET threads=4;
+             SET preserve_insertion_order=false;
+             SET memory_limit='1GB';",
+        )
+        .map_err(|error| format!("cannot configure representative repair: {error}"))?;
+    let consequences_path = consequences.to_string_lossy().into_owned();
+    let has_feature_type = connection
+        .query_row(
+            "SELECT count(*) > 0 FROM parquet_schema(?) WHERE name='feature_type'",
+            params![consequences_path],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| format!("cannot inspect legacy consequence schema: {error}"))?;
+    let feature_type = if has_feature_type {
+        "c.feature_type"
+    } else {
+        "NULL::VARCHAR"
+    };
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT c.allele_id, {feature_type}, c.consequence_json,
+                    v.gene_symbol, v.gene_id, v.transcript_id, v.consequence,
+                    v.impact, v.canonical, v.mane_select
+             FROM read_parquet(?) c
+             JOIN read_parquet(?) v USING (allele_id)
+             ORDER BY c.allele_id, c.ordinal"
+        ))
+        .map_err(|error| format!("cannot prepare representative repair: {error}"))?;
+    let mut rows = statement
+        .query(params![
+            consequences.to_string_lossy().as_ref(),
+            variants.to_string_lossy().as_ref()
+        ])
+        .map_err(|error| format!("cannot read representative repair inputs: {error}"))?;
+    let schema = RepresentativeOverrideBatch::default()
+        .into_record_batch()?
+        .schema();
+    let mut writer = parquet_writer(&partial, schema)?;
+    let mut batch = RepresentativeOverrideBatch::default();
+    let mut current_allele = None::<String>;
+    let mut current_entries = Vec::<(String, Map<String, Value>)>::new();
+    let mut current_existing = RepresentativeFields::default();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("cannot stream representative repair: {error}"))?
+    {
+        let allele_id = row.get::<_, String>(0).map_err(|error| error.to_string())?;
+        if current_allele
+            .as_deref()
+            .is_some_and(|current| current != allele_id)
+        {
+            flush_representative_override(
+                fingerprint,
+                current_allele.as_deref().expect("current allele exists"),
+                &current_entries,
+                &current_existing,
+                &mut batch,
+            );
+            current_entries.clear();
+            if batch.len() >= 4_096 {
+                let record_batch = std::mem::take(&mut batch).into_record_batch()?;
+                write_batch(&mut writer, record_batch, "legacy representative overrides")?;
+            }
+        }
+        if current_allele.as_deref() != Some(&allele_id) {
+            current_allele = Some(allele_id.clone());
+            current_existing = RepresentativeFields {
+                gene_symbol: row.get(3).map_err(|error| error.to_string())?,
+                gene_id: row.get(4).map_err(|error| error.to_string())?,
+                transcript_id: row.get(5).map_err(|error| error.to_string())?,
+                consequence: row.get(6).map_err(|error| error.to_string())?,
+                impact: row.get(7).map_err(|error| error.to_string())?,
+                canonical: row.get(8).map_err(|error| error.to_string())?,
+                mane_select: row.get(9).map_err(|error| error.to_string())?,
+            };
+        }
+        let feature_type = row
+            .get::<_, Option<String>>(1)
+            .map_err(|error| error.to_string())?;
+        let consequence_json = row.get::<_, String>(2).map_err(|error| error.to_string())?;
+        let consequence = serde_json::from_str::<Map<String, Value>>(&consequence_json)
+            .map_err(|error| format!("legacy consequence JSON is invalid: {error}"))?;
+        let feature_type =
+            consequence_feature_type(&consequence, feature_type.as_deref()).to_owned();
+        current_entries.push((feature_type, consequence));
+    }
+    if let Some(allele_id) = current_allele {
+        flush_representative_override(
+            fingerprint,
+            &allele_id,
+            &current_entries,
+            &current_existing,
+            &mut batch,
+        );
+    }
+    let record_batch = batch.into_record_batch()?;
+    write_batch(&mut writer, record_batch, "legacy representative overrides")?;
+    writer
+        .close()
+        .map_err(|error| format!("cannot finish representative repair: {error}"))?;
+    if !representative_override_is_valid(&partial, fingerprint) {
+        let _ = fs::remove_file(&partial);
+        return Err("representative repair failed validation".into());
+    }
+    if let Err(error) = crate::library_metadata::publish_atomic_file(&partial, destination) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn legacy_representative_override(variants: &Path) -> Result<Option<PathBuf>, String> {
+    if report_uses_current_selection_contract(variants)? {
+        return Ok(None);
+    }
+    let root = variants
+        .parent()
+        .ok_or("variant table has no report directory")?;
+    let consequences = root.join("consequences.parquet");
+    if !consequences.is_file() {
+        return Ok(None);
+    }
+    let fingerprint = representative_override_fingerprint(variants, &consequences)?;
+    let destination = root.join(format!(".annocat-representatives-{fingerprint}.parquet"));
+    if representative_override_is_valid(&destination, &fingerprint) {
+        return Ok(Some(destination));
+    }
+    let _guard = REPRESENTATIVE_OVERRIDE_BUILD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "representative repair lock failed")?;
+    if !representative_override_is_valid(&destination, &fingerprint) {
+        build_representative_override(variants, &consequences, &fingerprint, &destination)?;
+    }
+    Ok(Some(destination))
+}
+
+fn report_uses_current_selection_contract(report_file: &Path) -> Result<bool, String> {
+    let root = report_file
+        .parent()
+        .ok_or("report file has no report directory")?;
+    let manifest = root.join("manifest.json");
+    if !manifest.is_file() {
+        return Ok(false);
+    }
+    let value: Value = serde_json::from_slice(
+        &fs::read(&manifest).map_err(|error| format!("cannot read report manifest: {error}"))?,
+    )
+    .map_err(|error| format!("report manifest is invalid: {error}"))?;
+    match value["representativeSelectionContract"].as_str() {
+        Some(REPRESENTATIVE_SELECTION_CONTRACT) => Ok(true),
+        Some(_) => Err("report uses an unsupported representative-selection contract".into()),
+        None => Ok(false),
+    }
+}
+
+pub(crate) fn resolved_variants_relation(variants: &Path) -> Result<String, String> {
+    let overrides = legacy_representative_override(variants)?;
+    let variants = format!("'{}'", variants.to_string_lossy().replace('\'', "''"));
+    let Some(overrides) = overrides else {
+        return Ok(format!("read_parquet({variants})"));
+    };
+    let overrides = format!("'{}'", overrides.to_string_lossy().replace('\'', "''"));
+    Ok(format!(
+        "(SELECT v.* REPLACE (
+            CASE WHEN o.allele_id IS NULL THEN v.gene_symbol ELSE o.gene_symbol END AS gene_symbol,
+            CASE WHEN o.allele_id IS NULL THEN v.gene_id ELSE o.gene_id END AS gene_id,
+            CASE WHEN o.allele_id IS NULL THEN v.transcript_id ELSE o.transcript_id END AS transcript_id,
+            CASE WHEN o.allele_id IS NULL THEN v.consequence ELSE o.consequence END AS consequence,
+            CASE WHEN o.allele_id IS NULL THEN v.impact ELSE o.impact END AS impact,
+            CASE WHEN o.allele_id IS NULL THEN v.canonical ELSE o.canonical END AS canonical,
+            CASE WHEN o.allele_id IS NULL THEN v.mane_select ELSE o.mane_select END AS mane_select
+          )
+          FROM read_parquet({variants}) v
+          LEFT JOIN read_parquet({overrides}) o USING (allele_id))"
+    ))
+}
+
+fn register_report_variants(connection: &Connection, variants: &Path) -> Result<(), String> {
+    let relation = resolved_variants_relation(variants)?;
+    connection
+        .execute_batch(&format!(
+            "CREATE OR REPLACE TEMP MACRO annocat_variants(path) AS TABLE
+             SELECT * FROM {relation} WHERE path IS NOT NULL"
+        ))
+        .map_err(|error| format!("cannot prepare representative report view: {error}"))
+}
+
+fn apply_representative_override_to_variant(
+    variants: &Path,
+    allele_id: &str,
+    variant: &mut Value,
+) -> Result<(), String> {
+    let relation = resolved_variants_relation(variants)?;
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT gene_symbol, gene_id, transcript_id, consequence, impact, canonical,
+                    mane_select
+             FROM {relation} WHERE allele_id=? LIMIT 1"
+        ))
+        .map_err(|error| format!("cannot prepare representative detail lookup: {error}"))?;
+    let fields = statement
+        .query_row(params![allele_id], |row| {
+            Ok(RepresentativeFields {
+                gene_symbol: row.get(0)?,
+                gene_id: row.get(1)?,
+                transcript_id: row.get(2)?,
+                consequence: row.get(3)?,
+                impact: row.get(4)?,
+                canonical: row.get(5)?,
+                mane_select: row.get(6)?,
+            })
+        })
+        .map_err(|error| format!("cannot read representative detail: {error}"))?;
+    let object = variant
+        .as_object_mut()
+        .ok_or("variant detail context is not an object")?;
+    for (name, value) in [
+        ("geneSymbol", fields.gene_symbol),
+        ("geneId", fields.gene_id),
+        ("transcriptId", fields.transcript_id),
+        ("consequence", fields.consequence),
+        ("impact", fields.impact),
+        ("maneSelect", fields.mane_select),
+    ] {
+        object.insert(name.into(), value.map_or(Value::Null, Value::String));
+    }
+    object.insert("canonical".into(), Value::Bool(fields.canonical));
+    Ok(())
 }
 
 fn samples_json(sample_names: &[String], columns: &[&str]) -> Result<String, String> {
@@ -6104,7 +7270,7 @@ mod tests {
         assert!(samples.contains("CASE"));
         assert!(samples.contains("1/2"));
         let filtered_request = PageRequest {
-            impact: "HIGH".into(),
+            search: "stop".into(),
             ..PageRequest::default()
         };
         let csv = root.join("filtered.csv");
@@ -6325,6 +7491,104 @@ mod tests {
     }
 
     #[test]
+    fn structured_allele_sources_follow_declared_scope_identity() {
+        let record = StructuredRecord {
+            line_number: 1,
+            line: json!({
+                "allele_string": "A/G",
+                "start": 100,
+                "seq_region_name": "1",
+                "alleles": [{
+                    "allele": "G",
+                    "gnomad": {"allAf": 0.001},
+                    "revel": {
+                        "score": 0.9,
+                        "transcriptId": "ENST2"
+                    },
+                    "spliceai": {
+                        "gene": "GENE2",
+                        "dsAg": 0.8
+                    }
+                }],
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "transcript_id": "ENST1",
+                    "gene_id": "ENSG1",
+                    "gene_symbol": "GENE1",
+                    "mane_select": "NM_1",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }, {
+                    "variant_allele": "G",
+                    "transcript_id": "ENST2",
+                    "gene_id": "ENSG2",
+                    "gene_symbol": "GENE2",
+                    "canonical": 1,
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }]
+            })
+            .to_string(),
+            canonical_alleles: BTreeMap::new(),
+        };
+
+        let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
+        let gnomad = parsed
+            .evidence
+            .source_id
+            .iter()
+            .enumerate()
+            .find_map(|(index, source)| {
+                (source == "gnomad" && parsed.evidence.field_path[index] == "allAf")
+                    .then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.scope[gnomad], "allele");
+        assert_eq!(parsed.evidence.consequence_id[gnomad], None);
+        assert_eq!(parsed.evidence.number_value[gnomad], Some(0.001));
+
+        let revel = parsed
+            .evidence
+            .source_id
+            .iter()
+            .enumerate()
+            .find_map(|(index, source)| {
+                (source == "revel" && parsed.evidence.field_path[index] == "score").then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.scope[revel], "transcript");
+        assert_eq!(
+            parsed.evidence.consequence_id[revel].as_deref(),
+            Some("local:1")
+        );
+
+        let spliceai = parsed
+            .evidence
+            .source_id
+            .iter()
+            .enumerate()
+            .find_map(|(index, source)| {
+                (source == "spliceai" && parsed.evidence.field_path[index] == "dsAg")
+                    .then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.scope[spliceai], "transcript");
+        assert_eq!(
+            parsed.evidence.consequence_id[spliceai].as_deref(),
+            Some("local:1")
+        );
+        assert!(
+            parsed
+                .consequences
+                .consequence_json
+                .iter()
+                .all(|value| !value.contains("gnomad")
+                    && !value.contains("revel")
+                    && !value.contains("spliceai"))
+        );
+    }
+
+    #[test]
     fn record_level_consequence_is_not_broadcast_across_multiple_alts() {
         let multiallelic = StructuredRecord {
             line_number: 1,
@@ -6384,10 +7648,129 @@ mod tests {
             "seq_region_name": "1"
         })
         .to_string();
-        let mapped = canonical_structured_alleles(1, &line, Some(&canonical), None).unwrap();
+        let identity: StructuredIdentity = serde_json::from_str(&line).unwrap();
+        let mapped = canonical_structured_alleles(1, &identity, Some(&canonical), None).unwrap();
 
         assert_eq!(mapped["G"], canonical[0]);
         assert_eq!(mapped["T"], canonical[1]);
+    }
+
+    struct MissingReference;
+
+    impl ReferenceSequence for MissingReference {
+        fn base(&mut self, chromosome: &str, _position: u64) -> Result<u8, NormalizeError> {
+            Err(NormalizeError::MissingChromosome(chromosome.into()))
+        }
+
+        fn sequence(
+            &mut self,
+            chromosome: &str,
+            _position: u64,
+            _length: usize,
+        ) -> Result<Vec<u8>, NormalizeError> {
+            Err(NormalizeError::MissingChromosome(chromosome.into()))
+        }
+    }
+
+    #[test]
+    fn missing_auxiliary_contig_is_preserved_but_main_chromosome_is_rejected() {
+        let mut reference = MissingReference;
+        let auxiliary =
+            canonicalize_or_preserve_auxiliary(&mut reference, "Un_KI_missing", 52, "C", "A")
+                .unwrap();
+        assert_eq!(
+            auxiliary,
+            CanonicalAllele {
+                chromosome: "Un_KI_missing".into(),
+                position: 52,
+                reference: "C".into(),
+                alternate: "A".into(),
+            }
+        );
+        assert!(matches!(
+            canonicalize_or_preserve_auxiliary(&mut reference, "chr3", 52, "C", "A"),
+            Err(NormalizeError::MissingChromosome(_))
+        ));
+    }
+
+    #[test]
+    fn nonhuman_auxiliary_records_are_excluded_but_human_contigs_remain() {
+        assert!(
+            canonical_alleles_for_vcf_line(1, "Un_KN707607v1_decoy\t52\t.\tC\tA", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            canonical_alleles_for_vcf_line(2, "hs37d5\t52\t.\tC\tA", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            canonical_alleles_for_vcf_line(3, "EBV\t52\t.\tC\tA", None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            canonical_alleles_for_vcf_line(4, "chrUn_KI270442v1\t52\t.\tC\tA", None)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            canonical_alleles_for_vcf_line(5, "22_KI270879v1_alt\t52\t.\tC\tA", None)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn variant_and_evidence_tables_both_omit_decoy_records() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-decoy-filter-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nUn_KN707607v1_decoy\t52\t.\tC\tA\t50\tPASS\tCSQ=A|missense_variant|MODERATE|DECOY|ENSG0|ENST0\n1\t52\t.\tC\tA\t50\tPASS\tCSQ=A|missense_variant|MODERATE|GENE1|ENSG1|ENST1\n",
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        let canonical = convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        assert_eq!(canonical.records, 1);
+        assert_eq!(canonical.excluded_auxiliary_records, 1);
+
+        let ndjson = root.join("fastvep.ndjson");
+        fs::write(
+            &ndjson,
+            concat!(
+                r#"{"allele_string":"C/A","start":52,"end":52,"seq_region_name":"Un_KN707607v1_decoy","transcript_consequences":[{"variant_allele":"A","consequence_terms":["missense_variant"],"impact":"MODERATE","gene_symbol":"DECOY","gene_id":"ENSG0","transcript_id":"ENST0"}]}"#,
+                "\n",
+                r#"{"allele_string":"C/A","start":52,"end":52,"seq_region_name":"1","transcript_consequences":[{"variant_allele":"A","consequence_terms":["missense_variant"],"impact":"MODERATE","gene_symbol":"GENE1","gene_id":"ENSG1","transcript_id":"ENST1"}]}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        let structured = convert_structured(
+            &ndjson,
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(structured.records, 1);
+        assert_eq!(structured.excluded_auxiliary_records, 1);
+        assert_eq!(structured.consequences, 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6399,10 +7782,10 @@ mod tests {
             ("IMPACT".into(), Value::String("HIGH".into())),
         ]);
         let mane_plus = Map::from_iter([
-            ("Feature".into(), Value::String("ENST_CLINICAL".into())),
+            ("Feature".into(), Value::String("ENST00000000002".into())),
             (
                 "MANE_PLUS_CLINICAL".into(),
-                Value::String("ENST_CLINICAL.1".into()),
+                Value::String("ENST00000000002.1".into()),
             ),
             ("BIOTYPE".into(), Value::String("protein_coding".into())),
             ("IMPACT".into(), Value::String("MODERATE".into())),
@@ -6412,7 +7795,7 @@ mod tests {
                 .unwrap()
                 .get("Feature")
                 .and_then(Value::as_str),
-            Some("ENST_CLINICAL")
+            Some("ENST00000000002")
         );
     }
 
@@ -6425,10 +7808,10 @@ mod tests {
             ("IMPACT".into(), Value::String("MODERATE".into())),
         ]);
         let mane_plus = Map::from_iter([
-            ("Feature".into(), Value::String("ENST_CLINICAL".into())),
+            ("Feature".into(), Value::String("ENST00000000002".into())),
             (
                 "MANE_PLUS_CLINICAL".into(),
-                Value::String("ENST_CLINICAL.1".into()),
+                Value::String("ENST00000000002.1".into()),
             ),
             ("BIOTYPE".into(), Value::String("protein_coding".into())),
             ("IMPACT".into(), Value::String("HIGH".into())),
@@ -6446,6 +7829,329 @@ mod tests {
                 .and_then(Value::as_str),
             Some("ENST_MANE")
         );
+    }
+
+    #[test]
+    fn overlapping_gene_severity_selects_muc6_stop_gain_over_ap2a2_downstream() {
+        let ap2a2 = json!({
+            "Allele": "A",
+            "Consequence": "downstream_gene_variant",
+            "SYMBOL": "AP2A2",
+            "Gene": "ENSG00000183020",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000396630",
+            "MANE_SELECT": "NM_012305.4"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let muc6 = json!({
+            "Allele": "A",
+            "Consequence": "stop_gained",
+            "SYMBOL": "MUC6",
+            "Gene": "ENSG00000184956",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000421673",
+            "MANE_SELECT": "NM_005961.3"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        for entries in [vec![ap2a2.clone(), muc6.clone()], vec![muc6.clone(), ap2a2]] {
+            assert_eq!(
+                consequence_text(best_consequence(&entries).unwrap(), &["SYMBOL"]),
+                Some("MUC6")
+            );
+        }
+    }
+
+    #[test]
+    fn same_gene_fallback_prefers_canonical_before_consequence_severity() {
+        let canonical = json!({
+            "Consequence": "intron_variant",
+            "SYMBOL": "GENE1",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000001",
+            "CANONICAL": "YES"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let severe = json!({
+            "Consequence": "stop_gained",
+            "SYMBOL": "GENE1",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000002"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            consequence_text(
+                best_consequence(&[severe, canonical]).unwrap(),
+                &["Feature"]
+            ),
+            Some("ENST00000000001")
+        );
+    }
+
+    #[test]
+    fn same_gene_retains_both_mane_classes_then_uses_severity() {
+        let mane_select = json!({
+            "Consequence": "downstream_gene_variant",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000001",
+            "MANE_SELECT": "NM_000001.1"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let mane_plus = json!({
+            "Consequence": "stop_gained",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000002",
+            "MANE_PLUS_CLINICAL": "NM_000002.1"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            consequence_text(
+                best_consequence(&[mane_select, mane_plus]).unwrap(),
+                &["Feature"]
+            ),
+            Some("ENST00000000002")
+        );
+    }
+
+    #[test]
+    fn malformed_mane_value_does_not_outrank_valid_fallback() {
+        let malformed = json!({
+            "Consequence": "stop_gained",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000002",
+            "MANE_SELECT": "-"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let canonical = json!({
+            "Consequence": "intron_variant",
+            "Gene": "ENSG00000000001",
+            "Feature_type": "Transcript",
+            "Feature": "ENST00000000001",
+            "CANONICAL": true
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            consequence_text(
+                best_consequence(&[malformed, canonical]).unwrap(),
+                &["Feature"]
+            ),
+            Some("ENST00000000001")
+        );
+    }
+
+    #[test]
+    fn vcf_and_structured_keys_choose_the_same_representative() {
+        let vcf_entries = vec![
+            json!({
+                "Consequence": "downstream_gene_variant",
+                "SYMBOL": "AP2A2",
+                "Gene": "ENSG00000183020",
+                "Feature_type": "Transcript",
+                "Feature": "ENST00000396630",
+                "MANE_SELECT": "NM_012305.4"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            json!({
+                "Consequence": "stop_gained",
+                "SYMBOL": "MUC6",
+                "Gene": "ENSG00000184956",
+                "Feature_type": "Transcript",
+                "Feature": "ENST00000421673",
+                "MANE_SELECT": "NM_005961.3"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+        let structured_entries = vec![
+            (
+                "transcript",
+                json!({
+                    "consequence_terms": ["downstream_gene_variant"],
+                    "gene_symbol": "AP2A2",
+                    "gene_id": "ENSG00000183020",
+                    "transcript_id": "ENST00000396630",
+                    "mane_select": "NM_012305.4"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+            (
+                "transcript",
+                json!({
+                    "consequence_terms": ["stop_gained"],
+                    "gene_symbol": "MUC6",
+                    "gene_id": "ENSG00000184956",
+                    "transcript_id": "ENST00000421673",
+                    "mane_select": "NM_005961.3"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        ];
+        let selected = best_structured_consequence_index(&structured_entries, &[0, 1]).unwrap();
+        assert_eq!(
+            consequence_text(best_consequence(&vcf_entries).unwrap(), &["Feature"]),
+            consequence_text(&structured_entries[selected].1, &["transcript_id"])
+        );
+    }
+
+    #[test]
+    fn legacy_report_repairs_overlapping_gene_representative_and_corrupt_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-legacy-representative-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|MANE_SELECT\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n11\t101001\t.\tA\tG\t50\tPASS\tCSQ=G|downstream_gene_variant|MODIFIER|AP2A2|ENSG00000183020|Transcript|ENST00000396630|NM_012305.4\n",
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        let structured = root.join("fastvep.ndjson");
+        fs::write(
+            &structured,
+            concat!(
+                r#"{"allele_string":"A/G","start":101001,"end":101001,"seq_region_name":"11","transcript_consequences":[{"variant_allele":"G","consequence_terms":["downstream_gene_variant"],"impact":"MODIFIER","gene_symbol":"AP2A2","gene_id":"ENSG00000183020","transcript_id":"ENST00000396630","mane_select":"NM_012305.4"},{"variant_allele":"G","consequence_terms":["stop_gained"],"impact":"HIGH","gene_symbol":"MUC6","gene_id":"ENSG00000184956","transcript_id":"ENST00000421673","mane_select":"NM_005961.3"}]}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        convert_structured(
+            &structured,
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+
+        let page = |search: &str| {
+            serde_json::from_str::<Value>(
+                &page_json(
+                    &variants,
+                    0,
+                    10,
+                    &PageRequest {
+                        search: search.into(),
+                        exact_total: true,
+                        ..PageRequest::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let repaired = page("stop");
+        assert_eq!(repaired["total"], 1);
+        assert_eq!(repaired["rows"][0]["geneSymbol"], "MUC6");
+        assert_eq!(repaired["rows"][0]["consequence"], "stop_gained");
+        assert_eq!(page("AP2A2")["total"], 0);
+
+        let override_path = legacy_representative_override(&variants)
+            .unwrap()
+            .expect("legacy report has a derived override");
+        fs::write(&override_path, b"corrupt").unwrap();
+        assert_eq!(page("stop")["rows"][0]["geneSymbol"], "MUC6");
+        assert!(representative_override_is_valid(
+            &override_path,
+            &representative_override_fingerprint(&variants, &consequences).unwrap()
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn consequence_severity_matches_the_pinned_fastvep_order() {
+        let terms = [
+            "transcript_ablation",
+            "splice_acceptor_variant",
+            "splice_donor_variant",
+            "stop_gained",
+            "frameshift_variant",
+            "stop_lost",
+            "start_lost",
+            "transcript_amplification",
+            "feature_elongation",
+            "feature_truncation",
+            "inframe_insertion",
+            "inframe_deletion",
+            "missense_variant",
+            "protein_altering_variant",
+            "splice_region_variant",
+            "splice_donor_5th_base_variant",
+            "splice_donor_region_variant",
+            "splice_polypyrimidine_tract_variant",
+            "incomplete_terminal_codon_variant",
+            "start_retained_variant",
+            "stop_retained_variant",
+            "synonymous_variant",
+            "coding_sequence_variant",
+            "mature_miRNA_variant",
+            "5_prime_UTR_variant",
+            "3_prime_UTR_variant",
+            "non_coding_transcript_exon_variant",
+            "intron_variant",
+            "NMD_transcript_variant",
+            "non_coding_transcript_variant",
+            "coding_transcript_variant",
+            "upstream_gene_variant",
+            "downstream_gene_variant",
+            "TFBS_ablation",
+            "TFBS_amplification",
+            "TF_binding_site_variant",
+            "regulatory_region_ablation",
+            "regulatory_region_amplification",
+            "regulatory_region_variant",
+            "intergenic_variant",
+            "sequence_variant",
+            "copy_number_change",
+            "copy_number_increase",
+            "copy_number_decrease",
+            "short_tandem_repeat_change",
+            "short_tandem_repeat_expansion",
+            "short_tandem_repeat_contraction",
+            "unidirectional_gene_fusion",
+            "transcript_variant",
+        ];
+        for (expected, term) in terms.into_iter().enumerate() {
+            let consequence = json!({"Consequence": term}).as_object().unwrap().clone();
+            assert_eq!(consequence_severity_rank(&consequence), expected as u8);
+        }
     }
 
     #[test]
@@ -7203,7 +8909,7 @@ mod tests {
     }
 
     #[test]
-    fn favor_coding_fields_are_source_selected_not_allele_or_transcript_claims() {
+    fn favor_predictor_summaries_are_provider_selected() {
         let root = std::env::temp_dir().join(format!(
             "annocat-favor-resolution-{}-{}",
             std::process::id(),
@@ -7217,22 +8923,35 @@ mod tests {
         fs::write(
             &catalog,
             serde_json::to_vec(&json!({
-                "fields": [{
-                    "scope": "feature",
-                    "biologicalScope": "feature",
-                    "physicalScope": "selected",
-                    "sourceId": "favor-online",
-                    "fieldPath": "codingRevelScore",
-                    "valueType": "number",
-                    "resolutionPolicy": "materializedSelected",
-                    "selectionOrigin": "provider"
-                }]
+                "fields": [
+                    {
+                        "scope": "feature",
+                        "biologicalScope": "feature",
+                        "physicalScope": "selected",
+                        "sourceId": "favor-online",
+                        "fieldPath": "codingRevelScore",
+                        "valueType": "number",
+                        "resolutionPolicy": "materializedSelected",
+                        "selectionOrigin": "provider"
+                    },
+                    {
+                        "scope": "feature",
+                        "biologicalScope": "feature",
+                        "physicalScope": "allele",
+                        "sourceId": "favor-online",
+                        "fieldPath": "revel",
+                        "valueType": "number",
+                        "resolutionPolicy": "providerSelected",
+                        "selectionOrigin": "provider"
+                    }
+                ]
             }))
             .unwrap(),
         )
         .unwrap();
-        let field = selected_evidence_columns(&catalog, &[0]).unwrap().remove(0);
-        assert!(field.resolution == EvidenceResolutionStrategy::SourceSelected);
+        for field in selected_evidence_columns(&catalog, &[0, 1]).unwrap() {
+            assert!(field.resolution == EvidenceResolutionStrategy::SourceSelected);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7636,6 +9355,14 @@ mod tests {
         .unwrap();
         let variants = root.join("variants.parquet");
         convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&json!({
+                "representativeSelectionContract": REPRESENTATIVE_SELECTION_CONTRACT
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let sorted: Value = serde_json::from_str(
             &page_json_with_evidence(
@@ -7709,6 +9436,194 @@ mod tests {
             .unwrap();
             assert_eq!(page["total"], expected);
         }
+        assert!(crate::evidence_resolution::available_path(&evidence).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dbnsfp_record_lists_are_resolved_once_for_all_viewer_operations() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-dbnsfp-record-list-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let record = |position: u64, selected_score: &str| {
+            json!({
+                "allele_string": "A/G",
+                "start": position,
+                "end": position,
+                "seq_region_name": "1",
+                "most_severe_consequence": "missense_variant",
+                "dbnsfp": [{
+                    "Ensembl_transcriptid": "ENST000001;ENST000002",
+                    "Ensembl_proteinid": "ENSP000001;ENSP000002",
+                    "Uniprot_acc": "P1;P2",
+                    "Uniprot_entry": "ENTRY1;ENTRY2",
+                    "aaref": "R",
+                    "aaalt": "H",
+                    "aapos": "10;20",
+                    "HGVSp_VEP": "p.Gly10Arg;p.Arg20His",
+                    "REVEL_score": format!("0.1;{selected_score}"),
+                    "CADD_phred": "20"
+                }],
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE",
+                    "gene_symbol": "GENE1",
+                    "gene_id": "ENSG1",
+                    "transcript_id": "ENST000001",
+                    "protein_id": "ENSP000001",
+                    "amino_acids": "G/R",
+                    "protein_start": 10
+                }, {
+                    "variant_allele": "G",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE",
+                    "gene_symbol": "GENE1",
+                    "gene_id": "ENSG1",
+                    "transcript_id": "ENST000002",
+                    "protein_id": "ENSP000002",
+                    "amino_acids": "R/H",
+                    "protein_start": 20,
+                    "hgvsp": "ENSP000002:p.Arg20His",
+                    "mane_select": "ENST000002.1"
+                }]
+            })
+        };
+        let input = root.join("fastvep.ndjson");
+        fs::write(
+            &input,
+            format!("{}\n{}\n", record(65601, "0.8"), record(65602, "0.2")),
+        )
+        .unwrap();
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        convert_structured(
+            &input,
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+
+        let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        let fields = catalog_value["fields"].as_array().unwrap();
+        assert!(
+            fields
+                .iter()
+                .all(|field| field["fieldPath"] != "__recordList")
+        );
+        let score_index = fields
+            .iter()
+            .position(|field| {
+                field["scope"] == "selected"
+                    && field["sourceId"] == "dbnsfp"
+                    && field["fieldPath"] == "REVEL_score"
+            })
+            .unwrap();
+        assert_eq!(fields[score_index]["biologicalScope"], "transcript");
+        assert_eq!(fields[score_index]["physicalScope"], "selected");
+        let connection = Connection::open_in_memory().unwrap();
+        let raw_rows: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?) WHERE scope='source_records' AND field_path='__recordList'",
+                params![evidence.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_rows, 2);
+
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|UPLOADED_ALLELE|MANE_SELECT\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t65601\t.\tA\tG\t50\tPASS\tCSQ=G|missense_variant|MODERATE|GENE1|ENSG1|ENST000002|A/G|ENST000002.1\n1\t65602\t.\tA\tG\t50\tPASS\tCSQ=G|missense_variant|MODERATE|GENE1|ENSG1|ENST000002|A/G|ENST000002.1\n",
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&json!({
+                "representativeSelectionContract": REPRESENTATIVE_SELECTION_CONTRACT
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let page = |request| {
+            serde_json::from_str::<Value>(
+                &page_json_with_evidence(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    0,
+                    10,
+                    &request,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let sorted = page(PageRequest {
+            evidence_columns: vec![score_index],
+            sort_evidence: Some(score_index),
+            direction: "desc".into(),
+            ..PageRequest::default()
+        });
+        assert_eq!(sorted["rows"][0]["position"], 65601);
+        assert_eq!(
+            sorted["rows"][0]["evidence"][score_index.to_string()],
+            "0.8"
+        );
+        let detail: Value = serde_json::from_str(
+            &detail_json(
+                &consequences,
+                &evidence,
+                sorted["rows"][0]["alleleId"].as_str().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let detail_evidence = detail["evidence"].as_array().unwrap();
+        assert!(detail_evidence.iter().any(|row| {
+            row["scope"] == "selected"
+                && row["sourceId"] == "dbnsfp"
+                && row["fieldPath"] == "REVEL_score"
+                && (row["value"].as_f64() == Some(0.8) || row["value"].as_str() == Some("0.8"))
+        }));
+        assert!(
+            detail_evidence.iter().all(|row| {
+                row["scope"] != "source_records" && row["fieldPath"] != "__recordList"
+            })
+        );
+        assert_eq!(
+            page(PageRequest {
+                evidence_filters: vec![EvidenceFilterRequest {
+                    index: score_index,
+                    operator: "gt".into(),
+                    value: "0.5".into(),
+                    value2: String::new(),
+                }],
+                ..PageRequest::default()
+            })["total"],
+            1
+        );
+        assert_eq!(
+            page(PageRequest {
+                search: "0.8".into(),
+                evidence_columns: vec![score_index],
+                ..PageRequest::default()
+            })["total"],
+            1
+        );
         assert!(crate::evidence_resolution::available_path(&evidence).is_none());
         fs::remove_dir_all(root).unwrap();
     }
@@ -7789,10 +9704,12 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(page["rows"][0]["evidence"][score_index.to_string()], "0.1");
+        assert_eq!(page["rows"][0]["position"], 65565);
+        assert_eq!(page["rows"][0]["transcriptId"], "ENST000001");
+        assert_eq!(page["rows"][0]["evidence"][score_index.to_string()], "0.9");
         assert_eq!(
             page["rows"][0]["evidenceResolution"][score_index.to_string()]["kind"],
-            "stable_id_match"
+            "exact_transcript"
         );
         assert!(
             page["rows"][2]["evidence"]
@@ -7834,7 +9751,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             rebuilt["rows"][0]["evidence"][score_index.to_string()],
-            "0.1"
+            "0.9"
         );
         let sorted: Value = serde_json::from_str(
             &page_json_with_evidence(
@@ -7854,13 +9771,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sorted["rows"][0]["position"], 65566);
-        assert_eq!(
-            sorted["rows"][0]["evidence"][score_index.to_string()],
-            "5.1"
-        );
+        assert_eq!(sorted["rows"][0]["evidence"][score_index.to_string()], "46");
         assert_eq!(
             sorted["rows"][0]["evidenceResolution"][score_index.to_string()]["kind"],
-            "stable_id_match"
+            "exact_transcript"
         );
         let multi_sorted: Value = serde_json::from_str(
             &page_json_with_evidence(
@@ -7914,7 +9828,7 @@ mod tests {
             .unwrap_err()
             .contains("must be unique")
         );
-        for (threshold, expected) in [("0.8", 1), ("0.95", 1)] {
+        for (threshold, expected) in [("0.8", 2), ("0.95", 1)] {
             let filtered: Value = serde_json::from_str(
                 &page_json_with_evidence(
                     &variants,

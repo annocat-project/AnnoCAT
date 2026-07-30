@@ -311,11 +311,12 @@
       "id": "dbnsfp",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
-      "adapterContract": "annocat-dbnsfp-v1",
+      "preferredCacheFormat": "osa2",
+      "adapterContract": "annocat-dbnsfp-record-list-v2",
       "manifestRef": "config/dbnsfp-4.9a-members.json",
       "fieldContract": {
         "manifestRef": "config/dbnsfp-4.9a-curated-fields.json",
-        "contractId": "dbnsfp-4.9a-annocat-core-v1"
+        "contractId": "dbnsfp-4.9a-annocat-core-v2"
       },
       "release": {
         "version": "4.9a",
@@ -335,6 +336,7 @@
       "id": "clinvar",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-clinvar-v1",
       "manifestRef": null,
       "fieldContract": {
@@ -360,6 +362,7 @@
       "id": "dbsnp",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-dbsnp-v1",
       "manifestRef": null,
       "fieldContract": {
@@ -386,6 +389,7 @@
       "id": "gnomad",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-gnomad-v1",
       "manifestRef": "config/wgs-streams.json",
       "fieldContract": {
@@ -410,6 +414,7 @@
       "id": "gnomad-genomes",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-gnomad-v1",
       "manifestRef": "config/wgs-streams.json",
       "fieldContract": {
@@ -434,6 +439,7 @@
       "id": "cadd",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-cadd-v1",
       "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
@@ -458,6 +464,7 @@
       "id": "phylop",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa2",
       "adapterContract": "annocat-phylop-v1",
       "manifestRef": "config/wgs-streams.json",
       "fieldContract": {
@@ -482,6 +489,7 @@
       "id": "spliceai",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-spliceai-v1",
       "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
@@ -506,6 +514,7 @@
       "id": "revel",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
+      "preferredCacheFormat": "osa2",
       "adapterContract": "annocat-revel-v1",
       "manifestRef": "config/revel-1.3-archives.json",
       "fieldContract": {

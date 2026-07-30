@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "f5a8500dd4d12717c89dea44acc52a826388f945",
-  "branch": "annocat/cache-build-performance",
+  "commit": "4a02dc5fa98b552eb51bdad04aa29e5a443c6728",
+  "branch": "codex/merge-fastvep-upstream",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
-  "upstreamCommit": "7038e7c17708e7d2226149e78e0bb297bcc6d1d6",
-  "upstreamVersion": "0.2.0",
+  "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
+  "upstreamVersion": "0.3.0",
   "license": "Apache-2.0",
-  "cargoLockSha256": "cf77c24db9add5400abc3797c1f70b6a34166ce52c1c4381f4c8cc717a899515",
+  "cargoLockSha256": "65e959e83dd65099df763e64da28cea6db69c1741dad2f4ec483e6e4bba979c7",
   "changes": [
     {
       "commit": "6178fee7ad992dd5d3d1cbd1789cada41eb073ab",
@@ -92,16 +92,44 @@
     {
       "commit": "f5a8500dd4d12717c89dea44acc52a826388f945",
       "purpose": "Query supplementary providers in genomic order while processing independent sources in parallel"
+    },
+    {
+      "commit": "aa8a589c67525bd66bcbced00948bdbced1f7091",
+      "purpose": "Use an all-chromosome shard as the fallback provider and honor the configured annotation batch size"
+    },
+    {
+      "commit": "e7192e92f1f8e8ba6fa6c818f299c9be9d3feab8",
+      "purpose": "Write supplementary evidence once per allele in structured JSON instead of repeating it for every transcript"
+    },
+    {
+      "commit": "a240c2db2d1ecd78c907e1f3c5518ae0b3402cfd",
+      "purpose": "Merge upstream fastVEP v0.3.0 correctness, mitochondrial, web-hardening, release, and canonical OSA2 changes with AnnoCAT's source builders"
+    },
+    {
+      "commit": "253edf1e8abb46260fea8b07725535865646b3c0",
+      "purpose": "Load, verify, and compose OSA1 or OSA2 caches through one fail-closed supplementary annotation boundary"
+    },
+    {
+      "commit": "7ce38d0a0024cee9a9d4b0d648d941d19a70b19e",
+      "purpose": "Accept valid duplicate OSA2 allele keys while preserving order validation and deterministic legacy-compatible lookup"
+    },
+    {
+      "commit": "22e742e2e42581ade5568e5273644aec9a2850fa",
+      "purpose": "Preserve all exact-key records only for declared multi-record sources so AnnoCAT can resolve dbNSFP evidence by transcript and peptide identity"
+    },
+    {
+      "commit": "4a02dc5fa98b552eb51bdad04aa29e5a443c6728",
+      "purpose": "Bound dbNSFP OSA2 genomic chunks so wide transcript-vector records stay below the verified decompression limit"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 6605312,
-    "sha256": "e36de644f32e2fb2709deccd81e21abcac68b5958407f29ceeba89649eee97b2",
+    "sizeBytes": 7150080,
+    "sha256": "a3308a979ad9c65499fe3d7750e37494ea4c90ab14c7b1278d84550c445be626",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-07-24",
+  "reviewedOn": "2026-07-29",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested annocat/cache-build-performance fork commit. The release artifact keeps explicit transcript caches read-only during annotation, memory-maps indexed FASTA files during transcript-cache construction, and fully verifies staged transcript caches before installation. It also owns raw BGZF range framing, safe trailing-row handling, chromosome filtering, sorted multi-artifact merging, bounded stdin streaming, bounded ordered supplementary parsing, direct configurable-field serialization, overlapped ordered OSA compression, fast shard verification, manifest-backed chromosome shards, transcript-cache build locking, single-pass structured output beside annotated VCF, and genomic-order supplementary queries parallelized across independent sources."
+  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP chunks, and record-list lookup for explicitly declared multi-record sources such as dbNSFP while ordinary sources retain deterministic first-match lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact."
 }

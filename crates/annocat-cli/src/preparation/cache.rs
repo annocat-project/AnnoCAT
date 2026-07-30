@@ -1,11 +1,64 @@
 use super::checkpoint::{
-    CHECKPOINT_SCHEMA_VERSION, CheckpointState, PreparationCheckpoint, PreparationIdentity,
-    RestartDecision, ShardPaths, read_checkpoint, write_checkpoint,
+    CHECKPOINT_SCHEMA_VERSION, CacheFormat, CheckpointState, PreparationCheckpoint,
+    PreparationIdentity, RestartDecision, ShardPaths, read_checkpoint, write_checkpoint,
 };
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifiedCacheCompatibility {
+    Missing,
+    Ready,
+    RebuildRequired,
+}
+
+pub(crate) fn verified_cache_compatibility(
+    paths: &ShardPaths,
+    expected: &PreparationIdentity,
+) -> VerifiedCacheCompatibility {
+    if !paths.final_directory.is_dir() {
+        return VerifiedCacheCompatibility::Missing;
+    }
+    let Ok(checkpoint) = read_checkpoint(&paths.verification()) else {
+        return VerifiedCacheCompatibility::RebuildRequired;
+    };
+    if checkpoint.state != CheckpointState::Verified {
+        return VerifiedCacheCompatibility::RebuildRequired;
+    }
+    let Ok(format) = checkpoint.identity.cache_format() else {
+        return VerifiedCacheCompatibility::RebuildRequired;
+    };
+    if required_nonempty_file(&paths.final_data(format)).is_err()
+        || paths
+            .final_index(format)
+            .is_some_and(|path| required_nonempty_file(&path).is_err())
+    {
+        return VerifiedCacheCompatibility::RebuildRequired;
+    }
+    if paths.cache_contract().is_file() {
+        let Ok(installed) = crate::cache_contract::read(&paths.cache_contract()) else {
+            return VerifiedCacheCompatibility::RebuildRequired;
+        };
+        let Ok(checkpoint_contract) = cache_contract_manifest(&checkpoint.identity) else {
+            return VerifiedCacheCompatibility::RebuildRequired;
+        };
+        let Ok(expected) = cache_contract_manifest(expected) else {
+            return VerifiedCacheCompatibility::RebuildRequired;
+        };
+        return if installed.compatibility_with(&checkpoint_contract)
+            == crate::cache_contract::CacheCompatibilityDecision::Ready
+            && installed.compatibility_with(&expected)
+                == crate::cache_contract::CacheCompatibilityDecision::Ready
+        {
+            VerifiedCacheCompatibility::Ready
+        } else {
+            VerifiedCacheCompatibility::RebuildRequired
+        };
+    }
+    VerifiedCacheCompatibility::RebuildRequired
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,39 +77,12 @@ pub(super) fn restart_decision(
     paths: &ShardPaths,
     identity: &PreparationIdentity,
 ) -> RestartDecision {
-    if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
-        if checkpoint.state != CheckpointState::Verified {
+    match verified_cache_compatibility(paths, identity) {
+        VerifiedCacheCompatibility::Ready => return RestartDecision::AlreadyVerified,
+        VerifiedCacheCompatibility::RebuildRequired => {
             return RestartDecision::StaleIdentity;
         }
-        if paths.cache_contract().is_file() {
-            let Ok(installed) = crate::cache_contract::read(&paths.cache_contract()) else {
-                return RestartDecision::StaleIdentity;
-            };
-            let expected = cache_contract_manifest(identity);
-            return if installed.compatibility_with(&expected)
-                == crate::cache_contract::CacheCompatibilityDecision::Ready
-            {
-                RestartDecision::AlreadyVerified
-            } else {
-                RestartDecision::StaleIdentity
-            };
-        }
-        // A verified schema-v1 cache predates the compatibility sidecar. Preserve
-        // known OSA-v1 resources until their source-specific verifier can prove and
-        // atomically publish cache-contract-v2.json. Do not rebuild merely because
-        // the fork moved, and do not silently bless an unknown legacy adapter.
-        if checkpoint.identity != *identity {
-            return RestartDecision::StaleIdentity;
-        }
-        return match crate::cache_contract::classify_legacy_manifest(
-            &identity.resource_id,
-            identity.osa_schema_version,
-        ) {
-            crate::cache_contract::CacheCompatibilityDecision::VerifyAndUpgradeManifest => {
-                RestartDecision::AlreadyVerified
-            }
-            _ => RestartDecision::StaleIdentity,
-        };
+        VerifiedCacheCompatibility::Missing => {}
     }
     match read_checkpoint(&paths.checkpoint()) {
         Ok(checkpoint) if checkpoint.identity == *identity => {
@@ -67,50 +93,73 @@ pub(super) fn restart_decision(
     }
 }
 
-pub(super) fn restart_decision_with_legacy_upgrade(
-    fastvep_executable: &Path,
+pub(crate) fn effective_cache_format(
     paths: &ShardPaths,
-    identity: &PreparationIdentity,
-) -> RestartDecision {
-    let decision = restart_decision(paths, identity);
-    if decision == RestartDecision::AlreadyVerified
-        && !paths.cache_contract().is_file()
-        && upgrade_legacy_cache_contract(fastvep_executable, paths, identity).is_err()
+    resource_id: &str,
+) -> Result<CacheFormat, String> {
+    let mut selected = None;
+    if let Some(shards) = paths.final_directory.parent()
+        && shards.is_dir()
     {
-        return RestartDecision::StaleIdentity;
+        for entry in fs::read_dir(shards)
+            .map_err(|error| format!("cannot inspect {resource_id} cache shards: {error}"))?
+        {
+            let directory = entry
+                .map_err(|error| format!("cannot inspect {resource_id} cache shard: {error}"))?
+                .path();
+            if let Some(format) = verified_shard_format(&directory, resource_id) {
+                select_cache_format(&mut selected, format, resource_id)?;
+            }
+        }
     }
-    decision
+    if let Ok(checkpoint) = read_checkpoint(&paths.checkpoint())
+        && checkpoint.identity.resource_id == resource_id
+        && let Ok(format) = checkpoint.identity.cache_format()
+    {
+        select_cache_format(&mut selected, format, resource_id)?;
+    }
+    if required_nonempty_file(paths.source_part()).is_ok()
+        && let Ok(bytes) = fs::read(paths.source_part_identity())
+        && let Ok(identity) = serde_json::from_slice::<PreparationIdentity>(&bytes)
+        && identity.resource_id == resource_id
+        && let Ok(format) = identity.cache_format()
+    {
+        select_cache_format(&mut selected, format, resource_id)?;
+    }
+    selected.map_or_else(|| CacheFormat::preferred_for_resource(resource_id), Ok)
 }
 
-fn upgrade_legacy_cache_contract(
-    fastvep_executable: &Path,
-    paths: &ShardPaths,
-    expected: &PreparationIdentity,
+fn verified_shard_format(directory: &Path, resource_id: &str) -> Option<CacheFormat> {
+    let checkpoint = read_checkpoint(&directory.join("verified.json")).ok()?;
+    if checkpoint.state != CheckpointState::Verified
+        || checkpoint.identity.resource_id != resource_id
+    {
+        return None;
+    }
+    let format = checkpoint.identity.cache_format().ok()?;
+    required_nonempty_file(&directory.join(format.data_file_name())).ok()?;
+    if let Some(index) = format.index_file_name() {
+        required_nonempty_file(&directory.join(index)).ok()?;
+    }
+    let contract = crate::cache_contract::read(&directory.join("cache-contract-v2.json")).ok()?;
+    (contract.cache_contract.osa_schema_version == format.schema_version()
+        && contract.cache_contract.reader_compatibility == format.reader_compatibility()
+        && contract.cache_contract.builder_contract == format.builder_contract())
+    .then_some(format)
+}
+
+fn select_cache_format(
+    selected: &mut Option<CacheFormat>,
+    format: CacheFormat,
+    resource_id: &str,
 ) -> Result<(), String> {
-    let checkpoint = read_checkpoint(&paths.verification())?;
-    if checkpoint.state != CheckpointState::Verified || checkpoint.identity != *expected {
-        return Err("legacy cache checkpoint does not match the expected source identity".into());
+    if selected.is_some_and(|current| current != format) {
+        return Err(format!(
+            "{resource_id} has mixed OSA1 and OSA2 cache state; cancel the partial installation and rebuild it"
+        ));
     }
-    crate::cache_contract::prove_legacy_source_contract(
-        &expected.resource_id,
-        &expected.release,
-        &expected.assembly,
-        &expected.selected_schema,
-        expected.osa_schema_version,
-    )?;
-    required_nonempty_file(&paths.final_osa())?;
-    required_nonempty_file(&paths.final_index())?;
-    let verification = verify_osa(fastvep_executable, &paths.final_osa(), expected)?;
-    if verification.record_count != checkpoint.parsed_records {
-        return Err("legacy cache record count differs from its verified checkpoint".into());
-    }
-    let mut manifest = cache_contract_manifest(expected);
-    manifest.builder_provenance = crate::cache_contract::BuilderProvenance {
-        repository: "unknown-legacy".into(),
-        commit: "unknown-legacy".into(),
-        binary_sha256: "unknown-legacy".into(),
-    };
-    crate::cache_contract::write_atomic(&paths.cache_contract(), &manifest)
+    *selected = Some(format);
+    Ok(())
 }
 
 pub fn initialize_partial(paths: &ShardPaths, identity: PreparationIdentity) -> Result<(), String> {
@@ -138,18 +187,20 @@ pub fn initialize_partial(paths: &ShardPaths, identity: PreparationIdentity) -> 
     }
     fs::create_dir_all(&paths.partial_directory)
         .map_err(|error| format!("cannot create shard staging directory: {error}"))?;
+    let manifest = cache_contract_manifest(&identity)?;
     write_checkpoint(
         &paths.checkpoint(),
         &PreparationCheckpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
-            identity,
+            identity: identity.clone(),
             state: CheckpointState::Preparing,
             compressed_bytes_read: 0,
             parsed_records: 0,
             prepared_bytes: 0,
             prepared_index_bytes: 0,
         },
-    )
+    )?;
+    crate::cache_contract::write_atomic(&paths.partial_cache_contract(), &manifest)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -165,8 +216,12 @@ pub fn promote_verified(
             identity.expected_compressed_bytes
         ));
     }
-    let osa_bytes = required_nonempty_file(&paths.partial_osa())?;
-    let index_bytes = required_nonempty_file(&paths.partial_index())?;
+    let format = identity.cache_format()?;
+    let osa_bytes = required_nonempty_file(&paths.partial_data(format))?;
+    let index_bytes = match paths.partial_index(format) {
+        Some(index) => required_nonempty_file(&index)?,
+        None => 0,
+    };
     if parsed_records == 0 {
         return Err("refusing to promote an empty prepared chromosome".into());
     }
@@ -183,7 +238,7 @@ pub fn promote_verified(
     write_checkpoint(&paths.partial_directory.join("verified.json"), &verified)?;
     crate::cache_contract::write_atomic(
         &paths.partial_cache_contract(),
-        &cache_contract_manifest(&verified.identity),
+        &cache_contract_manifest(&verified.identity)?,
     )?;
     fs::create_dir_all(
         paths
@@ -236,7 +291,9 @@ pub(super) fn verify_partial_osa(
     paths: &ShardPaths,
     identity: &PreparationIdentity,
 ) -> Result<SaVerificationReport, String> {
-    let result = verify_osa(fastvep_executable, &paths.partial_osa(), identity);
+    let result = identity
+        .cache_format()
+        .and_then(|format| verify_osa(fastvep_executable, &paths.partial_data(format), identity));
     if result.is_err() {
         super::remove_incomplete_outputs(paths);
     }
@@ -314,8 +371,8 @@ pub(super) fn required_nonempty_file(path: &Path) -> Result<u64, String> {
 
 fn cache_contract_manifest(
     identity: &PreparationIdentity,
-) -> crate::cache_contract::CacheContractManifest {
-    crate::cache_contract::CacheContractManifest::current(
+) -> Result<crate::cache_contract::CacheContractManifest, String> {
+    Ok(crate::cache_contract::CacheContractManifest::current(
         crate::fastvep::pinned_builder_provenance(),
         &identity.resource_id,
         &identity.release,
@@ -325,7 +382,7 @@ fn cache_contract_manifest(
         identity.source_etag.as_deref(),
         identity.source_last_modified.as_deref(),
         &identity.selected_schema,
-        identity.osa_schema_version,
+        identity.cache_format()?,
         Some(&identity.fastvep_commit),
-    )
+    ))
 }

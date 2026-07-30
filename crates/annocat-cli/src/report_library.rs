@@ -11,6 +11,8 @@ struct PackageManifest {
     package_format: String,
     package_version: u32,
     schema_version: u32,
+    #[serde(default)]
+    representative_selection_contract: Option<String>,
     run_id: String,
     display_name: String,
     completed_at: String,
@@ -167,6 +169,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     let local_manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": manifest.schema_version,
+        "representativeSelectionContract": manifest.representative_selection_contract,
         "state": "completed",
         "runId": manifest.run_id,
         "name": name,
@@ -370,7 +373,7 @@ mod tests {
         .unwrap();
         fs::write(
             run.join("manifest.json"),
-            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"state":"completed","runId":"run-import","name":"Import fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":1,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
+            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"representativeSelectionContract":"allele-gene-severity-v1","state":"completed","runId":"run-import","name":"Import fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":1,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
         )
         .unwrap();
         let package_path = root.join("Import-fixture--20260716--import.zip");
@@ -379,6 +382,13 @@ mod tests {
         assert_eq!(imported.run_id, "run-import");
         assert!(imported.directory.join("manifest.json").is_file());
         assert!(imported.directory.join("variants.parquet").is_file());
+        let imported_manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(imported.directory.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            imported_manifest["representativeSelectionContract"],
+            "allele-gene-severity-v1"
+        );
         assert!(package_path.is_file(), "source ZIP must remain untouched");
         assert!(!library.join(".import-run-import.partial").exists());
         let repeated = import(&package_path, &library).unwrap();

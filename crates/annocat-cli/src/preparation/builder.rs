@@ -275,6 +275,8 @@ fn command(
         .arg(output_base)
         .arg("--assembly")
         .arg(&request.identity.assembly)
+        .arg("--format")
+        .arg(request.identity.cache_format()?.builder_argument())
         .arg("--no-progress")
         .stdin(stdin)
         .stdout(Stdio::null())
@@ -313,15 +315,19 @@ fn completed_result(
     request: &StreamingBuildRequest<'_>,
     compressed_bytes_read: u64,
 ) -> Result<StreamingBuildResult, String> {
-    let result = required_nonempty_file(&request.paths.partial_osa()).and_then(|osa_bytes| {
-        required_nonempty_file(&request.paths.partial_index()).map(|index_bytes| {
-            StreamingBuildResult {
-                compressed_bytes_read,
-                prepared_osa_bytes: osa_bytes,
-                prepared_index_bytes: index_bytes,
-            }
-        })
-    });
+    let format = request.identity.cache_format()?;
+    let result =
+        required_nonempty_file(&request.paths.partial_data(format)).and_then(|osa_bytes| {
+            request
+                .paths
+                .partial_index(format)
+                .map_or(Ok(0), |index| required_nonempty_file(&index))
+                .map(|index_bytes| StreamingBuildResult {
+                    compressed_bytes_read,
+                    prepared_osa_bytes: osa_bytes,
+                    prepared_index_bytes: index_bytes,
+                })
+        });
     if result.is_err() {
         remove_incomplete_outputs(request.paths);
     }
@@ -358,7 +364,11 @@ fn wait_for_file_builder(
             None => {}
         }
         if last_report.elapsed() >= Duration::from_secs(1) {
-            let size = fs::metadata(request.paths.partial_osa())
+            let size = request
+                .identity
+                .cache_format()
+                .ok()
+                .and_then(|format| fs::metadata(request.paths.partial_data(format)).ok())
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             let elapsed = last_report.elapsed().as_secs_f64();

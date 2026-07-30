@@ -126,6 +126,9 @@ struct SourceBinding {
     release: String,
     assembly: String,
     selected_schema: String,
+    cache_format: String,
+    osa_schema_version: u16,
+    cache_builder_contract: String,
     chromosomes: Vec<String>,
 }
 
@@ -1233,7 +1236,7 @@ fn execute_vcf_review(
     } else {
         "vcf-header"
     };
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
         "state": "completed",
@@ -1245,6 +1248,7 @@ fn execute_vcf_review(
         "assemblySource": assembly_source,
         "variantCount": canonical.rows,
         "vcfRecordCount": canonical.records,
+        "excludedAuxiliaryRecordCount": canonical.excluded_auxiliary_records,
         "alleleCount": canonical.rows,
         "sampleNames": canonical.samples,
         "consequenceCount": 0,
@@ -1270,6 +1274,13 @@ fn execute_vcf_review(
         "sourcesWithoutObservedEvidence": [],
         "inputIdentityPreserved": true,
     });
+    manifest
+        .as_object_mut()
+        .ok_or("completed manifest is not an object")?
+        .insert(
+            "representativeSelectionContract".into(),
+            super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
+        );
     let _ = fs::remove_file(staging.join("annotation-state.json"));
     let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
@@ -1459,47 +1470,52 @@ fn execute_recovery(
         bindings
     };
 
-    set_phase("recovery-merge", "Joining recovered and continued output");
     let output = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
-    let merged_vcf = staging.join("annotated.recovered.vcf");
-    let merged_structured = staging.join("fastvep.recovered.ndjson");
-    crate::annotation_recovery::copy_prefix(
-        partial_vcf,
-        recovered_vcf.valid_bytes,
-        &merged_vcf,
-        |progress| {
-            update_recovery_progress(
-                "recovery-merge",
-                "Joining annotated VCF",
-                &progress,
-                0.0,
-                50.0,
-            )
-        },
-    )?;
-    if remaining_records > 0 {
-        crate::annotation_recovery::append_vcf_records(&continuation_vcf, &merged_vcf)?;
+    let complete_outputs = remaining_records == 0
+        && recovered_vcf.valid_bytes == recovered_vcf.total_bytes
+        && recovered_structured.valid_bytes == recovered_structured.total_bytes;
+    if !complete_outputs {
+        set_phase("recovery-merge", "Joining recovered and continued output");
+        let merged_vcf = staging.join("annotated.recovered.vcf");
+        let merged_structured = staging.join("fastvep.recovered.ndjson");
+        crate::annotation_recovery::copy_prefix(
+            partial_vcf,
+            recovered_vcf.valid_bytes,
+            &merged_vcf,
+            |progress| {
+                update_recovery_progress(
+                    "recovery-merge",
+                    "Joining annotated VCF",
+                    &progress,
+                    0.0,
+                    50.0,
+                )
+            },
+        )?;
+        if remaining_records > 0 {
+            crate::annotation_recovery::append_vcf_records(&continuation_vcf, &merged_vcf)?;
+        }
+        crate::annotation_recovery::copy_prefix(
+            partial_structured,
+            recovered_structured.valid_bytes,
+            &merged_structured,
+            |progress| {
+                update_recovery_progress(
+                    "recovery-merge",
+                    "Joining structured output",
+                    &progress,
+                    50.0,
+                    50.0,
+                )
+            },
+        )?;
+        if remaining_records > 0 {
+            crate::annotation_recovery::append_file(&continuation_structured, &merged_structured)?;
+        }
+        replace_file(&merged_vcf, &output)?;
+        replace_file(&merged_structured, &structured_output)?;
     }
-    crate::annotation_recovery::copy_prefix(
-        partial_structured,
-        recovered_structured.valid_bytes,
-        &merged_structured,
-        |progress| {
-            update_recovery_progress(
-                "recovery-merge",
-                "Joining structured output",
-                &progress,
-                50.0,
-                50.0,
-            )
-        },
-    )?;
-    if remaining_records > 0 {
-        crate::annotation_recovery::append_file(&continuation_structured, &merged_structured)?;
-    }
-    replace_file(&merged_vcf, &output)?;
-    replace_file(&merged_structured, &structured_output)?;
     let _ = fs::remove_file(&remaining_input);
     let _ = fs::remove_file(&continuation_vcf);
     let _ = fs::remove_file(&continuation_structured);
@@ -1569,7 +1585,14 @@ fn run_fastvep(
         .arg(super::reference::fasta_path(resources))
         .arg("--transcript-cache")
         .arg(super::transcript::cache_path(resources))
-        .args(["--symbol", "--hgvs", "--canonical", "--no-progress"]);
+        .args([
+            "--symbol",
+            "--hgvs",
+            "--canonical",
+            "--no-progress",
+            "--buffer-size",
+            "4096",
+        ]);
     if let Some(directory) = provider_directory.as_ref() {
         command.arg("--sa-dir").arg(directory);
     }
@@ -1634,7 +1657,16 @@ fn run_fastvep(
                         / snapshot.records_per_second)
                         .ceil() as u64
                 });
-            current.detail = annotation_progress_detail(&current);
+            if total_records > 0 && current.completed_records >= total_records {
+                current.phase = "finalizing-annotation";
+                current.chromosome = None;
+                current.throughput_bytes_per_second = 0.0;
+                current.throughput_records_per_second = 0.0;
+                current.eta_seconds = None;
+                current.detail = "fastVEP is finishing annotation output".into();
+            } else {
+                current.detail = annotation_progress_detail(&current);
+            }
         }
         if last_checkpoint.elapsed() >= Duration::from_secs(1) {
             let _ = persist_current_checkpoint(staging, request, name, run_id);
@@ -1648,6 +1680,9 @@ fn run_fastvep(
             None => std::thread::sleep(Duration::from_millis(150)),
         }
     };
+    if status.success() {
+        set_phase("verifying", "Preparing fastVEP output checks");
+    }
     if let Some(directory) = provider_directory.as_ref() {
         let _ = fs::remove_dir_all(directory);
     }
@@ -1882,12 +1917,31 @@ fn finalize_outputs(
         structured_input_bytes,
         structured_result_bytes,
     ));
-    if structured.records != input_summary.records {
+    if structured.records != canonical.records
+        || structured.excluded_auxiliary_records != canonical.excluded_auxiliary_records
+        || canonical
+            .records
+            .saturating_add(canonical.excluded_auxiliary_records)
+            != input_summary.records
+    {
         return fail_staging(
             staging,
             format!(
-                "fastVEP structured output record count changed from {} to {}",
-                input_summary.records, structured.records
+                "report record counts do not align: {} input, {} report, {} excluded auxiliary; structured has {} report and {} excluded auxiliary",
+                input_summary.records,
+                canonical.records,
+                canonical.excluded_auxiliary_records,
+                structured.records,
+                structured.excluded_auxiliary_records
+            ),
+        );
+    }
+    if canonical.excluded_auxiliary_records > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} decoy or viral records from report tables",
+                canonical.excluded_auxiliary_records
             ),
         );
     }
@@ -1946,7 +2000,7 @@ fn finalize_outputs(
     let mut manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
-        "fastvepStructuredFormat": "ndjson-v1",
+        "fastvepStructuredFormat": "ndjson-v2",
         "state": "completed",
         "reportKind": request.report_kind(),
         "runId": run_id,
@@ -1955,6 +2009,7 @@ fn finalize_outputs(
         "assembly": "GRCh38",
         "variantCount": canonical.rows,
         "vcfRecordCount": output_summary.records,
+        "excludedAuxiliaryRecordCount": canonical.excluded_auxiliary_records,
         "alleleCount": output_summary.alternate_alleles,
         "csqEntryCount": output_summary.csq_entries,
         "structuredRecordCount": structured.records,
@@ -1985,6 +2040,13 @@ fn finalize_outputs(
         "inputIdentityVerified": true,
         "observedSourceValueCounts": structured.source_value_counts,
     });
+    manifest
+        .as_object_mut()
+        .ok_or("completed manifest is not an object")?
+        .insert(
+            "representativeSelectionContract".into(),
+            super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
+        );
     if let Some((bytes, sha256)) = annotated_vcf {
         let object = manifest
             .as_object_mut()
@@ -2086,7 +2148,7 @@ fn update_recovery_progress(
         if phase == "recovery-scan" {
             current.completed_records = progress.completed_records;
         }
-        current.chromosome = progress.chromosome.clone().or(current.chromosome.take());
+        current.chromosome = progress.chromosome.clone();
         current.percent = (percent_start + ratio.clamp(0.0, 1.0) * percent_span).clamp(0.0, 100.0);
         current.detail = if let Some(chromosome) = current.chromosome.as_deref() {
             format!("{label} · Chromosome {chromosome}")
@@ -2472,11 +2534,31 @@ fn resolve_source_root(resources: &Path, source_id: &str) -> Result<PathBuf, Str
                     .join("chrall")
                     .join("source.osa")
                     .is_file()
+                || path
+                    .join("shards")
+                    .join("chrall")
+                    .join("source.osa2")
+                    .is_file()
         })
         .collect::<Vec<_>>();
     candidates.sort();
-    candidates.pop().ok_or_else(|| {
-        format!("{source_id} is selected but has no complete verified fastSA provider")
+    let chromosomes = crate::resource_chromosomes(source_id);
+    let mut issue = None;
+    for candidate in candidates.into_iter().rev() {
+        let status =
+            super::preparation::verified_storage_status(source_id, &candidate, &chromosomes);
+        if status.state == "ready" {
+            return Ok(candidate);
+        }
+        if issue.is_none() && status.state == "rebuild-required" {
+            issue = Some(status.state);
+        }
+    }
+    Err(match issue.as_deref() {
+        Some("rebuild-required") => {
+            format!("{source_id} is selected but its cache must be rebuilt in Data Sources")
+        }
+        _ => format!("{source_id} is selected but has no complete verified fastSA provider"),
     })
 }
 
@@ -2568,27 +2650,37 @@ fn compose_source_provider(
         if checkpoint.state != super::preparation::CheckpointState::Verified
             || checkpoint.identity.resource_id != source_id
             || checkpoint.identity.assembly != "GRCh38"
-            || checkpoint.identity.osa_schema_version != 1
         {
             return Err(format!(
                 "{source_id} chromosome {} verification identity is invalid",
                 entry.chromosome
             ));
         }
-        let index = shard_directory.join("source.osa.idx");
+        let (format, builder_contract) =
+            provider_cache_contract(shard_directory, &checkpoint, source_id)?;
+        let expected_osa = shard_directory.join(format.data_file_name());
+        if osa != expected_osa {
+            return Err(format!(
+                "{source_id} chromosome {} shard filename does not match its verified cache format",
+                entry.chromosome
+            ));
+        }
         require_nonempty(&osa, source_id)?;
-        require_nonempty(&index, source_id)?;
         let destination_relative = PathBuf::from(source_id)
             .join("shards")
             .join(format!("chr{}", entry.chromosome))
-            .join("source.osa");
+            .join(format.data_file_name());
         let destination_osa = destination.join(&destination_relative);
         fs::create_dir_all(destination_osa.parent().expect("provider shard has parent"))
             .map_err(|error| format!("cannot create {source_id} provider directory: {error}"))?;
         fs::hard_link(&osa, &destination_osa)
             .map_err(|error| format!("cannot link verified {source_id} shard: {error}"))?;
-        fs::hard_link(&index, destination_osa.with_extension("osa.idx"))
-            .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+        if let Some(index_name) = format.index_file_name() {
+            let index = shard_directory.join(index_name);
+            require_nonempty(&index, source_id)?;
+            fs::hard_link(&index, destination_osa.parent().unwrap().join(index_name))
+                .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+        }
         provider_shards.push(serde_json::json!({
             "chromosome": entry.chromosome,
             "file": destination_relative.to_string_lossy().replace('\\', "/"),
@@ -2596,7 +2688,9 @@ fn compose_source_provider(
         match binding.as_mut() {
             Some(binding)
                 if binding.release != checkpoint.identity.release
-                    || binding.selected_schema != checkpoint.identity.selected_schema =>
+                    || binding.selected_schema != checkpoint.identity.selected_schema
+                    || binding.osa_schema_version != format.schema_version()
+                    || binding.cache_builder_contract != builder_contract =>
             {
                 return Err(format!(
                     "{source_id} verified shards have inconsistent identities"
@@ -2609,6 +2703,9 @@ fn compose_source_provider(
                     release: checkpoint.identity.release,
                     assembly: checkpoint.identity.assembly,
                     selected_schema: checkpoint.identity.selected_schema,
+                    cache_format: format.builder_argument().into(),
+                    osa_schema_version: format.schema_version(),
+                    cache_builder_contract: builder_contract,
                     chromosomes: vec![entry.chromosome],
                 });
             }
@@ -2632,8 +2729,6 @@ fn compose_single_provider(
     source_id: &str,
 ) -> Result<SourceBinding, String> {
     let shard = source_root.join("shards").join("chrall");
-    let osa = shard.join("source.osa");
-    let index = shard.join("source.osa.idx");
     let checkpoint: super::preparation::PreparationCheckpoint = serde_json::from_slice(
         &fs::read(shard.join("verified.json"))
             .map_err(|_| format!("{source_id} provider is not verified"))?,
@@ -2643,24 +2738,69 @@ fn compose_single_provider(
         || checkpoint.identity.resource_id != source_id
         || checkpoint.identity.assembly != "GRCh38"
         || checkpoint.identity.chromosome != "all"
-        || checkpoint.identity.osa_schema_version != 1
     {
         return Err(format!("{source_id} verification identity is invalid"));
     }
+    let (format, builder_contract) = provider_cache_contract(&shard, &checkpoint, source_id)?;
+    let osa = shard.join(format.data_file_name());
     require_nonempty(&osa, source_id)?;
-    require_nonempty(&index, source_id)?;
-    let destination_osa = destination.join(format!("{source_id}.osa"));
+    let destination_osa = destination.join(format!("{source_id}.{}", format.builder_argument()));
     fs::hard_link(&osa, &destination_osa)
         .map_err(|error| format!("cannot link verified {source_id} provider: {error}"))?;
-    fs::hard_link(&index, destination.join(format!("{source_id}.osa.idx")))
-        .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+    if let Some(index_name) = format.index_file_name() {
+        let index = shard.join(index_name);
+        require_nonempty(&index, source_id)?;
+        fs::hard_link(&index, destination.join(format!("{source_id}.osa.idx")))
+            .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+    }
     Ok(SourceBinding {
         resource_id: source_id.into(),
         release: checkpoint.identity.release,
         assembly: checkpoint.identity.assembly,
         selected_schema: checkpoint.identity.selected_schema,
+        cache_format: format.builder_argument().into(),
+        osa_schema_version: format.schema_version(),
+        cache_builder_contract: builder_contract,
         chromosomes: vec!["all".into()],
     })
+}
+
+fn provider_cache_contract(
+    shard_directory: &Path,
+    checkpoint: &super::preparation::PreparationCheckpoint,
+    source_id: &str,
+) -> Result<(super::preparation::CacheFormat, String), String> {
+    let format = checkpoint.identity.cache_format()?;
+    let contract_path = shard_directory.join("cache-contract-v2.json");
+    if !contract_path.is_file() {
+        return Err(format!(
+            "{source_id} cache needs a one-time compatibility upgrade in Data Sources"
+        ));
+    }
+    let manifest = crate::cache_contract::read(&contract_path)?;
+    if manifest.cache_contract.osa_schema_version != format.schema_version()
+        || manifest.cache_contract.reader_compatibility != format.reader_compatibility()
+        || manifest.cache_contract.builder_contract != format.builder_contract()
+        || annocat_core::source_catalog::adapter_contract(source_id)
+            != Some(manifest.cache_contract.adapter_contract.as_str())
+        || manifest.cache_contract.selected_field_schema != checkpoint.identity.selected_schema
+        || manifest.source_artifact.resource_id != source_id
+        || manifest.source_artifact.release != checkpoint.identity.release
+        || manifest.source_artifact.assembly != checkpoint.identity.assembly
+        || manifest.source_artifact.chromosome != checkpoint.identity.chromosome
+        || manifest.source_artifact.artifact_id
+            != annocat_core::source_catalog::artifact_identity(
+                source_id,
+                &checkpoint.identity.release,
+                &checkpoint.identity.assembly,
+                &checkpoint.identity.chromosome,
+            )
+    {
+        return Err(format!(
+            "{source_id} cache contract does not match its verified checkpoint"
+        ));
+    }
+    Ok((format, manifest.cache_contract.builder_contract))
 }
 
 fn require_nonempty(path: &Path, source_id: &str) -> Result<(), String> {
@@ -2936,23 +3076,24 @@ mod tests {
         fs::create_dir_all(&shard).unwrap();
         fs::write(shard.join("source.osa"), b"osa fixture").unwrap();
         fs::write(shard.join("source.osa.idx"), b"index fixture").unwrap();
+        let identity = super::super::preparation::PreparationIdentity {
+            resource_id: "clinvar".into(),
+            release: "20260715".into(),
+            assembly: "GRCh38".into(),
+            chromosome: "all".into(),
+            source_url: "https://example.invalid/clinvar.vcf.gz".into(),
+            expected_compressed_bytes: 10,
+            source_etag: Some("fixture".into()),
+            source_last_modified: None,
+            selected_schema: "clinvar-20260715".into(),
+            fastvep_commit: "fixture".into(),
+            osa_schema_version: 1,
+        };
         fs::write(
             shard.join("verified.json"),
             serde_json::to_vec(&super::super::preparation::PreparationCheckpoint {
                 schema_version: 1,
-                identity: super::super::preparation::PreparationIdentity {
-                    resource_id: "clinvar".into(),
-                    release: "20260715".into(),
-                    assembly: "GRCh38".into(),
-                    chromosome: "all".into(),
-                    source_url: "https://example.invalid/clinvar.vcf.gz".into(),
-                    expected_compressed_bytes: 10,
-                    source_etag: Some("fixture".into()),
-                    source_last_modified: None,
-                    selected_schema: "clinvar-20260715".into(),
-                    fastvep_commit: "fixture".into(),
-                    osa_schema_version: 1,
-                },
+                identity: identity.clone(),
                 state: super::super::preparation::CheckpointState::Verified,
                 compressed_bytes_read: 10,
                 parsed_records: 1,
@@ -2962,16 +3103,173 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        crate::cache_contract::write_atomic(
+            &shard.join("cache-contract-v2.json"),
+            &crate::cache_contract::CacheContractManifest::current(
+                crate::fastvep::pinned_builder_provenance(),
+                &identity.resource_id,
+                &identity.release,
+                &identity.assembly,
+                &identity.chromosome,
+                identity.expected_compressed_bytes,
+                identity.source_etag.as_deref(),
+                identity.source_last_modified.as_deref(),
+                &identity.selected_schema,
+                super::super::preparation::CacheFormat::OsaV1,
+                Some(&identity.fastvep_commit),
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("clinvar")
+                .join("20260715")
+                .join("clinvar.osa-shards.json"),
+            br#"{"schemaVersion":1,"shards":[{"chromosome":"all","file":"shards/chrall/source.osa"}]}"#,
+        )
+        .unwrap();
+        let newer_shard = root
+            .join("clinvar")
+            .join("20260716")
+            .join("shards")
+            .join("chrall");
+        fs::create_dir_all(&newer_shard).unwrap();
+        fs::write(newer_shard.join("source.osa"), b"newer legacy osa").unwrap();
+        fs::write(newer_shard.join("source.osa.idx"), b"newer index").unwrap();
+        let mut newer_identity = identity.clone();
+        newer_identity.release = "20260716".into();
+        newer_identity.selected_schema = "clinvar-20260716".into();
+        fs::write(
+            newer_shard.join("verified.json"),
+            serde_json::to_vec(&super::super::preparation::PreparationCheckpoint {
+                schema_version: 1,
+                identity: newer_identity,
+                state: super::super::preparation::CheckpointState::Verified,
+                compressed_bytes_read: 10,
+                parsed_records: 1,
+                prepared_bytes: 16,
+                prepared_index_bytes: 11,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_source_root(&root, "clinvar").unwrap(),
+            root.join("clinvar").join("20260715")
+        );
 
         let (directory, bindings) =
             compose_provider_set(&root, "run-fixture", &["clinvar".into()]).unwrap();
         let directory = directory.unwrap();
         assert_eq!(bindings[0].release, "20260715");
         assert_eq!(bindings[0].chromosomes, ["all"]);
-        assert!(directory.join("clinvar.osa").is_file());
-        assert_eq!(
-            fs::read(directory.join("clinvar.osa")).unwrap(),
-            b"osa fixture"
+        let provider = directory
+            .join("clinvar")
+            .join("shards")
+            .join("chrall")
+            .join("source.osa");
+        assert!(provider.is_file());
+        assert_eq!(fs::read(provider).unwrap(), b"osa fixture");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn provider_set_links_verified_osa2_without_an_index() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-provider-set-osa2-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_root = root.join("phylop").join("hg38");
+        let chromosomes = crate::resource_chromosomes("phylop");
+        let mut manifest_shards = Vec::new();
+        for chromosome in &chromosomes {
+            let shard = source_root.join("shards").join(format!("chr{chromosome}"));
+            fs::create_dir_all(&shard).unwrap();
+            fs::write(shard.join("source.osa2"), b"osa2 fixture").unwrap();
+            let identity = super::super::preparation::PreparationIdentity {
+                resource_id: "phylop".into(),
+                release: "hg38".into(),
+                assembly: "GRCh38".into(),
+                chromosome: chromosome.clone(),
+                source_url: "https://example.invalid/phylop.bw".into(),
+                expected_compressed_bytes: 10,
+                source_etag: Some("fixture".into()),
+                source_last_modified: None,
+                selected_schema: "ucsc-hg38-phylop100way-per-base".into(),
+                fastvep_commit: "fixture".into(),
+                osa_schema_version: 2,
+            };
+            fs::write(
+                shard.join("verified.json"),
+                serde_json::to_vec(&super::super::preparation::PreparationCheckpoint {
+                    schema_version: 1,
+                    identity,
+                    state: super::super::preparation::CheckpointState::Verified,
+                    compressed_bytes_read: 10,
+                    parsed_records: 1,
+                    prepared_bytes: 12,
+                    prepared_index_bytes: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            crate::cache_contract::write_atomic(
+                &shard.join("cache-contract-v2.json"),
+                &crate::cache_contract::CacheContractManifest::current(
+                    crate::fastvep::pinned_builder_provenance(),
+                    "phylop",
+                    "hg38",
+                    "GRCh38",
+                    chromosome,
+                    10,
+                    Some("fixture"),
+                    None,
+                    "ucsc-hg38-phylop100way-per-base",
+                    super::super::preparation::CacheFormat::OsaV2,
+                    Some("fixture"),
+                ),
+            )
+            .unwrap();
+            manifest_shards.push(serde_json::json!({
+                "chromosome": chromosome,
+                "file": format!("shards/chr{chromosome}/source.osa2"),
+            }));
+        }
+        fs::write(
+            source_root.join("phylop.osa-shards.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "shards": manifest_shards,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (directory, bindings) =
+            compose_provider_set(&root, "run-osa2-fixture", &["phylop".into()]).unwrap();
+        let directory = directory.unwrap();
+        assert_eq!(bindings[0].cache_format, "osa2");
+        assert_eq!(bindings[0].osa_schema_version, 2);
+        assert_eq!(bindings[0].chromosomes.len(), chromosomes.len());
+        assert!(
+            directory
+                .join("phylop")
+                .join("shards")
+                .join("chr1")
+                .join("source.osa2")
+                .is_file()
+        );
+        assert!(
+            !directory
+                .join("phylop")
+                .join("shards")
+                .join("chr1")
+                .join("source.osa.idx")
+                .exists()
         );
         fs::remove_dir_all(root).unwrap();
     }

@@ -606,6 +606,7 @@ fn terminal_task_activity(task: &tasks::TaskSnapshot) -> (&'static str, &'static
             "building-cache" => ("Building cache", "Cache"),
             "downloading-source-part" | "downloading" => ("Downloading", "Download"),
             "streaming-to-fastvep" => ("Streaming", "Stream"),
+            "finalizing-annotation" => ("Finishing annotation output", "Finish"),
             "validating" => ("Verifying", "Verify"),
             "reading-index" | "reading-indexes" => ("Reading index", "Index"),
             "publishing" => ("Publishing", "Publish"),
@@ -1774,8 +1775,10 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "start" if method == "POST" => match set_preparation_concurrency(query)
                 .and_then(|_| set_source_input_mode(query))
                 .and_then(|_| update_install_requested(query))
-                .and_then(|update| enqueue_preparation(resource_id, update))
-            {
+                .and_then(|update| {
+                    rebuild_install_requested(query)
+                        .and_then(|rebuild| enqueue_preparation(resource_id, update, rebuild))
+                }) {
                 Ok(()) => ("202 Accepted", "{\"accepted\":true}".into()),
                 Err(error) => (
                     "409 Conflict",
@@ -3149,6 +3152,7 @@ fn managed_preparation_status(
         };
     }
     let chromosomes = resource_chromosomes(resource_id);
+    let mut compatibility_issue = None;
     if is_rolling_resource(resource_id) {
         let live = preparation::live_status(resource_id);
         if live.state != "idle" {
@@ -3158,13 +3162,16 @@ fn managed_preparation_status(
             .into_iter()
             .rev()
         {
-            let status = preparation::status_with_storage(
+            let status = preparation::verified_storage_status(
                 resource_id,
                 &resources.join(resource_id).join(version),
                 &chromosomes,
             );
             if status.state == "ready" {
                 return status;
+            }
+            if compatibility_issue.is_none() && status.state == "rebuild-required" {
+                compatibility_issue = Some(status);
             }
         }
     }
@@ -3173,6 +3180,11 @@ fn managed_preparation_status(
         &resources.join(resource_id).join(release.version),
         &chromosomes,
     );
+    if status.state == "idle"
+        && let Some(issue) = compatibility_issue
+    {
+        status = issue;
+    }
     if let Some(expected_network_bytes) = release.download_bytes {
         status.expected_network_bytes = status.expected_network_bytes.max(expected_network_bytes);
     }
@@ -3212,7 +3224,7 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
         ));
     }
     for resource_id in actionable {
-        enqueue_preparation(resource_id, false)?;
+        enqueue_preparation(resource_id, false, false)?;
     }
     Ok(())
 }
@@ -3220,6 +3232,13 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
 fn update_install_requested(query: &str) -> Result<bool, String> {
     Ok(matches!(
         query_parameter(query, "update").transpose()?.as_deref(),
+        Some("true")
+    ))
+}
+
+fn rebuild_install_requested(query: &str) -> Result<bool, String> {
+    Ok(matches!(
+        query_parameter(query, "rebuild").transpose()?.as_deref(),
         Some("true")
     ))
 }
@@ -3243,14 +3262,54 @@ fn set_source_input_mode(query: &str) -> Result<preparation::SourceInputMode, St
     Ok(mode)
 }
 
-fn enqueue_preparation(resource_id: &str, update: bool) -> Result<(), String> {
+fn enqueue_preparation(resource_id: &str, update: bool, rebuild: bool) -> Result<(), String> {
     if !preparation_available(resource_id) {
         return Err(format!(
             "resource '{resource_id}' has no verified streaming plan"
         ));
     }
     let paths = portable_paths()?;
-    if !update && managed_preparation_status(resource_id, &paths.resources).state == "ready" {
+    let status = managed_preparation_status(resource_id, &paths.resources);
+    if status.state == "rebuild-required" && !rebuild {
+        return Err(format!(
+            "{} must be rebuilt before it can be used",
+            resource_task_title(resource_id)
+        ));
+    }
+    if rebuild {
+        if status.state != "rebuild-required" {
+            return Err(format!(
+                "{} does not require a cache rebuild",
+                resource_task_title(resource_id)
+            ));
+        }
+        if annotation::is_running()
+            || managed_download_is_active(resource_id)
+            || preparation::live_status(resource_id).state == "running"
+        {
+            return Err(
+                "cancel active annotation and resource tasks before rebuilding data".into(),
+            );
+        }
+        let chromosomes = resource_chromosomes(resource_id);
+        let mut rebuilt = false;
+        for version in installed_resource_versions(resource_id, &paths.resources) {
+            let root = paths.resources.join(resource_id).join(version);
+            if preparation::verified_storage_status(resource_id, &root, &chromosomes).state
+                == "rebuild-required"
+            {
+                preparation::discard_generated_cache(resource_id, &root)?;
+                rebuilt = true;
+            }
+        }
+        if !rebuilt {
+            return Err(format!(
+                "{} has no managed cache files to rebuild",
+                resource_task_title(resource_id)
+            ));
+        }
+    }
+    if !update && !rebuild && status.state == "ready" {
         return Ok(());
     }
     preparation::forget_live(resource_id);
@@ -3280,9 +3339,8 @@ fn start_preparation_queue_worker() {
                 install_queue::finish(&resource_id);
                 continue;
             };
-            if managed_preparation_status(&resource_id, &paths.resources).state == "ready"
-                && !is_rolling_resource(&resource_id)
-            {
+            let status = managed_preparation_status(&resource_id, &paths.resources);
+            if status.state == "ready" && !is_rolling_resource(&resource_id) {
                 install_queue::finish(&resource_id);
                 continue;
             }
@@ -3425,10 +3483,13 @@ fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
         .map(|release| release.download_bytes)
         .or(release.download_bytes)
         .ok_or("catalog object size is not pinned")?;
+    let resource_root = resources.join(resource_id).join(release_version);
+    let paths = preparation::ShardPaths::new(&resource_root, "all")?;
+    let cache_format = preparation::cache_format_for_install(&paths, resource_id)?;
     preparation::start_live(preparation::LivePreparationRequest {
         fastvep_executable: executable,
         source_type: source_type.into(),
-        resource_root: resources.join(resource_id).join(release_version),
+        resource_root,
         identity: preparation::PreparationIdentity {
             resource_id: resource_id.into(),
             release: release_version.into(),
@@ -3442,7 +3503,7 @@ fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
                 .and_then(|release| release.last_modified.clone()),
             selected_schema: format!("{resource_id}-{release_version}"),
             fastvep_commit: preparation::LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-            osa_schema_version: 1,
+            osa_schema_version: cache_format.schema_version(),
         },
     })
 }
@@ -5079,6 +5140,13 @@ mod profile_status_tests {
     }
 
     #[test]
+    fn core_status_does_not_mislabel_engine_failure_as_missing_transcripts() {
+        let app = web_app_source();
+        assert!(app.contains("!setup.engineReady?'Annotation engine needs repair'"));
+        assert!(app.contains("!setup.transcriptCacheReady?'ensembl-gff3':null"));
+    }
+
+    #[test]
     fn about_surface_and_metadata_use_the_project_apache_license() {
         let html = include_str!("../../../web/index.html");
         let manifest = include_str!("../../../Cargo.toml");
@@ -5368,7 +5436,19 @@ mod profile_status_tests {
         assert!(set_preparation_concurrency("concurrency=lots").is_err());
         assert!(update_install_requested("concurrency=2&update=true").unwrap());
         assert!(!update_install_requested("concurrency=2").unwrap());
+        assert!(rebuild_install_requested("rebuild=true").unwrap());
+        assert!(!rebuild_install_requested("update=true").unwrap());
         set_preparation_concurrency("concurrency=1").unwrap();
+    }
+
+    #[test]
+    fn resource_ui_rebuilds_incompatible_caches_without_an_upgrade_path() {
+        let app = web_app_source();
+        assert!(app.contains("prepare.state==='rebuild-required'"));
+        assert!(app.contains("Rebuild cache"));
+        assert!(app.contains("&rebuild=true"));
+        assert!(!app.contains("Upgrade cache"));
+        assert!(!app.contains("prepare.state==='upgradeable'"));
     }
 
     #[test]
@@ -5377,7 +5457,7 @@ mod profile_status_tests {
             "../../../config/dbnsfp-4.9a-curated-fields.json"
         ))
         .unwrap();
-        assert_eq!(contract["id"], "dbnsfp-4.9a-annocat-core-v1");
+        assert_eq!(contract["id"], "dbnsfp-4.9a-annocat-core-v2");
         assert_eq!(contract["release"], "4.9a");
         let fields = contract["groups"]
             .as_array()

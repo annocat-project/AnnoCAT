@@ -4,6 +4,77 @@ use std::path::{Path, PathBuf};
 
 pub(super) const CHECKPOINT_SCHEMA_VERSION: u16 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheFormat {
+    OsaV1,
+    OsaV2,
+}
+
+impl CacheFormat {
+    pub fn from_schema_version(version: u16) -> Result<Self, String> {
+        match version {
+            1 => Ok(Self::OsaV1),
+            2 => Ok(Self::OsaV2),
+            _ => Err(format!("unsupported OSA schema version {version}")),
+        }
+    }
+
+    pub fn preferred_for_resource(resource_id: &str) -> Result<Self, String> {
+        match annocat_core::source_catalog::preferred_cache_format(resource_id) {
+            Some("osa") => Ok(Self::OsaV1),
+            Some("osa2") => Ok(Self::OsaV2),
+            Some(format) => Err(format!(
+                "resource {resource_id} has unsupported preferred cache format {format}"
+            )),
+            None => Err(format!(
+                "resource {resource_id} has no preferred cache format"
+            )),
+        }
+    }
+
+    pub const fn schema_version(self) -> u16 {
+        match self {
+            Self::OsaV1 => 1,
+            Self::OsaV2 => 2,
+        }
+    }
+
+    pub const fn builder_argument(self) -> &'static str {
+        match self {
+            Self::OsaV1 => "osa",
+            Self::OsaV2 => "osa2",
+        }
+    }
+
+    pub const fn reader_compatibility(self) -> &'static str {
+        match self {
+            Self::OsaV1 => "fastvep-osa-v1",
+            Self::OsaV2 => "fastvep-osa-v2",
+        }
+    }
+
+    pub const fn builder_contract(self) -> &'static str {
+        match self {
+            Self::OsaV1 => "annocat-sa-build-v1",
+            Self::OsaV2 => "annocat-sa-build-v2",
+        }
+    }
+
+    pub const fn data_file_name(self) -> &'static str {
+        match self {
+            Self::OsaV1 => "source.osa",
+            Self::OsaV2 => "source.osa2",
+        }
+    }
+
+    pub const fn index_file_name(self) -> Option<&'static str> {
+        match self {
+            Self::OsaV1 => Some("source.osa.idx"),
+            Self::OsaV2 => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreparationIdentity {
@@ -21,6 +92,12 @@ pub struct PreparationIdentity {
     /// provenance and compatibility live in cache-contract-v2.json.
     pub fastvep_commit: String,
     pub osa_schema_version: u16,
+}
+
+impl PreparationIdentity {
+    pub fn cache_format(&self) -> Result<CacheFormat, String> {
+        CacheFormat::from_schema_version(self.osa_schema_version)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,21 +152,25 @@ impl ShardPaths {
         })
     }
 
-    pub fn partial_osa(&self) -> PathBuf {
-        self.partial_directory.join("source.osa")
+    pub fn partial_data(&self, format: CacheFormat) -> PathBuf {
+        self.partial_directory.join(format.data_file_name())
     }
 
-    pub fn partial_index(&self) -> PathBuf {
-        self.partial_directory.join("source.osa.idx")
+    pub fn partial_index(&self, format: CacheFormat) -> Option<PathBuf> {
+        format
+            .index_file_name()
+            .map(|name| self.partial_directory.join(name))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn final_osa(&self) -> PathBuf {
-        self.final_directory.join("source.osa")
+    pub fn final_data(&self, format: CacheFormat) -> PathBuf {
+        self.final_directory.join(format.data_file_name())
     }
 
-    pub fn final_index(&self) -> PathBuf {
-        self.final_directory.join("source.osa.idx")
+    pub fn final_index(&self, format: CacheFormat) -> Option<PathBuf> {
+        format
+            .index_file_name()
+            .map(|name| self.final_directory.join(name))
     }
 
     pub fn checkpoint(&self) -> PathBuf {

@@ -3,9 +3,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const DBNSFP_CURATED_SCHEMA: &str = "dbnsfp-4.9a-annocat-core-v1";
+pub const DBNSFP_CURATED_SCHEMA: &str = "dbnsfp-4.9a-annocat-core-v2";
+pub(super) const DBNSFP_LEGACY_CURATED_SCHEMA: &str = "dbnsfp-4.9a-annocat-core-v1";
 pub(super) const DBNSFP_FIELD_SELECTION_SCHEMA_VERSION: u16 = 1;
 const DBNSFP_COORDINATE_FIELDS: &[&str] = &["chr", "pos(1-based)", "ref", "alt"];
+const DBNSFP_V2_IDENTITY_FIELDS: &[&str] = &["Uniprot_entry", "MutPred_protID", "MutPred_AAchange"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -106,13 +108,17 @@ pub fn default_dbnsfp_field_selection() -> Result<DbnsfpFieldSelection, String> 
 fn validate_dbnsfp_field_selection(
     mut selection: DbnsfpFieldSelection,
 ) -> Result<DbnsfpFieldSelection, String> {
-    if selection.schema_version != DBNSFP_FIELD_SELECTION_SCHEMA_VERSION
-        || selection.contract_id != DBNSFP_CURATED_SCHEMA
-    {
+    if selection.schema_version != DBNSFP_FIELD_SELECTION_SCHEMA_VERSION {
         return Err("dbNSFP field selection uses an unsupported contract".into());
     }
     let contract = dbnsfp_contract()?;
-    let (allowed, required) = dbnsfp_contract_fields(&contract)?;
+    let (mut allowed, mut required) = dbnsfp_contract_fields(&contract)?;
+    if selection.contract_id == DBNSFP_LEGACY_CURATED_SCHEMA {
+        allowed.retain(|field| !DBNSFP_V2_IDENTITY_FIELDS.contains(&field.as_str()));
+        required.retain(|field| !DBNSFP_V2_IDENTITY_FIELDS.contains(&field.as_str()));
+    } else if selection.contract_id != DBNSFP_CURATED_SCHEMA {
+        return Err("dbNSFP field selection uses an unsupported contract".into());
+    }
     if selection.fields.len() > allowed.len() {
         return Err("dbNSFP field selection contains too many fields".into());
     }
@@ -139,6 +145,49 @@ fn validate_dbnsfp_field_selection(
     Ok(selection)
 }
 
+fn migrate_legacy_dbnsfp_field_selection(
+    selection: &DbnsfpFieldSelection,
+) -> Result<DbnsfpFieldSelection, String> {
+    let supplied = selection
+        .fields
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let contract = dbnsfp_contract()?;
+    let (allowed, required) = dbnsfp_contract_fields(&contract)?;
+    let required = required.iter().map(String::as_str).collect::<HashSet<_>>();
+    Ok(DbnsfpFieldSelection {
+        schema_version: DBNSFP_FIELD_SELECTION_SCHEMA_VERSION,
+        contract_id: DBNSFP_CURATED_SCHEMA.into(),
+        fields: allowed
+            .into_iter()
+            .filter(|field| supplied.contains(field.as_str()) || required.contains(field.as_str()))
+            .collect(),
+    })
+}
+
+fn write_dbnsfp_field_selection(
+    resource_root: &Path,
+    selection: &DbnsfpFieldSelection,
+) -> Result<(), String> {
+    fs::create_dir_all(resource_root)
+        .map_err(|error| format!("cannot create dbNSFP resource directory: {error}"))?;
+    let path = dbnsfp_selection_path(resource_root);
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(selection)
+            .map_err(|error| format!("cannot encode dbNSFP field selection: {error}"))?,
+    )
+    .map_err(|error| format!("cannot write dbNSFP field selection: {error}"))?;
+    if path.is_file() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("cannot replace dbNSFP field selection: {error}"))?;
+    }
+    fs::rename(&temporary, &path)
+        .map_err(|error| format!("cannot publish dbNSFP field selection: {error}"))
+}
+
 pub fn load_dbnsfp_field_selection(resource_root: &Path) -> Result<DbnsfpFieldSelection, String> {
     let path = dbnsfp_selection_path(resource_root);
     if !path.is_file() {
@@ -154,7 +203,16 @@ pub fn load_dbnsfp_field_selection(resource_root: &Path) -> Result<DbnsfpFieldSe
         fs::read(&path).map_err(|error| format!("cannot read dbNSFP field selection: {error}"))?;
     let selection = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid dbNSFP field selection: {error}"))?;
-    validate_dbnsfp_field_selection(selection)
+    let selection = validate_dbnsfp_field_selection(selection)?;
+    if selection.contract_id == DBNSFP_LEGACY_CURATED_SCHEMA
+        && !dbnsfp_selection_locked(resource_root)?
+    {
+        let migrated = migrate_legacy_dbnsfp_field_selection(&selection)?;
+        discard_field_staging(resource_root, "dbNSFP")?;
+        write_dbnsfp_field_selection(resource_root, &migrated)?;
+        return Ok(migrated);
+    }
+    Ok(selection)
 }
 
 pub fn save_dbnsfp_field_selection(
@@ -162,6 +220,9 @@ pub fn save_dbnsfp_field_selection(
     selection: DbnsfpFieldSelection,
 ) -> Result<DbnsfpFieldSelection, String> {
     let selection = validate_dbnsfp_field_selection(selection)?;
+    if selection.contract_id != DBNSFP_CURATED_SCHEMA {
+        return Err("dbNSFP field selection must use the current contract".into());
+    }
     let current = load_dbnsfp_field_selection(resource_root)?;
     let path = dbnsfp_selection_path(resource_root);
     let locked = dbnsfp_selection_locked(resource_root)?;
@@ -172,21 +233,7 @@ pub fn save_dbnsfp_field_selection(
         return Err("remove the installed dbNSFP cache before changing retained fields".into());
     }
     discard_field_staging(resource_root, "dbNSFP")?;
-    fs::create_dir_all(resource_root)
-        .map_err(|error| format!("cannot create dbNSFP resource directory: {error}"))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(&selection)
-            .map_err(|error| format!("cannot encode dbNSFP field selection: {error}"))?,
-    )
-    .map_err(|error| format!("cannot write dbNSFP field selection: {error}"))?;
-    if path.is_file() {
-        fs::remove_file(&path)
-            .map_err(|error| format!("cannot replace dbNSFP field selection: {error}"))?;
-    }
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("cannot publish dbNSFP field selection: {error}"))?;
+    write_dbnsfp_field_selection(resource_root, &selection)?;
     Ok(selection)
 }
 
@@ -201,10 +248,22 @@ pub fn dbnsfp_field_configuration(
 }
 
 pub(super) fn dbnsfp_schema_identity(selection: &DbnsfpFieldSelection) -> String {
-    if full_dbnsfp_field_selection().is_ok_and(|full| full.fields == selection.fields) {
+    let full_fields = if selection.contract_id == DBNSFP_CURATED_SCHEMA {
+        full_dbnsfp_field_selection().map(|full| full.fields)
+    } else if selection.contract_id == DBNSFP_LEGACY_CURATED_SCHEMA {
+        dbnsfp_contract().and_then(|contract| {
+            dbnsfp_contract_fields(&contract).map(|(mut allowed, _)| {
+                allowed.retain(|field| !DBNSFP_V2_IDENTITY_FIELDS.contains(&field.as_str()));
+                allowed
+            })
+        })
+    } else {
+        Err("unsupported dbNSFP field selection contract".into())
+    };
+    if full_fields.is_ok_and(|fields| fields == selection.fields) {
         // Preserve compatibility with chromosomes built before the field
         // selector existed; that release already retained this exact set.
-        return DBNSFP_CURATED_SCHEMA.into();
+        return selection.contract_id.clone();
     }
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -213,7 +272,7 @@ pub(super) fn dbnsfp_schema_identity(selection: &DbnsfpFieldSelection) -> String
         hasher.update([0]);
     }
     let digest = format!("{:x}", hasher.finalize());
-    format!("{}:{}", DBNSFP_CURATED_SCHEMA, &digest[..16])
+    format!("{}:{}", selection.contract_id, &digest[..16])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

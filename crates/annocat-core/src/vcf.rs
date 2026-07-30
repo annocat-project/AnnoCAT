@@ -222,12 +222,16 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
         let line =
             line.map_err(|error| format!("cannot read VCF header in {}: {error}", path.display()))?;
         if let Some(value) = line.strip_prefix("##reference=") {
-            assembly = assembly_name(value).or_else(|| Some(value.to_string()));
+            merge_assembly(&mut assembly, assembly_name(value))?;
         }
-        if line.starts_with("##contig=<")
-            && let Some(value) = structured_header_attribute(&line, "assembly")
-        {
-            assembly = assembly_name(value).or_else(|| Some(value.to_string()));
+        if line.starts_with("##contig=<") {
+            if let Some(value) = structured_header_attribute(&line, "assembly") {
+                merge_assembly(
+                    &mut assembly,
+                    assembly_name(value).or_else(|| Some(value.to_string())),
+                )?;
+            }
+            merge_assembly(&mut assembly, contig_assembly(&line))?;
         }
         if line.starts_with("#CHROM\t") {
             let columns = line.split('\t').collect::<Vec<_>>();
@@ -246,6 +250,88 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
         "VCF header is missing #CHROM in {}",
         path.display()
     ))
+}
+
+fn merge_assembly(current: &mut Option<String>, candidate: Option<String>) -> Result<(), String> {
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
+    if let Some(current) = current {
+        if current != &candidate {
+            return Err(format!(
+                "VCF header contains conflicting assembly declarations: {current} and {candidate}"
+            ));
+        }
+    } else {
+        *current = Some(candidate);
+    }
+    Ok(())
+}
+
+fn contig_assembly(line: &str) -> Option<String> {
+    const GRCH38: &[(&str, u64)] = &[
+        ("1", 248956422),
+        ("2", 242193529),
+        ("3", 198295559),
+        ("4", 190214555),
+        ("5", 181538259),
+        ("6", 170805979),
+        ("7", 159345973),
+        ("8", 145138636),
+        ("9", 138394717),
+        ("10", 133797422),
+        ("11", 135086622),
+        ("12", 133275309),
+        ("13", 114364328),
+        ("14", 107043718),
+        ("15", 101991189),
+        ("16", 90338345),
+        ("17", 83257441),
+        ("18", 80373285),
+        ("19", 58617616),
+        ("20", 64444167),
+        ("21", 46709983),
+        ("22", 50818468),
+        ("X", 156040895),
+        ("Y", 57227415),
+    ];
+    const GRCH37: &[(&str, u64)] = &[
+        ("1", 249250621),
+        ("2", 243199373),
+        ("3", 198022430),
+        ("4", 191154276),
+        ("5", 180915260),
+        ("6", 171115067),
+        ("7", 159138663),
+        ("8", 146364022),
+        ("9", 141213431),
+        ("10", 135534747),
+        ("11", 135006516),
+        ("12", 133851895),
+        ("13", 115169878),
+        ("14", 107349540),
+        ("15", 102531392),
+        ("16", 90354753),
+        ("17", 81195210),
+        ("18", 78077248),
+        ("19", 59128983),
+        ("20", 63025520),
+        ("21", 48129895),
+        ("22", 51304566),
+        ("X", 155270560),
+        ("Y", 59373566),
+    ];
+
+    let id = structured_header_attribute(line, "ID")?.to_ascii_uppercase();
+    let id = id.strip_prefix("CHR").unwrap_or(&id);
+    let length = structured_header_attribute(line, "length")?
+        .parse::<u64>()
+        .ok()?;
+    GRCH38
+        .contains(&(id, length))
+        .then_some("GRCh38")
+        .or_else(|| GRCH37.contains(&(id, length)).then_some("GRCh37"))
+        .map(str::to_owned)
 }
 
 pub fn is_variant_alternate(value: &str) -> bool {
@@ -290,6 +376,13 @@ fn assembly_name(value: &str) -> Option<String> {
         || uppercase.trim() == "37"
     {
         Some("GRCh37".into())
+    } else if uppercase.contains("CHM13")
+        || uppercase.contains("GCF_009914755")
+        || uppercase.contains("GCA_009914755")
+        || has_token("T2T")
+        || has_token("HS1")
+    {
+        Some("T2T-CHM13".into())
     } else {
         None
     }
@@ -383,7 +476,52 @@ mod tests {
         let path = root.join("input.vcf");
         std::fs::write(
             &path,
-            b"##fileformat=VCFv4.2\n##contig=<ID=1,length=249250621,md5=aaab37ccc>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+            b"##fileformat=VCFv4.2\n##contig=<ID=decoy1,length=249250621,md5=aaab37ccc>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+        .unwrap();
+        assert_eq!(inspect_header(&path).unwrap().assembly, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn header_inspection_uses_primary_contigs_not_reference_paths_or_decoys() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-contigs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input.vcf");
+        std::fs::write(
+            &path,
+            b"##fileformat=VCFv4.2\n##reference=custom-reference.fa\n##contig=<ID=chr1,length=248956422>\n##contig=<ID=chr1_KI270706v1_random,length=175055>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_header(&path).unwrap().assembly.as_deref(),
+            Some("GRCh38")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrecognized_reference_path_is_not_an_assembly_declaration() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-reference-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input.vcf");
+        std::fs::write(
+            &path,
+            b"##fileformat=VCFv4.2\n##reference=custom-reference.fa\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
         )
         .unwrap();
         assert_eq!(inspect_header(&path).unwrap().assembly, None);

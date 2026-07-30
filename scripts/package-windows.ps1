@@ -27,6 +27,11 @@ if ($lockHash -ne $pin.cargoLockSha256) {
 if ($LASTEXITCODE -ne 0) { throw "fastVEP tests failed" }
 & cargo build --manifest-path (Join-Path $fastVepRoot "Cargo.toml") --release --locked -p fastvep-cli
 if ($LASTEXITCODE -ne 0) { throw "fastVEP release build failed" }
+$builtFastVep = Join-Path $fastVepRoot "target\release\fastvep.exe"
+$builtFastVepHash = (Get-FileHash -LiteralPath $builtFastVep -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($builtFastVepHash -ne $pin.windowsX86_64.sha256) {
+    throw "fastVEP binary hash mismatch: expected $($pin.windowsX86_64.sha256), found $builtFastVepHash"
+}
 & cargo build --manifest-path (Join-Path $projectRoot "Cargo.toml") --release --locked -p annocat-cli --bins
 if ($LASTEXITCODE -ne 0) { throw "AnnoCat release build failed" }
 

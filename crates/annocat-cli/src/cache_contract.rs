@@ -4,8 +4,6 @@ use std::io::Write;
 use std::path::Path;
 
 pub const CACHE_CONTRACT_MANIFEST_SCHEMA_VERSION: u16 = 2;
-pub const OSA_READER_COMPATIBILITY_V1: &str = "fastvep-osa-v1";
-pub const OSA_BUILDER_CONTRACT_V1: &str = "annocat-sa-build-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -50,67 +48,8 @@ pub struct CacheContractManifest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheCompatibilityDecision {
     Ready,
-    VerifyAndUpgradeManifest,
     RebuildAffectedSource,
-    RebuildAllOsaV1,
     Unsupported,
-}
-
-pub fn classify_legacy_manifest(
-    resource_id: &str,
-    osa_schema_version: u16,
-) -> CacheCompatibilityDecision {
-    if osa_schema_version != 1 {
-        return CacheCompatibilityDecision::RebuildAllOsaV1;
-    }
-    match resource_id {
-        "dbnsfp" | "clinvar" | "dbsnp" | "gnomad" | "gnomad-genomes" | "cadd" | "phylop"
-        | "spliceai" | "revel" => CacheCompatibilityDecision::VerifyAndUpgradeManifest,
-        _ => CacheCompatibilityDecision::Unsupported,
-    }
-}
-
-pub fn prove_legacy_source_contract(
-    resource_id: &str,
-    release: &str,
-    assembly: &str,
-    selected_schema: &str,
-    osa_schema_version: u16,
-) -> Result<(), String> {
-    if classify_legacy_manifest(resource_id, osa_schema_version)
-        != CacheCompatibilityDecision::VerifyAndUpgradeManifest
-    {
-        return Err("legacy cache uses an unsupported OSA or source contract".into());
-    }
-    let catalog = annocat_core::source_catalog::resource(resource_id)
-        .ok_or_else(|| format!("legacy cache source {resource_id} is not cataloged"))?;
-    if catalog.assembly != assembly {
-        return Err("legacy cache assembly differs from the source catalog".into());
-    }
-    if catalog.release.policy == "pinned" && catalog.release.version != release {
-        return Err("legacy cache release differs from the pinned source catalog".into());
-    }
-    if release.trim().is_empty() {
-        return Err("legacy cache release is empty".into());
-    }
-    let schema_prefix = match resource_id {
-        "dbnsfp" => "dbnsfp-4.9a-annocat-core-v1",
-        "clinvar" => "clinvar-",
-        "dbsnp" => "dbsnp-",
-        "gnomad" => "gnomad-v4.1.1-exomes-",
-        "gnomad-genomes" => "gnomad-v4.1.1-genomes-",
-        "cadd" => "cadd-v1.7-grch38",
-        "phylop" => "ucsc-hg38-phylop100way-per-base",
-        "spliceai" => "spliceai-ensembl-mane-v1.4-masked-snv",
-        "revel" => "revel-v1.3-transcript-matched",
-        _ => return Err("legacy cache source has no migration proof rule".into()),
-    };
-    if !selected_schema.starts_with(schema_prefix) {
-        return Err(format!(
-            "legacy {resource_id} cache has an unrecognized selected-field schema"
-        ));
-    }
-    Ok(())
 }
 
 impl CacheContractManifest {
@@ -125,16 +64,16 @@ impl CacheContractManifest {
         source_etag: Option<&str>,
         source_last_modified: Option<&str>,
         selected_field_schema: &str,
-        osa_schema_version: u16,
+        format: crate::preparation::CacheFormat,
         legacy_fastvep_identity: Option<&str>,
     ) -> Self {
         Self {
             schema_version: CACHE_CONTRACT_MANIFEST_SCHEMA_VERSION,
             builder_provenance,
             cache_contract: CacheContract {
-                osa_schema_version,
-                reader_compatibility: OSA_READER_COMPATIBILITY_V1.into(),
-                builder_contract: OSA_BUILDER_CONTRACT_V1.into(),
+                osa_schema_version: format.schema_version(),
+                reader_compatibility: format.reader_compatibility().into(),
+                builder_contract: format.builder_contract().into(),
                 adapter_contract: adapter_contract(resource_id).into(),
                 selected_field_schema: selected_field_schema.into(),
             },
@@ -171,7 +110,7 @@ impl CacheContractManifest {
                 != expected.cache_contract.reader_compatibility
             || self.cache_contract.builder_contract != expected.cache_contract.builder_contract
         {
-            return CacheCompatibilityDecision::RebuildAllOsaV1;
+            return CacheCompatibilityDecision::RebuildAffectedSource;
         }
         if self.cache_contract.adapter_contract != expected.cache_contract.adapter_contract
             || self.cache_contract.selected_field_schema
@@ -286,7 +225,7 @@ mod tests {
             Some("same-object"),
             None,
             "gnomad-v4.1-fields-a",
-            1,
+            crate::preparation::CacheFormat::OsaV1,
             Some("7038e7c"),
         )
     }
@@ -317,7 +256,7 @@ mod tests {
         expected.cache_contract.reader_compatibility = "fastvep-osa-v2".into();
         assert_eq!(
             installed.compatibility_with(&expected),
-            CacheCompatibilityDecision::RebuildAllOsaV1
+            CacheCompatibilityDecision::RebuildAffectedSource
         );
     }
 
@@ -326,47 +265,5 @@ mod tests {
         let value = manifest("same");
         let encoded = serde_json::to_string(&value).unwrap();
         assert!(!encoded.contains("download.example"));
-    }
-
-    #[test]
-    fn known_legacy_osa_v1_requires_verification_before_manifest_upgrade() {
-        assert_eq!(
-            classify_legacy_manifest("dbnsfp", 1),
-            CacheCompatibilityDecision::VerifyAndUpgradeManifest
-        );
-        assert_eq!(
-            classify_legacy_manifest("unknown-source", 1),
-            CacheCompatibilityDecision::Unsupported
-        );
-    }
-
-    #[test]
-    fn legacy_migration_requires_a_source_specific_release_and_schema() {
-        assert!(
-            prove_legacy_source_contract(
-                "revel",
-                "1.3",
-                "GRCh38",
-                "revel-v1.3-transcript-matched",
-                1
-            )
-            .is_ok()
-        );
-        assert!(
-            prove_legacy_source_contract(
-                "revel",
-                "1.4",
-                "GRCh38",
-                "revel-v1.3-transcript-matched",
-                1
-            )
-            .unwrap_err()
-            .contains("release")
-        );
-        assert!(
-            prove_legacy_source_contract("revel", "1.3", "GRCh38", "generic-vcf", 1)
-                .unwrap_err()
-                .contains("schema")
-        );
     }
 }

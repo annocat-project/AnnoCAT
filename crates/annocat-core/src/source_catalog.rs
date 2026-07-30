@@ -65,6 +65,8 @@ pub struct Resource {
     pub id: String,
     pub assembly: String,
     pub delivery: String,
+    #[serde(default)]
+    pub preferred_cache_format: Option<String>,
     pub adapter_contract: Option<String>,
     pub manifest_ref: Option<String>,
     pub manifest_role: Option<String>,
@@ -173,6 +175,10 @@ pub fn profiles_json() -> String {
 
 pub fn adapter_contract(id: &str) -> Option<&'static str> {
     resource(id)?.adapter_contract.as_deref()
+}
+
+pub fn preferred_cache_format(id: &str) -> Option<&'static str> {
+    resource(id)?.preferred_cache_format.as_deref()
 }
 
 pub fn download_release(id: &str) -> Option<crate::ResourceRelease> {
@@ -328,6 +334,24 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
         }
         if resource.delivery == "stream-cache" && resource.adapter_contract.is_none() {
             return Err(format!("resource {} has no adapter contract", resource.id));
+        }
+        match (
+            resource.delivery.as_str(),
+            resource.preferred_cache_format.as_deref(),
+        ) {
+            ("stream-cache", Some("osa" | "osa2")) | (_, None) => {}
+            ("stream-cache", _) => {
+                return Err(format!(
+                    "resource {} has no supported preferred cache format",
+                    resource.id
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "resource {} declares a cache format without using stream-cache delivery",
+                    resource.id
+                ));
+            }
         }
         if !safe_id(&resource.release.artifact_id.replace(':', "-"))
             || !artifacts.insert(resource.release.artifact_id.as_str())
@@ -1457,6 +1481,23 @@ mod tests {
                 assert!(resource.adapter_contract.is_some());
                 assert!(!resource.release.artifact_id.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn osa2_rollout_is_limited_to_verified_source_encodings() {
+        for resource_id in ["dbnsfp", "phylop", "revel"] {
+            assert_eq!(preferred_cache_format(resource_id), Some("osa2"));
+        }
+        for resource_id in [
+            "clinvar",
+            "dbsnp",
+            "gnomad",
+            "gnomad-genomes",
+            "cadd",
+            "spliceai",
+        ] {
+            assert_eq!(preferred_cache_format(resource_id), Some("osa"));
         }
     }
 

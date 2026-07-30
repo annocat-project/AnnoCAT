@@ -22,10 +22,12 @@ mod state;
 mod tabix;
 mod transport;
 
-#[cfg(test)]
-use cache::restart_decision;
+pub(crate) use cache::effective_cache_format as cache_format_for_install;
+use cache::{
+    VerifiedCacheCompatibility, effective_cache_format, required_nonempty_file, restart_decision,
+    verified_cache_compatibility, verify_partial_osa,
+};
 pub use cache::{initialize_partial, promote_verified};
-use cache::{required_nonempty_file, restart_decision_with_legacy_upgrade, verify_partial_osa};
 use catalog::canonical_chromosomes;
 pub use catalog::{
     DbnsfpArchiveShard, DbnsfpPinnedManifest, PinnedShardedSource, RevelArchive,
@@ -33,20 +35,22 @@ pub use catalog::{
 };
 use checkpoint::{CHECKPOINT_SCHEMA_VERSION, read_checkpoint, write_checkpoint};
 pub use checkpoint::{
-    CheckpointState, PreparationCheckpoint, PreparationIdentity, RestartDecision, ShardPaths,
+    CacheFormat, CheckpointState, PreparationCheckpoint, PreparationIdentity, RestartDecision,
+    ShardPaths,
 };
 use fields::dbnsfp_schema_identity;
-pub use fields::{
-    DBNSFP_CURATED_SCHEMA, DbnsfpFieldSelection, SupplementaryFieldSelection,
-    dbnsfp_field_configuration, load_dbnsfp_field_selection, load_supplementary_field_selection,
-    save_dbnsfp_field_selection, save_supplementary_field_selection,
-    supplementary_field_configuration, supplementary_schema_identity,
-};
 #[cfg(test)]
 use fields::{
-    DBNSFP_FIELD_SELECTION_SCHEMA_VERSION, dbnsfp_contract, dbnsfp_contract_fields,
-    default_dbnsfp_field_selection, default_supplementary_field_selection,
-    full_dbnsfp_field_selection, supplementary_field_contract,
+    DBNSFP_CURATED_SCHEMA, DBNSFP_FIELD_SELECTION_SCHEMA_VERSION, DBNSFP_LEGACY_CURATED_SCHEMA,
+    dbnsfp_contract, dbnsfp_contract_fields, default_dbnsfp_field_selection,
+    default_supplementary_field_selection, full_dbnsfp_field_selection,
+    supplementary_field_contract,
+};
+pub use fields::{
+    DbnsfpFieldSelection, SupplementaryFieldSelection, dbnsfp_field_configuration,
+    load_dbnsfp_field_selection, load_supplementary_field_selection, save_dbnsfp_field_selection,
+    save_supplementary_field_selection, supplementary_field_configuration,
+    supplementary_schema_identity,
 };
 use indexed_catalog::{CaddArtifact, SpliceAiArtifact};
 use progress::{
@@ -398,6 +402,8 @@ where
         .arg(&output_base)
         .arg("--assembly")
         .arg(&request.identity.assembly)
+        .arg("--format")
+        .arg(request.identity.cache_format()?.builder_argument())
         .arg("--no-progress")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -473,10 +479,14 @@ where
         ));
     }
 
+    let format = request.identity.cache_format()?;
     Ok(StreamingBuildResult {
         compressed_bytes_read,
-        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_osa())?,
-        prepared_index_bytes: required_nonempty_file(&request.paths.partial_index())?,
+        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_data(format))?,
+        prepared_index_bytes: request
+            .paths
+            .partial_index(format)
+            .map_or(Ok(0), |index| required_nonempty_file(&index))?,
     })
 }
 
@@ -592,6 +602,8 @@ fn stream_revel_archive_to_partial_osa(
         .arg(&output_base)
         .arg("--assembly")
         .arg(&request.identity.assembly)
+        .arg("--format")
+        .arg(request.identity.cache_format()?.builder_argument())
         .arg("--no-progress")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -770,10 +782,14 @@ fn stream_revel_archive_to_partial_osa(
             &[request.paths.source_part().to_path_buf()],
         ));
     }
+    let format = request.identity.cache_format()?;
     Ok(StreamingBuildResult {
         compressed_bytes_read: received,
-        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_osa())?,
-        prepared_index_bytes: required_nonempty_file(&request.paths.partial_index())?,
+        prepared_osa_bytes: required_nonempty_file(&request.paths.partial_data(format))?,
+        prepared_index_bytes: request
+            .paths
+            .partial_index(format)
+            .map_or(Ok(0), |index| required_nonempty_file(&index))?,
     })
 }
 
@@ -840,7 +856,7 @@ where
                     retained_bytes: member.compressed_bytes,
                     expected_compressed_bytes: member.compressed_bytes,
                     elapsed: state.elapsed,
-                    bytes_per_second: 0.0,
+                    bytes_per_second: state.bytes_per_second,
                 });
             },
         )?;
@@ -995,8 +1011,12 @@ fn validate_optional_header(
 }
 
 fn remove_incomplete_outputs(paths: &ShardPaths) {
-    let _ = fs::remove_file(paths.partial_osa());
-    let _ = fs::remove_file(paths.partial_index());
+    for format in [CacheFormat::OsaV1, CacheFormat::OsaV2] {
+        let _ = fs::remove_file(paths.partial_data(format));
+        if let Some(index) = paths.partial_index(format) {
+            let _ = fs::remove_file(index);
+        }
+    }
 }
 
 fn safe_chromosome_component(chromosome: &str) -> Result<String, String> {
@@ -1510,18 +1530,43 @@ fn storage_status(
     chromosomes: &[String],
     live: LivePreparationState,
 ) -> LivePreparationState {
-    let expected_dbnsfp_schema = (resource_id == "dbnsfp")
-        .then(|| {
+    let expected_selected_schema = if resource_id == "dbnsfp" {
+        Some(
             load_dbnsfp_field_selection(resource_root)
                 .map(|selection| dbnsfp_schema_identity(&selection))
-        })
-        .transpose()
-        .ok()
-        .flatten();
+                .ok(),
+        )
+        .flatten()
+    } else {
+        let configuration_root = resource_root.parent().unwrap_or(resource_root);
+        load_supplementary_field_selection(resource_id, configuration_root)
+            .and_then(|selection| {
+                let base = chromosomes
+                    .iter()
+                    .find_map(|chromosome| {
+                        ShardPaths::new(resource_root, chromosome)
+                            .ok()
+                            .and_then(|paths| read_checkpoint(&paths.verification()).ok())
+                            .map(|checkpoint| {
+                                checkpoint
+                                    .identity
+                                    .selected_schema
+                                    .split(':')
+                                    .next()
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            })
+                    })
+                    .unwrap_or_default();
+                supplementary_schema_identity(&base, resource_id, &selection)
+            })
+            .ok()
+    };
     let mut network_bytes = 0_u64;
     let mut prepared_bytes = 0_u64;
     let mut parsed_records = 0_u64;
-    let mut completed = 0_u16;
+    let mut ready_shards = 0_u16;
+    let mut rebuild_shards = 0_u16;
     for chromosome in chromosomes {
         let Ok(paths) = ShardPaths::new(resource_root, chromosome) else {
             return live;
@@ -1529,66 +1574,104 @@ fn storage_status(
         let Ok(checkpoint) = read_checkpoint(&paths.verification()) else {
             continue;
         };
-        if checkpoint.state != CheckpointState::Verified
-            || checkpoint.identity.resource_id != resource_id
-            || (resource_id == "dbnsfp"
-                && expected_dbnsfp_schema.as_deref()
-                    != Some(checkpoint.identity.selected_schema.as_str()))
-            || required_nonempty_file(&paths.final_osa()).is_err()
-            || required_nonempty_file(&paths.final_index()).is_err()
-        {
-            continue;
+        let compatibility = if checkpoint.identity.resource_id != resource_id {
+            VerifiedCacheCompatibility::RebuildRequired
+        } else {
+            let mut expected = checkpoint.identity.clone();
+            if let Some(schema) = expected_selected_schema.as_deref() {
+                expected.selected_schema = schema.into();
+            }
+            verified_cache_compatibility(&paths, &expected)
+        };
+        match compatibility {
+            VerifiedCacheCompatibility::Missing => continue,
+            VerifiedCacheCompatibility::Ready => ready_shards += 1,
+            VerifiedCacheCompatibility::RebuildRequired => rebuild_shards += 1,
         }
         network_bytes = network_bytes.saturating_add(checkpoint.compressed_bytes_read);
         prepared_bytes = prepared_bytes
             .saturating_add(checkpoint.prepared_bytes)
             .saturating_add(checkpoint.prepared_index_bytes);
         parsed_records = parsed_records.saturating_add(checkpoint.parsed_records);
-        completed += 1;
     }
     let total = chromosomes.len() as u16;
-    let shards_ready = completed == total;
+    let installed = ready_shards.saturating_add(rebuild_shards);
+    let shards_ready = ready_shards == total;
     let manifest_path = resource_root.join(format!("{resource_id}.osa-shards.json"));
-    let manifest_error = if shards_ready && !manifest_path.is_file() {
-        write_osa_shard_manifest(
-            resource_root,
-            resource_id,
-            chromosomes.iter().map(String::as_str),
-        )
-        .err()
+    let manifest_missing = shards_ready && !manifest_path.is_file();
+    let ready = shards_ready && !manifest_missing;
+    let state = if rebuild_shards > 0 {
+        "rebuild-required"
+    } else if manifest_missing {
+        "rebuild-required"
+    } else if ready {
+        "ready"
     } else {
-        None
+        "idle"
     };
-    let ready = shards_ready && manifest_error.is_none();
     LivePreparationState {
         resource_id: Some(resource_id.into()),
-        state: if ready { "ready" } else { "idle" }.into(),
-        phase: if ready { "ready" } else { "idle" }.into(),
+        state: state.into(),
+        phase: state.into(),
         chromosome: None,
         network_bytes,
         expected_network_bytes: network_bytes,
-        percent: if ready {
+        percent: if installed == total {
             100.0
         } else {
-            completed as f64 * 100.0 / total as f64
+            installed as f64 * 100.0 / total as f64
         },
         parsed_records,
         prepared_bytes,
-        completed_chromosomes: completed,
-        remaining_chromosomes: total.saturating_sub(completed),
-        detail: if ready {
-            format!("All {resource_id} chromosome shards are installed and verified")
-        } else if let Some(error) = manifest_error {
+        completed_chromosomes: installed,
+        remaining_chromosomes: total.saturating_sub(installed),
+        detail: if manifest_missing && rebuild_shards == 0 {
+            format!("{resource_id} cache manifest is missing; rebuild is required")
+        } else if state == "rebuild-required" {
             format!(
-                "All {resource_id} chromosome shards are verified, but the provider manifest could not be published: {error}"
+                "{rebuild_shards} {resource_id} cache shard(s) use an incompatible or unverified cache contract"
             )
-        } else if completed > 0 {
-            format!("{completed} verified {resource_id} chromosome shards are retained")
+        } else if ready {
+            format!("All {resource_id} chromosome shards are installed and verified")
+        } else if installed > 0 {
+            format!("{installed} installed {resource_id} chromosome shards are retained")
         } else {
             "No preparation job is active".into()
         },
         ..LivePreparationState::default()
     }
+}
+
+pub fn discard_generated_cache(resource_id: &str, resource_root: &Path) -> Result<(), String> {
+    if resource_root
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        != Some(resource_id)
+    {
+        return Err("refusing to rebuild a cache outside its managed resource directory".into());
+    }
+    for directory in ["shards", "staging"] {
+        let path = resource_root.join(directory);
+        if path.exists() {
+            fs::remove_dir_all(&path).map_err(|error| {
+                format!(
+                    "cannot remove generated cache directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    let manifest = resource_root.join(format!("{resource_id}.osa-shards.json"));
+    if manifest.exists() {
+        fs::remove_file(&manifest).map_err(|error| {
+            format!(
+                "cannot remove generated cache manifest {}: {error}",
+                manifest.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 pub struct LivePreparationRequest {
@@ -1659,7 +1742,6 @@ pub fn start_dbnsfp_live(request: DbnsfpLiveRequest) -> Result<(), String> {
         &request.resource_root,
         load_dbnsfp_field_selection(&request.resource_root)?,
     )?;
-    remove_legacy_dbnsfp_shards(&request.resource_root, &manifest)?;
     let expected = manifest
         .members
         .iter()
@@ -2061,6 +2143,7 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
             if live_cancel().load(Ordering::SeqCst) {
                 return Err("cancelled".into());
             }
+            let paths = ShardPaths::new(&request.resource_root, &shard.chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: request.source.resource_id.clone(),
                 release: request.source.release.clone(),
@@ -2072,14 +2155,10 @@ fn run_sharded_live(request: ShardedLiveRequest, selection: SupplementaryFieldSe
                 source_last_modified: shard.last_modified.clone(),
                 selected_schema: request.source.selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, &request.source.resource_id)?
+                    .schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, &shard.chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -2288,6 +2367,7 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
             if range.chromosome != *chromosome {
                 return Err("dbSNP range plan chromosome order is inconsistent".into());
             }
+            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: "dbsnp".into(),
                 release: plan.artifact.release.clone(),
@@ -2302,14 +2382,9 @@ fn run_dbsnp_live(request: DbsnpLiveRequest, selection: SupplementaryFieldSelect
                 source_last_modified: plan.artifact.data_last_modified.clone(),
                 selected_schema: selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, "dbsnp")?.schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -2417,6 +2492,7 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                 return Err("CADD range plan chromosome order is inconsistent".into());
             }
             let expected = ranges.iter().map(|range| range.len()).sum();
+            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: "cadd".into(),
                 release: "1.7".into(),
@@ -2445,14 +2521,9 @@ fn run_cadd_live(request: CaddLiveRequest, selection: SupplementaryFieldSelectio
                 )),
                 selected_schema: selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, "cadd")?.schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -2549,6 +2620,7 @@ fn run_revel_live(
             if live_cancel().load(Ordering::SeqCst) {
                 return Err("cancelled".into());
             }
+            let paths = ShardPaths::new(&request.resource_root, &archive.chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: "revel".into(),
                 release: manifest.release.clone(),
@@ -2560,14 +2632,9 @@ fn run_revel_live(
                 source_last_modified: None,
                 selected_schema: selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, "revel")?.schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, &archive.chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -2667,6 +2734,7 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
             if range.chromosome != *chromosome {
                 return Err("SpliceAI range plan chromosome order is inconsistent".into());
             }
+            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: "spliceai".into(),
                 release: "ensembl-mane-v1.4-masked-snv".into(),
@@ -2681,14 +2749,9 @@ fn run_spliceai_live(request: SpliceAiLiveRequest, selection: SupplementaryField
                 source_last_modified: Some(plan.artifact.data_last_modified.clone()),
                 selected_schema: selected_schema.clone(),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, "spliceai")?.schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -2865,6 +2928,7 @@ fn run_dbnsfp_live(
             if live_cancel().load(Ordering::SeqCst) {
                 return Err("cancelled".into());
             }
+            let paths = ShardPaths::new(&request.resource_root, &member.chromosome)?;
             let identity = PreparationIdentity {
                 resource_id: "dbnsfp".into(),
                 release: "4.9a".into(),
@@ -2876,14 +2940,9 @@ fn run_dbnsfp_live(
                 source_last_modified: None,
                 selected_schema: dbnsfp_schema_identity(&selection),
                 fastvep_commit: LEGACY_PREPARATION_IDENTITY_COMMIT.into(),
-                osa_schema_version: 1,
+                osa_schema_version: effective_cache_format(&paths, "dbnsfp")?.schema_version(),
             };
-            let paths = ShardPaths::new(&request.resource_root, &member.chromosome)?;
-            match restart_decision_with_legacy_upgrade(
-                &request.fastvep_executable,
-                &paths,
-                &identity,
-            ) {
+            match restart_decision(&paths, &identity) {
                 RestartDecision::AlreadyVerified => {
                     completed += 1;
                     if let Ok(checkpoint) = read_checkpoint(&paths.verification()) {
@@ -3019,50 +3078,6 @@ fn run_dbnsfp_live(
     );
 }
 
-fn remove_legacy_dbnsfp_shards(
-    resource_root: &Path,
-    manifest: &DbnsfpPinnedManifest,
-) -> Result<(), String> {
-    for member in &manifest.members {
-        let paths = ShardPaths::new(resource_root, &member.chromosome)?;
-        if paths.final_directory.is_dir()
-            && read_checkpoint(&paths.verification()).map_or(true, |checkpoint| {
-                checkpoint.identity.resource_id != "dbnsfp"
-                    || checkpoint.identity.release != "4.9a"
-                    || !checkpoint
-                        .identity
-                        .selected_schema
-                        .starts_with(DBNSFP_CURATED_SCHEMA)
-            })
-        {
-            fs::remove_dir_all(&paths.final_directory).map_err(|error| {
-                format!(
-                    "cannot replace legacy dbNSFP chromosome {} cache: {error}",
-                    member.chromosome
-                )
-            })?;
-        }
-        if paths.partial_directory.is_dir()
-            && read_checkpoint(&paths.checkpoint()).map_or(true, |checkpoint| {
-                checkpoint.identity.resource_id != "dbnsfp"
-                    || checkpoint.identity.release != "4.9a"
-                    || !checkpoint
-                        .identity
-                        .selected_schema
-                        .starts_with(DBNSFP_CURATED_SCHEMA)
-            })
-        {
-            fs::remove_dir_all(&paths.partial_directory).map_err(|error| {
-                format!(
-                    "cannot clear legacy dbNSFP chromosome {} staging cache: {error}",
-                    member.chromosome
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
 fn remove_consumed_dbnsfp_archive(archive: &Path) -> Result<(), String> {
     let filename = archive
         .file_name()
@@ -3155,14 +3170,39 @@ fn write_osa_shard_manifest<'a>(
     ) {
         return Err("unsupported OSA shard manifest resource".into());
     }
-    let shards = chromosomes
-        .map(|chromosome| {
-            serde_json::json!({
-                "chromosome": chromosome,
-                "file": format!("shards/chr{chromosome}/source.osa")
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut selected_format = None;
+    let mut shards = Vec::new();
+    for chromosome in chromosomes {
+        let paths = ShardPaths::new(resource_root, chromosome)?;
+        let checkpoint = read_checkpoint(&paths.verification()).map_err(|error| {
+            format!("{resource_id} chromosome {chromosome} is not verified: {error}")
+        })?;
+        if checkpoint.state != CheckpointState::Verified
+            || checkpoint.identity.resource_id != resource_id
+        {
+            return Err(format!(
+                "{resource_id} chromosome {chromosome} has an invalid verification identity"
+            ));
+        }
+        let format = checkpoint.identity.cache_format()?;
+        if selected_format.is_some_and(|selected| selected != format) {
+            return Err(format!(
+                "{resource_id} verified shards use mixed OSA cache formats"
+            ));
+        }
+        selected_format = Some(format);
+        required_nonempty_file(&paths.final_data(format))?;
+        if let Some(index) = paths.final_index(format) {
+            required_nonempty_file(&index)?;
+        }
+        shards.push(serde_json::json!({
+            "chromosome": chromosome,
+            "file": format!("shards/chr{chromosome}/{}", format.data_file_name())
+        }));
+    }
+    if shards.is_empty() {
+        return Err(format!("{resource_id} shard manifest cannot be empty"));
+    }
     let manifest = serde_json::json!({"schemaVersion": 1, "shards": shards});
     let final_path = resource_root.join(format!("{resource_id}.osa-shards.json"));
     let partial_path = resource_root.join(format!("{resource_id}.osa-shards.json.partial"));
@@ -3184,11 +3224,7 @@ fn write_osa_shard_manifest<'a>(
 fn run_live(request: LivePreparationRequest, selection: SupplementaryFieldSelection) {
     let result = (|| {
         let paths = ShardPaths::new(&request.resource_root, &request.identity.chromosome)?;
-        match restart_decision_with_legacy_upgrade(
-            &request.fastvep_executable,
-            &paths,
-            &request.identity,
-        ) {
+        match restart_decision(&paths, &request.identity) {
             RestartDecision::AlreadyVerified => {
                 if request.identity.resource_id == "clinvar" {
                     write_osa_shard_manifest(
@@ -3616,8 +3652,8 @@ mod tests {
         let root = root("restart");
         let chr1 = ShardPaths::new(&root, "1").unwrap();
         initialize_partial(&chr1, identity("1")).unwrap();
-        fs::write(chr1.partial_osa(), b"osa").unwrap();
-        fs::write(chr1.partial_index(), b"idx").unwrap();
+        fs::write(chr1.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(chr1.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
         promote_verified(&chr1, identity("1"), 10, 2).unwrap();
         let mut contract = crate::cache_contract::read(&chr1.cache_contract()).unwrap();
         assert_eq!(
@@ -3644,39 +3680,124 @@ mod tests {
 
         let chr2 = ShardPaths::new(&root, "2").unwrap();
         initialize_partial(&chr2, identity("2")).unwrap();
-        fs::write(chr2.partial_osa(), b"incomplete").unwrap();
+        fs::write(chr2.partial_data(CacheFormat::OsaV1), b"incomplete").unwrap();
         assert_eq!(
             restart_decision(&chr2, &identity("2")),
             RestartDecision::RestartCurrentChromosome
         );
         initialize_partial(&chr2, identity("2")).unwrap();
         assert!(
-            chr1.final_osa().exists(),
+            chr1.final_data(CacheFormat::OsaV1).exists(),
             "completed chr1 must survive restarting chr2"
         );
         assert!(
-            !chr2.partial_osa().exists(),
+            !chr2.partial_data(CacheFormat::OsaV1).exists(),
             "current partial output restarts from zero"
         );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn verified_legacy_cache_without_v2_sidecar_is_not_discarded() {
+    fn resume_keeps_one_cache_format_across_the_source() {
+        let resource_root = root("source-cache-format");
+        let chr1 = ShardPaths::new(&resource_root, "1").unwrap();
+        let osa1 = dbnsfp_identity("1", DBNSFP_CURATED_SCHEMA);
+        initialize_partial(&chr1, osa1.clone()).unwrap();
+        fs::write(chr1.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(chr1.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
+        promote_verified(&chr1, osa1, 10, 2).unwrap();
+
+        let chr2 = ShardPaths::new(&resource_root, "2").unwrap();
+        assert_eq!(
+            effective_cache_format(&chr2, "dbnsfp"),
+            Ok(CacheFormat::OsaV1)
+        );
+
+        let mut osa2 = dbnsfp_identity("2", DBNSFP_CURATED_SCHEMA);
+        osa2.osa_schema_version = CacheFormat::OsaV2.schema_version();
+        initialize_partial(&chr2, osa2.clone()).unwrap();
+        fs::write(chr2.partial_data(CacheFormat::OsaV2), b"osa2").unwrap();
+        promote_verified(&chr2, osa2, 10, 2).unwrap();
+        let chr3 = ShardPaths::new(&resource_root, "3").unwrap();
+        assert!(
+            effective_cache_format(&chr3, "dbnsfp")
+                .unwrap_err()
+                .contains("mixed OSA1 and OSA2")
+        );
+
+        let fresh = root("fresh-cache-format");
+        let fresh_paths = ShardPaths::new(&fresh, "1").unwrap();
+        assert_eq!(
+            effective_cache_format(&fresh_paths, "dbnsfp"),
+            Ok(CacheFormat::OsaV2)
+        );
+        fs::remove_dir_all(resource_root).unwrap();
+    }
+
+    #[test]
+    fn old_partial_checkpoint_restarts_with_its_saved_format() {
+        let root = root("old-partial-cache-format");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let expected = identity("1");
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::remove_file(paths.partial_cache_contract()).unwrap();
+
+        assert_eq!(
+            effective_cache_format(&paths, "gnomad"),
+            Ok(CacheFormat::OsaV1)
+        );
+        assert_eq!(
+            restart_decision(&paths, &expected),
+            RestartDecision::RestartCurrentChromosome
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_legacy_cache_without_v2_sidecar_requires_rebuild_but_is_retained() {
         let root = root("legacy-cache-contract");
         let paths = ShardPaths::new(&root, "1").unwrap();
         let expected = identity("1");
         initialize_partial(&paths, expected.clone()).unwrap();
-        fs::write(paths.partial_osa(), b"osa").unwrap();
-        fs::write(paths.partial_index(), b"idx").unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
         promote_verified(&paths, expected.clone(), 10, 2).unwrap();
         fs::remove_file(paths.cache_contract()).unwrap();
 
         assert_eq!(
-            restart_decision(&paths, &expected),
-            RestartDecision::AlreadyVerified
+            verified_cache_compatibility(&paths, &expected),
+            VerifiedCacheCompatibility::RebuildRequired
         );
-        assert!(paths.final_osa().is_file());
+        assert_eq!(
+            restart_decision(&paths, &expected),
+            RestartDecision::StaleIdentity
+        );
+        assert!(paths.final_data(CacheFormat::OsaV1).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn osa2_cache_promotes_without_an_external_index() {
+        let root = root("osa2-promotion");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let mut expected = dbnsfp_identity("1", DBNSFP_CURATED_SCHEMA);
+        expected.osa_schema_version = CacheFormat::OsaV2.schema_version();
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV2), b"osa2").unwrap();
+
+        promote_verified(&paths, expected.clone(), 10, 2).unwrap();
+
+        assert!(paths.final_data(CacheFormat::OsaV2).is_file());
+        assert!(paths.final_index(CacheFormat::OsaV2).is_none());
+        let checkpoint = read_checkpoint(&paths.verification()).unwrap();
+        assert_eq!(checkpoint.prepared_index_bytes, 0);
+        assert_eq!(checkpoint.identity.cache_format(), Ok(CacheFormat::OsaV2));
+        let contract = crate::cache_contract::read(&paths.cache_contract()).unwrap();
+        assert_eq!(contract.cache_contract.osa_schema_version, 2);
+        assert_eq!(
+            contract.cache_contract.reader_compatibility,
+            "fastvep-osa-v2"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3719,8 +3840,8 @@ mod tests {
         assert_eq!(fs::read(paths.source_part()).unwrap(), body);
 
         initialize_partial(&paths, expected.clone()).unwrap();
-        fs::write(paths.partial_osa(), b"osa").unwrap();
-        fs::write(paths.partial_index(), b"idx").unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
         promote_verified(&paths, expected, body.len() as u64, 1).unwrap();
         assert!(!paths.source_part().exists());
         assert!(!paths.source_part_identity().exists());
@@ -3927,41 +4048,81 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dbnsfp_preview_shards_are_not_ready_and_are_replaced_on_install() {
-        let root = root("dbnsfp-curated-upgrade");
+    fn incompatible_dbnsfp_shards_require_explicit_rebuild() {
+        let parent = root("dbnsfp-curated-upgrade").join("dbnsfp");
+        let root = parent.join("4.9a");
         let paths = ShardPaths::new(&root, "1").unwrap();
         let legacy = dbnsfp_identity("1", "dbnsfp-4.9a");
         initialize_partial(&paths, legacy.clone()).unwrap();
-        fs::write(paths.partial_osa(), b"osa").unwrap();
-        fs::write(paths.partial_index(), b"idx").unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
         promote_verified(&paths, legacy, 10, 2).unwrap();
 
         let status = status_with_storage("dbnsfp", &root, &["1".into()]);
-        assert_eq!(status.state, "idle");
-        assert_eq!(status.completed_chromosomes, 0);
+        assert_eq!(status.state, "rebuild-required");
+        assert_eq!(status.completed_chromosomes, 1);
+        assert!(paths.final_data(CacheFormat::OsaV1).is_file());
 
-        remove_legacy_dbnsfp_shards(&root, &pinned_dbnsfp_manifest().unwrap()).unwrap();
+        discard_generated_cache("dbnsfp", &root).unwrap();
         assert!(!paths.final_directory.exists());
+        fs::remove_dir_all(parent.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn osa2_without_a_contract_requires_rebuild() {
+        let root = root("osa2-missing-contract");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let mut expected = dbnsfp_identity("1", DBNSFP_CURATED_SCHEMA);
+        expected.osa_schema_version = CacheFormat::OsaV2.schema_version();
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV2), b"osa2").unwrap();
+        promote_verified(&paths, expected.clone(), 10, 2).unwrap();
+        fs::remove_file(paths.cache_contract()).unwrap();
+
+        assert_eq!(
+            verified_cache_compatibility(&paths, &expected),
+            VerifiedCacheCompatibility::RebuildRequired
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn curated_dbnsfp_shards_survive_restart_cleanup() {
-        let root = root("dbnsfp-curated-restart");
+    fn malformed_cache_contract_requires_rebuild() {
+        let root = root("malformed-cache-contract");
         let paths = ShardPaths::new(&root, "1").unwrap();
-        let current = dbnsfp_identity("1", DBNSFP_CURATED_SCHEMA);
-        initialize_partial(&paths, current.clone()).unwrap();
-        fs::write(paths.partial_osa(), b"osa").unwrap();
-        fs::write(paths.partial_index(), b"idx").unwrap();
-        promote_verified(&paths, current, 10, 2).unwrap();
+        let expected = identity("1");
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
+        promote_verified(&paths, expected.clone(), 10, 2).unwrap();
+        fs::write(paths.cache_contract(), b"{").unwrap();
 
-        remove_legacy_dbnsfp_shards(&root, &pinned_dbnsfp_manifest().unwrap()).unwrap();
-        assert!(paths.final_osa().is_file());
         assert_eq!(
-            restart_decision(&paths, &dbnsfp_identity("1", DBNSFP_CURATED_SCHEMA)),
-            RestartDecision::AlreadyVerified
+            verified_cache_compatibility(&paths, &expected),
+            VerifiedCacheCompatibility::RebuildRequired
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rebuild_discards_only_generated_cache_outputs() {
+        let parent = root("safe-rebuild").join("gnomad");
+        let resource_root = parent.join("4.1");
+        for directory in ["shards", "staging", "source-parts"] {
+            fs::create_dir_all(resource_root.join(directory)).unwrap();
+            fs::write(resource_root.join(directory).join("fixture"), b"fixture").unwrap();
+        }
+        fs::write(resource_root.join("gnomad.osa-shards.json"), b"manifest").unwrap();
+        fs::write(parent.join("field-selection.json"), b"settings").unwrap();
+
+        discard_generated_cache("gnomad", &resource_root).unwrap();
+
+        assert!(!resource_root.join("shards").exists());
+        assert!(!resource_root.join("staging").exists());
+        assert!(!resource_root.join("gnomad.osa-shards.json").exists());
+        assert!(resource_root.join("source-parts").join("fixture").is_file());
+        assert!(parent.join("field-selection.json").is_file());
+        fs::remove_dir_all(parent.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -3976,10 +4137,11 @@ mod tests {
             let paths = ShardPaths::new(&root, chromosome).unwrap();
             let identity = dbnsfp_identity(chromosome, &schema);
             initialize_partial(&paths, identity.clone()).unwrap();
-            fs::write(paths.partial_osa(), b"osa").unwrap();
-            fs::write(paths.partial_index(), b"idx").unwrap();
+            fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+            fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
             promote_verified(&paths, identity, 10, 2).unwrap();
         }
+        write_osa_shard_manifest(&root, "dbnsfp", ["1", "2"].into_iter()).unwrap();
 
         let status = status_with_storage("dbnsfp", &root, &["1".into(), "2".into()]);
         assert_eq!(status.state, "ready");
@@ -4035,7 +4197,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_cadd_stream_builds_and_reopens_with_the_pinned_fastvep() {
+    fn tiny_cadd_cache_without_a_contract_requires_rebuild() {
         let fastvep = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -4090,11 +4252,10 @@ mod tests {
         .unwrap();
         fs::remove_file(paths.cache_contract()).unwrap();
         assert_eq!(
-            restart_decision_with_legacy_upgrade(&fastvep, &paths, &identity),
-            RestartDecision::AlreadyVerified
+            restart_decision(&paths, &identity),
+            RestartDecision::StaleIdentity
         );
-        let upgraded = crate::cache_contract::read(&paths.cache_contract()).unwrap();
-        assert_eq!(upgraded.builder_provenance.commit, "unknown-legacy");
+        assert!(!paths.cache_contract().exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4182,6 +4343,63 @@ mod tests {
         let configuration =
             serde_json::to_value(dbnsfp_field_configuration(&root).unwrap()).unwrap();
         assert_eq!(configuration["locked"], true);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_dbnsfp_field_selection_migrates_only_before_cache_creation() {
+        let root = root("dbnsfp-legacy-field-selection");
+        fs::create_dir_all(&root).unwrap();
+        let legacy = DbnsfpFieldSelection {
+            schema_version: DBNSFP_FIELD_SELECTION_SCHEMA_VERSION,
+            contract_id: DBNSFP_LEGACY_CURATED_SCHEMA.into(),
+            fields: vec![
+                "aaref".into(),
+                "aaalt".into(),
+                "aapos".into(),
+                "genename".into(),
+                "Ensembl_geneid".into(),
+                "Ensembl_transcriptid".into(),
+                "Ensembl_proteinid".into(),
+                "Uniprot_acc".into(),
+                "HGVSc_VEP".into(),
+                "HGVSp_VEP".into(),
+                "APPRIS".into(),
+                "GENCODE_basic".into(),
+                "TSL".into(),
+                "VEP_canonical".into(),
+                "REVEL_score".into(),
+            ],
+        };
+        fs::write(
+            root.join("field-selection.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let migrated = load_dbnsfp_field_selection(&root).unwrap();
+        assert_eq!(migrated.contract_id, DBNSFP_CURATED_SCHEMA);
+        assert!(migrated.fields.contains(&"REVEL_score".into()));
+        for required in ["Uniprot_entry", "MutPred_protID", "MutPred_AAchange"] {
+            assert!(migrated.fields.contains(&required.into()));
+        }
+        assert_eq!(
+            serde_json::from_slice::<DbnsfpFieldSelection>(
+                &fs::read(root.join("field-selection.json")).unwrap()
+            )
+            .unwrap(),
+            migrated
+        );
+
+        fs::create_dir_all(root.join("shards").join("chr1")).unwrap();
+        fs::write(
+            root.join("field-selection.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let locked = load_dbnsfp_field_selection(&root).unwrap();
+        assert_eq!(locked, legacy);
+        assert!(dbnsfp_schema_identity(&locked).starts_with(DBNSFP_LEGACY_CURATED_SCHEMA));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4370,8 +4588,8 @@ mod tests {
             restart_decision(&paths, &changed_schema),
             RestartDecision::StaleIdentity
         );
-        fs::write(paths.partial_osa(), b"osa").unwrap();
-        fs::write(paths.partial_index(), b"idx").unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
         assert!(
             promote_verified(&paths, identity("X"), 9, 1)
                 .unwrap_err()
@@ -4552,7 +4770,7 @@ mod tests {
             report.record_count,
         )
         .unwrap();
-        assert!(paths.final_osa().is_file());
+        assert!(paths.final_data(CacheFormat::OsaV1).is_file());
         assert!(!root.join("staging").join("chr22.partial").exists());
         assert!(
             !root
@@ -4637,8 +4855,8 @@ mod tests {
         assert!(error.contains("Resume will redownload"));
         assert!(!paths.source_part().exists());
         assert!(!paths.source_part_identity().exists());
-        assert!(!paths.partial_osa().exists());
-        assert!(!paths.partial_index().exists());
+        assert!(!paths.partial_data(CacheFormat::OsaV1).exists());
+        assert!(!paths.partial_index(CacheFormat::OsaV1).unwrap().exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4676,6 +4894,7 @@ mod tests {
         let mut expected = identity("22");
         expected.expected_compressed_bytes = gzip.len() as u64;
         initialize_partial(&paths, expected.clone()).unwrap();
+        let mut progress_samples = Vec::new();
         let result = stream_pinned_dbnsfp_member(
             &StreamingBuildRequest {
                 fastvep_executable: &fastvep,
@@ -4690,10 +4909,15 @@ mod tests {
             archive.len() as u64,
             &member,
             &AtomicBool::new(false),
-            |_| {},
+            |progress| progress_samples.push(progress),
         )
         .unwrap();
         assert_eq!(result.compressed_bytes_read, gzip.len() as u64);
+        assert!(
+            progress_samples
+                .iter()
+                .any(|progress| progress.consumed_bytes > 0 && progress.bytes_per_second > 0.0)
+        );
         assert_eq!(
             verify_partial_osa(&fastvep, &paths, &expected)
                 .unwrap()
@@ -4724,8 +4948,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("CRC mismatch"), "{error}");
-        assert!(!bad_paths.partial_osa().exists());
-        assert!(!bad_paths.partial_index().exists());
+        assert!(!bad_paths.partial_data(CacheFormat::OsaV1).exists());
+        assert!(
+            !bad_paths
+                .partial_index(CacheFormat::OsaV1)
+                .unwrap()
+                .exists()
+        );
 
         fs::remove_dir_all(root_path).unwrap();
         fs::remove_dir_all(bad_root).unwrap();
@@ -4876,8 +5105,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "cancelled");
-        assert!(!paths.partial_osa().exists());
-        assert!(!paths.partial_index().exists());
+        assert!(!paths.partial_data(CacheFormat::OsaV1).exists());
+        assert!(!paths.partial_index(CacheFormat::OsaV1).unwrap().exists());
         assert!(!paths.final_directory.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -4959,11 +5188,27 @@ mod tests {
             "revel",
             "clinvar",
         ] {
-            write_osa_shard_manifest(&root, resource_id, ["1", "2"].into_iter()).unwrap();
+            let resource_root = root.join(resource_id);
+            let format = CacheFormat::preferred_for_resource(resource_id).unwrap();
+            for chromosome in ["1", "2"] {
+                let paths = ShardPaths::new(&resource_root, chromosome).unwrap();
+                let mut shard_identity = identity(chromosome);
+                shard_identity.resource_id = resource_id.into();
+                shard_identity.osa_schema_version = format.schema_version();
+                initialize_partial(&paths, shard_identity.clone()).unwrap();
+                fs::write(paths.partial_data(format), b"data").unwrap();
+                if let Some(index) = paths.partial_index(format) {
+                    fs::write(index, b"index").unwrap();
+                }
+                promote_verified(&paths, shard_identity, 10, 1).unwrap();
+            }
+            write_osa_shard_manifest(&resource_root, resource_id, ["1", "2"].into_iter()).unwrap();
             let manifest =
-                fs::read_to_string(root.join(format!("{resource_id}.osa-shards.json"))).unwrap();
-            assert!(manifest.contains("shards/chr1/source.osa"));
-            assert!(manifest.contains("shards/chr2/source.osa"));
+                fs::read_to_string(resource_root.join(format!("{resource_id}.osa-shards.json")))
+                    .unwrap();
+            let file_name = format.data_file_name();
+            assert!(manifest.contains(&format!("shards/chr1/{file_name}")));
+            assert!(manifest.contains(&format!("shards/chr2/{file_name}")));
         }
         fs::remove_dir_all(root).unwrap();
     }

@@ -1095,25 +1095,59 @@ fn append_coding_evidence(
 fn coding_string<'a>(coding: &'a Value, pointers: &[&str]) -> Option<&'a str> {
     pointers.iter().find_map(|pointer| {
         let value = coding.pointer(pointer)?;
-        value
-            .as_str()
-            .or_else(|| value.as_array()?.iter().find_map(Value::as_str))
+        if let Some(value) = value.as_str() {
+            return (!coding_value_is_missing(value)).then_some(value);
+        }
+        let mut selected = None;
+        for value in value.as_array()? {
+            if value.is_null() || value.as_str().is_some_and(coding_value_is_missing) {
+                continue;
+            }
+            let value = value.as_str()?;
+            if selected.is_some_and(|selected| selected != value) {
+                return None;
+            }
+            selected = Some(value);
+        }
+        selected
     })
 }
 
 fn coding_number(coding: &Value, pointers: &[&str]) -> Option<f64> {
     pointers.iter().find_map(|pointer| {
         let value = coding.pointer(pointer)?;
-        value
-            .as_f64()
-            .or_else(|| value.as_str()?.parse().ok())
-            .or_else(|| {
-                value
-                    .as_array()?
-                    .iter()
-                    .find_map(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+        let parse = |value: &Value| -> Option<f64> {
+            value.as_f64().or_else(|| {
+                value.as_str().and_then(|value| {
+                    (!coding_value_is_missing(value))
+                        .then(|| value.parse().ok())
+                        .flatten()
+                })
             })
+        };
+        if let Some(value) = parse(value) {
+            return Some(value);
+        }
+        let mut selected = None;
+        for value in value.as_array()? {
+            if value.is_null() || value.as_str().is_some_and(coding_value_is_missing) {
+                continue;
+            }
+            let value = parse(value)?;
+            if selected.is_some_and(|selected| selected != value) {
+                return None;
+            }
+            selected = Some(value);
+        }
+        selected
     })
+}
+
+fn coding_value_is_missing(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_uppercase().as_str(),
+        "" | "." | "-" | "NA" | "N/A" | "NONE" | "NULL"
+    )
 }
 
 fn append_evidence_row(
@@ -1193,16 +1227,33 @@ fn field_physical_scope(field_path: &str) -> &'static str {
     }
 }
 
+fn provider_selected_standard_field(field_path: &str) -> bool {
+    matches!(
+        field_path,
+        "gene"
+            | "consequence"
+            | "revel"
+            | "alphaMissense"
+            | "siftCat"
+            | "polyphenCat"
+            | "metasvmPred"
+    )
+}
+
 fn field_biological_scope(field_path: &str) -> &'static str {
-    (field_physical_scope(field_path) == "selected")
+    (field_physical_scope(field_path) == "selected" || provider_selected_standard_field(field_path))
         .then_some("feature")
         .unwrap_or("allele")
 }
 
 fn field_resolution_policy(field_path: &str) -> &'static str {
-    (field_physical_scope(field_path) == "selected")
-        .then_some("materializedSelected")
-        .unwrap_or("direct")
+    if provider_selected_standard_field(field_path) {
+        "providerSelected"
+    } else if field_physical_scope(field_path) == "selected" {
+        "materializedSelected"
+    } else {
+        "direct"
+    }
 }
 
 fn catalog_json(occurrences: &BTreeMap<String, u64>) -> Value {
@@ -1223,7 +1274,9 @@ fn catalog_json(occurrences: &BTreeMap<String, u64>) -> Value {
                     "storageEncoding": "scalar",
                     "resolutionPolicy": field_resolution_policy(field.path)
                 });
-                if field_physical_scope(field.path) == "selected" {
+                if field_physical_scope(field.path) == "selected"
+                    || provider_selected_standard_field(field.path)
+                {
                     value["selectionOrigin"] = Value::String("provider".into());
                 }
                 value
@@ -1503,6 +1556,7 @@ mod tests {
     fn catalog_distinguishes_position_and_source_selected_coding_fields() {
         let occurrences = BTreeMap::from([
             ("gnomadAf".to_owned(), 1),
+            ("revel".to_owned(), 1),
             ("codingRevelScore".to_owned(), 1),
             ("codingCaddPhred".to_owned(), 1),
             ("codingGerpRs".to_owned(), 1),
@@ -1518,6 +1572,7 @@ mod tests {
                 .clone()
         };
         assert_eq!(field("gnomadAf"), "direct");
+        assert_eq!(field("revel"), "providerSelected");
         assert_eq!(field("codingRevelScore"), "materializedSelected");
         assert_eq!(field("codingCaddPhred"), "direct");
         assert_eq!(field("codingGerpRs"), "direct");
@@ -1531,6 +1586,35 @@ mod tests {
         assert_eq!(revel["selectionOrigin"], "provider");
         assert_eq!(field_physical_scope("codingRevelScore"), "selected");
         assert_eq!(field_physical_scope("codingCaddPhred"), "allele");
+        let standard_revel = fields
+            .iter()
+            .find(|field| field["fieldPath"] == "revel")
+            .unwrap();
+        assert_eq!(standard_revel["biologicalScope"], "feature");
+        assert_eq!(standard_revel["physicalScope"], "allele");
+        assert_eq!(standard_revel["selectionOrigin"], "provider");
+    }
+
+    #[test]
+    fn coding_arrays_must_have_one_unambiguous_value() {
+        let coding = json!({
+            "sameString": ["D", "D"],
+            "mixedString": ["D", "T"],
+            "missingString": [null, ".", "D"],
+            "malformedString": ["D", 4],
+            "sameNumber": [0.42, "0.42"],
+            "mixedNumber": [0.42, 0.17],
+            "missingNumber": [null, "NA", 0.42],
+            "malformedNumber": [0.42, "not-a-number"]
+        });
+        assert_eq!(coding_string(&coding, &["/sameString"]), Some("D"));
+        assert_eq!(coding_string(&coding, &["/mixedString"]), None);
+        assert_eq!(coding_string(&coding, &["/missingString"]), Some("D"));
+        assert_eq!(coding_string(&coding, &["/malformedString"]), None);
+        assert_eq!(coding_number(&coding, &["/sameNumber"]), Some(0.42));
+        assert_eq!(coding_number(&coding, &["/mixedNumber"]), None);
+        assert_eq!(coding_number(&coding, &["/missingNumber"]), Some(0.42));
+        assert_eq!(coding_number(&coding, &["/malformedNumber"]), None);
     }
 
     #[test]

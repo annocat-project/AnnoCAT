@@ -168,7 +168,7 @@ pub fn canonicalize<R: ReferenceSequence>(
     let mut ref_bases = allele_bytes(reference)?;
     let mut alt_bases = allele_bytes(alternate)?;
     let observed = reference_source.sequence(&chromosome, position, ref_bases.len())?;
-    if !ref_bases.eq_ignore_ascii_case(&observed) {
+    if !reference_bases_are_compatible(&ref_bases, &observed) {
         return Err(NormalizeError::ReferenceMismatch {
             expected: String::from_utf8_lossy(&observed).into_owned(),
             observed: reference.to_ascii_uppercase(),
@@ -176,6 +176,22 @@ pub fn canonicalize<R: ReferenceSequence>(
     }
     ref_bases.make_ascii_uppercase();
     alt_bases.make_ascii_uppercase();
+
+    // Ambiguous bases cannot be shifted safely. Preserve their VCF identity after
+    // confirming that the declared REF is compatible with the installed reference.
+    if ref_bases
+        .iter()
+        .chain(&alt_bases)
+        .chain(&observed)
+        .any(|base| !matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T'))
+    {
+        return Ok(CanonicalAllele {
+            chromosome,
+            position,
+            reference: String::from_utf8(ref_bases).expect("validated ASCII allele"),
+            alternate: String::from_utf8(alt_bases).expect("validated ASCII allele"),
+        });
+    }
     let mut position = position;
 
     loop {
@@ -213,6 +229,36 @@ pub fn canonicalize<R: ReferenceSequence>(
         reference: String::from_utf8(ref_bases).expect("validated ASCII allele"),
         alternate: String::from_utf8(alt_bases).expect("validated ASCII allele"),
     })
+}
+
+fn reference_bases_are_compatible(declared: &[u8], observed: &[u8]) -> bool {
+    declared.len() == observed.len()
+        && declared.iter().zip(observed).all(|(&declared, &observed)| {
+            iupac_mask(declared)
+                .zip(iupac_mask(observed))
+                .is_some_and(|(declared, observed)| declared & observed != 0)
+        })
+}
+
+fn iupac_mask(base: u8) -> Option<u8> {
+    match base.to_ascii_uppercase() {
+        b'A' => Some(0b0001),
+        b'C' => Some(0b0010),
+        b'G' => Some(0b0100),
+        b'T' => Some(0b1000),
+        b'R' => Some(0b0101),
+        b'Y' => Some(0b1010),
+        b'S' => Some(0b0110),
+        b'W' => Some(0b1001),
+        b'K' => Some(0b1100),
+        b'M' => Some(0b0011),
+        b'B' => Some(0b1110),
+        b'D' => Some(0b1101),
+        b'H' => Some(0b1011),
+        b'V' => Some(0b0111),
+        b'N' => Some(0b1111),
+        _ => None,
+    }
 }
 
 fn allele_bytes(value: &str) -> Result<Vec<u8>, NormalizeError> {
@@ -308,6 +354,36 @@ mod tests {
         };
         assert!(matches!(
             canonicalize(&mut genome, "1", 2, "G", "A"),
+            Err(NormalizeError::ReferenceMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_compatible_ambiguous_reference_without_shifting() {
+        let mut genome = MemoryReference {
+            chromosome: "3",
+            bases: b"ATGBGCA",
+        };
+        let allele = canonicalize(&mut genome, "3", 2, "TGNGC", "T").unwrap();
+        assert_eq!(
+            allele,
+            CanonicalAllele {
+                chromosome: "3".into(),
+                position: 2,
+                reference: "TGNGC".into(),
+                alternate: "T".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_incompatible_iupac_reference_base() {
+        let mut genome = MemoryReference {
+            chromosome: "1",
+            bases: b"AB",
+        };
+        assert!(matches!(
+            canonicalize(&mut genome, "1", 2, "A", "T"),
             Err(NormalizeError::ReferenceMismatch { .. })
         ));
     }
