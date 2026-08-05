@@ -19,7 +19,7 @@ fn run() -> Result<(), String> {
     let mut token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(format!(
-            "cannot inspect report worker token: {}",
+            "cannot inspect result validation worker token: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -37,30 +37,32 @@ fn run() -> Result<(), String> {
     unsafe { CloseHandle(token) };
     if inspected == 0 {
         return Err(format!(
-            "cannot verify report worker AppContainer token: {}",
+            "cannot verify result validation worker AppContainer token: {}",
             std::io::Error::last_os_error()
         ));
     }
     if is_appcontainer == 0 {
-        return Err("report worker refused to parse untrusted data outside AppContainer".into());
+        return Err(
+            "result validation worker refused to parse untrusted data outside AppContainer".into(),
+        );
     }
 
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() != Some("validate-handle") {
-        return Err("invalid report worker request".into());
+        return Err("invalid result validation worker request".into());
     }
     let handle = args
         .next()
-        .ok_or("missing inherited report archive handle")?
+        .ok_or("missing inherited result archive handle")?
         .parse::<usize>()
-        .map_err(|_| "invalid inherited report archive handle")?;
+        .map_err(|_| "invalid inherited result archive handle")?;
     if handle == 0 || args.next().is_some() {
-        return Err("invalid report worker request".into());
+        return Err("invalid result validation worker request".into());
     }
     let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
     let report = report_import::validate_archive_file(file)?;
     println!(
-        "Valid AnnoCAT report: {} (schema {}, {} files, {} bytes)",
+        "Valid AnnoCAT result: {} (schema {}, {} files, {} bytes)",
         report.run_id, report.schema_version, report.file_count, report.uncompressed_bytes
     );
     Ok(())

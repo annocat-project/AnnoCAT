@@ -203,8 +203,8 @@
     },
     {
       "id": "hpo",
-      "name": "Human Phenotype Ontology",
-      "purpose": "Local phenotype terminology, disease profiles, and disease-gene associations for experimental phenotype similarity",
+      "name": "Phenotype and condition knowledge",
+      "purpose": "Local phenotype terms, condition terms, disease profiles, and gene associations",
       "defaultEnabled": false,
       "fastvepSource": null,
       "evidenceScope": "gene",
@@ -254,14 +254,14 @@
     },
     {
       "id": "standard",
-      "name": "Minimal",
-      "purpose": "A smaller clinical and population set with dbSNP, conservation, and standalone REVEL scores",
+      "name": "Standard",
+      "purpose": "A smaller set of clinical, population, dbSNP, conservation, and REVEL annotations",
       "sourceIds": ["clinvar", "dbsnp", "gnomad", "phylop", "revel"]
     },
     {
       "id": "online",
-      "name": "Core + FAVOR",
-      "purpose": "Local core consequence annotation with explicit FAVOR enrichment for selected or filtered result sets",
+      "name": "Core + online annotations",
+      "purpose": "Core consequence annotation with FAVOR annotations for selected or matching variants",
       "sourceIds": [],
       "serviceIds": ["favor-variant-annotation"]
     }
@@ -537,6 +537,7 @@
     },
     {
       "id": "hpo",
+      "userVisible": true,
       "assembly": "Assembly independent",
       "delivery": "knowledge-cache",
       "adapterContract": "annocat-hpo-phenotype-v1",
@@ -555,6 +556,29 @@
         "checksum": null,
         "resolver": "github-hpo-release-assets",
         "resolverApiUrl": "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest"
+      }
+    },
+    {
+      "id": "mondo",
+      "userVisible": false,
+      "assembly": "Assembly independent",
+      "delivery": "knowledge-cache",
+      "adapterContract": "annocat-mondo-condition-v1",
+      "manifestRef": "config/mondo-assets.json",
+      "manifestRole": "bootstrap-fallback",
+      "release": {
+        "version": "latest",
+        "policy": "rolling",
+        "artifactId": "monarch-mondo:latest",
+        "primaryUrl": "https://github.com/monarch-initiative/mondo/releases/latest",
+        "filename": "mondo.json",
+        "downloadBytes": 107273669,
+        "archiveFormat": "release-asset",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-07-31T00:00:00-04:00",
+        "checksum": null,
+        "resolver": "github-mondo-release-assets",
+        "resolverApiUrl": "https://api.github.com/repos/monarch-initiative/mondo/releases/latest"
       }
     }
   ]

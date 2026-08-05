@@ -20,6 +20,7 @@ pub const PROVENANCE_FILE: &str = "favor-provenance.json";
 
 const QUERY_DIRECTORY: &str = "query-evidence";
 const QUERY_CATALOG_FILE: &str = "query-field-catalog.json";
+pub const QUERY_GENE_EVIDENCE_FILE: &str = "query-gene-evidence.parquet";
 const REQUEST_CHUNK: usize = 1_000;
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -312,9 +313,9 @@ pub fn enrich(
     variants: &Path,
     canonical_evidence: &Path,
     canonical_catalog: &Path,
-    request: EnrichRequest,
+    mut request: EnrichRequest,
 ) -> Result<EnrichSummary, String> {
-    validate_request(&request)?;
+    normalize_request(&mut request)?;
     validate_assembly(run_directory)?;
     let service = annocat_core::source_catalog::service(SERVICE_ID)
         .ok_or("FAVOR service configuration is missing")?;
@@ -324,7 +325,7 @@ pub fn enrich(
         .ok_or("FAVOR coding service configuration is missing")?;
     if request.allele_ids.len() > service.max_results {
         return Err(format!(
-            "FAVOR enrichment is limited to {} variants per operation",
+            "Online annotations are limited to {} variants per request",
             service.max_results
         ));
     }
@@ -439,7 +440,7 @@ pub fn effective_evidence(canonical: &Path) -> PathBuf {
         return canonical.to_path_buf();
     };
     let query = run_directory.join(QUERY_DIRECTORY);
-    if query.join("canonical.parquet").is_file() && query.join("favor.parquet").is_file() {
+    if query.join("canonical.parquet").is_file() {
         query.join("*.parquet")
     } else {
         canonical.to_path_buf()
@@ -462,12 +463,42 @@ pub fn prepare_query_assets(
     canonical_evidence: &Path,
     canonical_catalog: &Path,
 ) -> Result<(), String> {
+    prepare_query_assets_with_gene(canonical_evidence, canonical_catalog, None)
+}
+
+pub fn prepare_query_assets_with_gene(
+    canonical_evidence: &Path,
+    canonical_catalog: &Path,
+    gene_assets: Option<(&Path, &Path)>,
+) -> Result<(), String> {
     let run_directory = canonical_evidence
         .parent()
         .ok_or("completed evidence path has no parent")?;
     let favor_evidence = run_directory.join(EVIDENCE_FILE);
     let favor_catalog = run_directory.join(FIELD_CATALOG_FILE);
-    if !favor_evidence.is_file() || !favor_catalog.is_file() {
+    let has_favor = favor_evidence.is_file() && favor_catalog.is_file();
+    if !has_favor && gene_assets.is_none() {
+        for stale in [
+            run_directory.join(QUERY_CATALOG_FILE),
+            run_directory.join(QUERY_GENE_EVIDENCE_FILE),
+            run_directory
+                .join(QUERY_DIRECTORY)
+                .join("canonical.parquet"),
+            run_directory.join(QUERY_DIRECTORY).join("favor.parquet"),
+            run_directory
+                .join(QUERY_DIRECTORY)
+                .join("phenotype-candidates.parquet"),
+        ] {
+            if stale.is_file() {
+                fs::remove_file(&stale)
+                    .map_err(|error| format!("cannot remove stale query evidence: {error}"))?;
+            }
+        }
+        let query_directory = run_directory.join(QUERY_DIRECTORY);
+        if query_directory.is_dir() {
+            fs::remove_dir(&query_directory)
+                .map_err(|error| format!("cannot remove empty query directory: {error}"))?;
+        }
         return Ok(());
     }
     let query_directory = run_directory.join(QUERY_DIRECTORY);
@@ -477,10 +508,36 @@ pub fn prepare_query_assets(
         canonical_evidence,
         &query_directory.join("canonical.parquet"),
     )?;
-    publish_hard_link(&favor_evidence, &query_directory.join("favor.parquet"))?;
-    merge_catalogs(
+    if has_favor {
+        publish_hard_link(&favor_evidence, &query_directory.join("favor.parquet"))?;
+    } else {
+        let stale = query_directory.join("favor.parquet");
+        if stale.is_file() {
+            fs::remove_file(stale)
+                .map_err(|error| format!("cannot remove stale FAVOR evidence: {error}"))?;
+        }
+    }
+    let legacy_candidates = query_directory.join("phenotype-candidates.parquet");
+    if legacy_candidates.is_file() {
+        fs::remove_file(legacy_candidates).map_err(|error| {
+            format!("cannot remove legacy phenotype candidate evidence: {error}")
+        })?;
+    }
+    let gene_catalog = if let Some((gene_evidence, gene_catalog)) = gene_assets {
+        publish_hard_link(gene_evidence, &run_directory.join(QUERY_GENE_EVIDENCE_FILE))?;
+        Some(gene_catalog)
+    } else {
+        let stale = run_directory.join(QUERY_GENE_EVIDENCE_FILE);
+        if stale.is_file() {
+            fs::remove_file(stale)
+                .map_err(|error| format!("cannot remove stale phenotype evidence: {error}"))?;
+        }
+        None
+    };
+    merge_query_catalogs(
         canonical_catalog,
-        &favor_catalog,
+        has_favor.then_some(favor_catalog.as_path()),
+        gene_catalog,
         &run_directory.join(QUERY_CATALOG_FILE),
     )
 }
@@ -500,32 +557,32 @@ pub fn packaged_assets(run_directory: &Path) -> Result<Vec<(&'static str, &'stat
         return Ok(Vec::new());
     }
     if existing != files.len() {
-        return Err("FAVOR enrichment files are incomplete".into());
+        return Err("online annotation files are incomplete".into());
     }
     Ok(files.to_vec())
 }
 
-fn validate_request(request: &EnrichRequest) -> Result<(), String> {
+fn normalize_request(request: &mut EnrichRequest) -> Result<(), String> {
     if !request.consent {
-        return Err(
-            "FAVOR enrichment requires confirmation before variant coordinates are sent".into(),
-        );
+        return Err("Confirm the request before AnnoCAT sends variant coordinates to FAVOR".into());
     }
     if request.allele_ids.is_empty() {
-        return Err("select at least one variant for FAVOR enrichment".into());
+        return Err("select at least one variant for online annotations".into());
     }
-    let mut seen = HashSet::new();
     for allele_id in &request.allele_ids {
         if allele_id.len() > 64
             || !allele_id.starts_with("allele-")
             || !allele_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            || !seen.insert(allele_id)
         {
-            return Err("FAVOR enrichment requires unique valid allele identifiers".into());
+            return Err("online annotations require valid allele identifiers".into());
         }
     }
+    let mut seen = HashSet::new();
+    request
+        .allele_ids
+        .retain(|allele_id| seen.insert(allele_id.clone()));
     Ok(())
 }
 
@@ -535,7 +592,7 @@ fn validate_assembly(run_directory: &Path) -> Result<(), String> {
     let manifest: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("invalid completed run manifest: {error}"))?;
     if manifest["state"] != "completed" || manifest["assembly"] != "GRCh38" {
-        return Err("FAVOR enrichment currently supports completed GRCh38 reports only".into());
+        return Err("online annotations require a completed GRCh38 AnnoCAT result".into());
     }
     Ok(())
 }
@@ -570,9 +627,9 @@ fn report_coordinates(variants: &Path, allele_ids: &[String]) -> Result<Vec<Coor
         for row in rows {
             let (allele_id, chromosome, position, reference, alternate) =
                 row.map_err(|error| error.to_string())?;
-            let chromosome = favor_chromosome(&chromosome)?;
+            let chromosome = normalized_chromosome(&chromosome);
             if position < 1 {
-                return Err("report contains an invalid variant position".into());
+                return Err("the AnnoCAT result contains an invalid variant position".into());
             }
             found.insert(
                 allele_id.clone(),
@@ -590,26 +647,29 @@ fn report_coordinates(variants: &Path, allele_ids: &[String]) -> Result<Vec<Coor
     allele_ids
         .iter()
         .map(|allele_id| {
-            found
-                .remove(allele_id)
-                .ok_or_else(|| "one or more variants do not belong to this report".to_string())
+            found.remove(allele_id).ok_or_else(|| {
+                "one or more variants do not belong to this AnnoCAT result".to_string()
+            })
         })
         .collect()
 }
 
 fn favor_chromosome(value: &str) -> Result<String, String> {
-    let chromosome = value.strip_prefix("chr").unwrap_or(value);
-    let chromosome = match chromosome {
-        "M" => "MT",
-        other => other,
-    };
-    let valid = matches!(chromosome, "X" | "Y" | "MT")
+    let chromosome = normalized_chromosome(value);
+    let valid = matches!(chromosome.as_str(), "X" | "Y")
         || chromosome
             .parse::<u8>()
             .is_ok_and(|number| (1..=22).contains(&number));
     valid
-        .then(|| chromosome.to_owned())
-        .ok_or_else(|| "FAVOR enrichment supports primary GRCh38 chromosomes only".into())
+        .then_some(chromosome)
+        .ok_or_else(|| "FAVOR supports primary GRCh38 chromosomes only".into())
+}
+
+fn normalized_chromosome(value: &str) -> String {
+    match value.strip_prefix("chr").unwrap_or(value) {
+        "M" => "MT".into(),
+        chromosome => chromosome.into(),
+    }
 }
 
 fn valid_favor_reference(reference: &str) -> bool {
@@ -843,6 +903,7 @@ fn publish_items(
             .map_err(|error| format!("cannot merge existing FAVOR statuses: {error}"))?;
     }
     append_evidence(&connection, items)?;
+    remove_unsubstantiated_protein_apc(&connection)?;
     append_statuses(&connection, items, fetched_at)?;
     let occurrences = field_occurrences(&connection)?;
     let favor_catalog = catalog_json(&occurrences);
@@ -877,7 +938,7 @@ fn publish_items(
             "coding": coding_endpoint
         },
         "catalogReference": "https://favor-beta.genohub.org/docs/data",
-        "versionNote": "FAVOR's live coding API and public data catalog currently identify different dbNSFP releases; AnnoCAT therefore applies source-native interpretations but does not assume calibrated release equivalence.",
+        "versionNote": "The FAVOR coding API and data catalog identify different dbNSFP releases. AnnoCAT uses the interpretation from each source. It does not assume that the calibrated releases are equivalent.",
         "latestFetch": fetched_at
     });
     super::library_metadata::atomic_write(
@@ -929,7 +990,7 @@ fn append_evidence(connection: &Connection, items: &[StoredItem]) -> Result<(), 
                 ("tgAll", variant.tg_all),
                 ("apcConservation", variant.apc_conservation),
                 ("apcEpigenetics", variant.apc_epigenetics),
-                ("apcProteinFunction", variant.apc_protein_function),
+                ("apcProteinFunction", protein_function_apc(variant)),
             ];
             for (field, value) in numbers {
                 let Some(value) = value.filter(|value| value.is_finite()) else {
@@ -952,6 +1013,34 @@ fn append_evidence(connection: &Connection, items: &[StoredItem]) -> Result<(), 
     appender
         .flush()
         .map_err(|error| format!("cannot flush FAVOR evidence: {error}"))
+}
+
+fn protein_function_apc(variant: &ApiVariant) -> Option<f64> {
+    [
+        variant.sift_cat.as_deref(),
+        variant.polyphen_cat.as_deref(),
+        variant.metasvm_pred.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| !coding_value_is_missing(value))
+    .then_some(variant.apc_protein_function)
+    .flatten()
+}
+
+fn remove_unsubstantiated_protein_apc(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM evidence
+             WHERE source_id=? AND field_path='apcProteinFunction'
+               AND allele_id NOT IN (
+                 SELECT allele_id FROM evidence
+                 WHERE source_id=? AND field_path IN ('siftCat', 'polyphenCat', 'metasvmPred')
+               )",
+            params![SOURCE_ID, SOURCE_ID],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("cannot apply FAVOR protein-function evidence scope: {error}"))
 }
 
 fn append_coding_evidence(
@@ -1344,27 +1433,54 @@ fn publish_hard_link(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn merge_catalogs(canonical: &Path, favor: &Path, destination: &Path) -> Result<(), String> {
+fn merge_query_catalogs(
+    canonical: &Path,
+    favor: Option<&Path>,
+    gene: Option<&Path>,
+    destination: &Path,
+) -> Result<(), String> {
     let mut canonical_value: Value = serde_json::from_slice(
         &fs::read(canonical)
             .map_err(|error| format!("cannot read canonical field catalog: {error}"))?,
     )
     .map_err(|error| format!("invalid canonical field catalog: {error}"))?;
-    let favor_value: Value = serde_json::from_slice(
-        &fs::read(favor).map_err(|error| format!("cannot read FAVOR field catalog: {error}"))?,
-    )
-    .map_err(|error| format!("invalid FAVOR field catalog: {error}"))?;
     let canonical_fields = canonical_value["fields"]
         .as_array_mut()
         .ok_or("canonical field catalog has no fields")?;
     canonical_fields.retain(|field| field["sourceId"] != SOURCE_ID);
-    canonical_fields.extend(
-        favor_value["fields"]
-            .as_array()
-            .ok_or("FAVOR field catalog has no fields")?
-            .iter()
-            .cloned(),
-    );
+    canonical_fields
+        .retain(|field| field["sourceId"] != "hpo" && field["storageRelation"] != "geneEvidence");
+    if let Some(favor) = favor {
+        let favor_value: Value = serde_json::from_slice(
+            &fs::read(favor)
+                .map_err(|error| format!("cannot read FAVOR field catalog: {error}"))?,
+        )
+        .map_err(|error| format!("invalid FAVOR field catalog: {error}"))?;
+        canonical_fields.extend(
+            favor_value["fields"]
+                .as_array()
+                .ok_or("FAVOR field catalog has no fields")?
+                .iter()
+                .cloned(),
+        );
+    }
+    if let Some(gene) = gene {
+        let gene_value: Value = serde_json::from_slice(
+            &fs::read(gene)
+                .map_err(|error| format!("cannot read phenotype field catalog: {error}"))?,
+        )
+        .map_err(|error| format!("invalid phenotype field catalog: {error}"))?;
+        canonical_fields.extend(
+            gene_value["fields"]
+                .as_array()
+                .ok_or("phenotype field catalog has no fields")?
+                .iter()
+                .cloned(),
+        );
+        canonical_value["geneEvidenceFile"] = Value::String(QUERY_GENE_EVIDENCE_FILE.into());
+    } else if let Some(object) = canonical_value.as_object_mut() {
+        object.remove("geneEvidenceFile");
+    }
     super::library_metadata::atomic_write(
         destination,
         &serde_json::to_vec_pretty(&canonical_value).map_err(|error| error.to_string())?,
@@ -1455,6 +1571,7 @@ mod tests {
         assert!(valid_favor_reference("19-44908822-C-T"));
         assert!(valid_favor_reference("22-17008105-G-A"));
         assert!(!valid_favor_reference("22-17008105-G-<DEL>"));
+        assert!(!valid_favor_reference("MT-100-A-G"));
         assert!(!valid_favor_reference("GL000220.1-1-A-G"));
     }
 
@@ -1478,6 +1595,45 @@ mod tests {
             items[0].variant.as_ref().unwrap().rsid.as_deref(),
             Some("rs7412")
         );
+    }
+
+    #[test]
+    fn protein_function_apc_requires_a_reported_protein_predictor() {
+        let imputed: ApiVariant = serde_json::from_value(json!({
+            "apcProteinFunction": 20.24944305419922
+        }))
+        .unwrap();
+        assert_eq!(protein_function_apc(&imputed), None);
+
+        let supported: ApiVariant = serde_json::from_value(json!({
+            "apcProteinFunction": 23.43232536315918,
+            "polyphenCat": "possibly_damaging"
+        }))
+        .unwrap();
+        assert_eq!(protein_function_apc(&supported), Some(23.43232536315918));
+    }
+
+    #[test]
+    fn cached_imputed_protein_apc_is_removed_without_predictor_support() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE evidence(allele_id VARCHAR, source_id VARCHAR, field_path VARCHAR);
+                 INSERT INTO evidence VALUES
+                   ('allele-imputed', 'favor-online', 'apcProteinFunction'),
+                   ('allele-supported', 'favor-online', 'apcProteinFunction'),
+                   ('allele-supported', 'favor-online', 'polyphenCat');",
+            )
+            .unwrap();
+        remove_unsubstantiated_protein_apc(&connection).unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM evidence WHERE field_path='apcProteinFunction'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
     }
 
     #[test]
@@ -1618,11 +1774,74 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_allele_ids_are_rejected() {
-        let request = EnrichRequest {
+    fn duplicate_allele_ids_are_collapsed() {
+        let mut request = EnrichRequest {
             allele_ids: vec!["allele-one".into(), "allele-one".into()],
             consent: true,
         };
-        assert!(validate_request(&request).is_err());
+        normalize_request(&mut request).unwrap();
+        assert_eq!(request.allele_ids, ["allele-one"]);
+    }
+
+    #[test]
+    fn invalid_allele_ids_are_rejected() {
+        let mut request = EnrichRequest {
+            allele_ids: vec!["not an allele".into()],
+            consent: true,
+        };
+        assert!(normalize_request(&mut request).is_err());
+    }
+
+    #[test]
+    fn active_phenotype_catalog_replaces_legacy_hpo_fields() {
+        let root =
+            std::env::temp_dir().join(format!("annocat-phenotype-catalog-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let canonical = root.join("canonical.json");
+        let phenotype = root.join("phenotype.json");
+        let merged = root.join("merged.json");
+        fs::write(
+            &canonical,
+            serde_json::to_vec(&json!({
+                "fields": [
+                    {"sourceId": "clinvar", "fieldPath": "significance"},
+                    {"sourceId": "hpo", "fieldPath": "phenotypeRelevance"},
+                    {"sourceId": "hpo", "fieldPath": "legacyConditionMatches"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &phenotype,
+            serde_json::to_vec(&json!({
+                "fields": [
+                    {"sourceId": "hpo", "fieldPath": "phenotypeRelevance", "storageRelation": "geneEvidence"},
+                    {"sourceId": "hpo", "fieldPath": "selectedConditionMatches", "storageRelation": "geneEvidence"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        merge_query_catalogs(&canonical, None, Some(&phenotype), &merged).unwrap();
+
+        let catalog: Value = serde_json::from_slice(&fs::read(&merged).unwrap()).unwrap();
+        let fields = catalog["fields"].as_array().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|field| field["sourceId"] == "hpo")
+                .count(),
+            2
+        );
+        assert!(
+            fields
+                .iter()
+                .all(|field| field["fieldPath"] != "legacyConditionMatches")
+        );
+        assert_eq!(catalog["geneEvidenceFile"], QUERY_GENE_EVIDENCE_FILE);
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -4,9 +4,10 @@ use annocat_core::{
 };
 use serde::Serialize;
 use std::env;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedCatalogRelease {
@@ -323,9 +324,7 @@ fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, Str
         (resolve_dbsnp_release()?.version, "rolling-snapshot")
     } else if resource_id == "hpo" {
         (
-            phenotype::resolve_latest_asset_manifest()?
-                .release()
-                .to_owned(),
+            phenotype::resolve_latest_asset_manifest()?.version_key(),
             "rolling-snapshot",
         )
     } else if resource_id == "ensembl-gff3" {
@@ -366,6 +365,7 @@ mod annotation_input;
 mod annotation_progress;
 mod annotation_recovery;
 mod cache_contract;
+mod cli;
 mod csq;
 mod detail_lookup;
 mod downloader;
@@ -375,6 +375,7 @@ mod favor;
 mod http_client;
 mod install_queue;
 mod library_metadata;
+mod mondo;
 mod phenotype;
 mod preparation;
 mod reference;
@@ -384,6 +385,7 @@ mod report_package;
 mod results;
 mod settings;
 mod tasks;
+mod terminal;
 mod transcript;
 mod worker;
 
@@ -392,357 +394,7 @@ use settings::AppConfig;
 use settings::{config_file, load_config, save_config};
 
 pub(crate) fn terminal_log(component: &str, message: impl AsRef<str>) {
-    let mut rows = terminal_progress_rows()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    clear_terminal_progress(&mut rows);
-    eprintln!(
-        "{} [{component}] {}",
-        terminal_timestamp(),
-        message.as_ref()
-    );
-}
-
-fn terminal_timestamp() -> String {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::SYSTEMTIME;
-        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-
-        let mut time: SYSTEMTIME = unsafe { std::mem::zeroed() };
-        unsafe { GetLocalTime(&mut time) };
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let month = months
-            .get(time.wMonth.saturating_sub(1) as usize)
-            .copied()
-            .unwrap_or("???");
-        let hour = match time.wHour % 12 {
-            0 => 12,
-            value => value,
-        };
-        let period = if time.wHour < 12 { "AM" } else { "PM" };
-        format!(
-            "{month} {}, {} {hour}:{:02}:{:02} {period}",
-            time.wDay, time.wYear, time.wMinute, time.wSecond
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        annotation::current_timestamp()
-    }
-}
-
-static TERMINAL_PROGRESS_ROWS: std::sync::OnceLock<std::sync::Mutex<usize>> =
-    std::sync::OnceLock::new();
-
-fn terminal_progress_rows() -> &'static std::sync::Mutex<usize> {
-    TERMINAL_PROGRESS_ROWS.get_or_init(|| std::sync::Mutex::new(0))
-}
-
-fn clear_terminal_progress(rows: &mut usize) {
-    if *rows == 0 {
-        return;
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::Console::{
-            CONSOLE_SCREEN_BUFFER_INFO, COORD, FillConsoleOutputCharacterW,
-            GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE, SetConsoleCursorPosition,
-        };
-        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-        let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
-        if !handle.is_null() && unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
-            let top = info
-                .dwCursorPosition
-                .Y
-                .saturating_sub((*rows).saturating_sub(1) as i16);
-            let width = u32::try_from(info.dwSize.X.max(1)).unwrap_or(1);
-            let mut written = 0;
-            for offset in 0..*rows {
-                unsafe {
-                    FillConsoleOutputCharacterW(
-                        handle,
-                        u16::from(b' '),
-                        width,
-                        COORD {
-                            X: 0,
-                            Y: top.saturating_add(offset as i16),
-                        },
-                        &mut written,
-                    );
-                }
-            }
-            if unsafe { SetConsoleCursorPosition(handle, COORD { X: 0, Y: top }) } != 0 {
-                *rows = 0;
-                return;
-            }
-        }
-    }
-    for row in 0..*rows {
-        eprint!("\r\x1b[2K");
-        if row + 1 < *rows {
-            eprint!("\x1b[1A");
-        }
-    }
-    *rows = 0;
-}
-
-fn terminal_progress(lines: &[String]) {
-    if !io::stderr().is_terminal() {
-        return;
-    }
-    let mut rows = terminal_progress_rows()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    clear_terminal_progress(&mut rows);
-    if lines.is_empty() {
-        let _ = io::stderr().flush();
-        return;
-    }
-    let available = terminal_viewport_width().saturating_sub(1).max(20);
-    let rendered = lines
-        .iter()
-        .map(|line| {
-            if line.chars().count() <= available {
-                return line.to_owned();
-            }
-            let mut compact = line
-                .chars()
-                .take(available.saturating_sub(3))
-                .collect::<String>();
-            compact.push_str("...");
-            compact
-        })
-        .collect::<Vec<_>>();
-    eprint!("{}", rendered.join("\r\n"));
-    let _ = io::stderr().flush();
-    *rows = rendered.len();
-}
-
-fn terminal_viewport_width() -> usize {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::System::Console::{
-            CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_ERROR_HANDLE,
-        };
-        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-        let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
-        if !handle.is_null() && unsafe { GetConsoleScreenBufferInfo(handle, &mut info) } != 0 {
-            return (i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1).max(20)
-                as usize;
-        }
-    }
-    100
-}
-
-fn format_terminal_rate(bytes_per_second: f64) -> String {
-    if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
-        return String::new();
-    }
-    let (value, unit) = if bytes_per_second >= 1_000_000_000.0 {
-        (bytes_per_second / 1_000_000_000.0, "GB/s")
-    } else if bytes_per_second >= 1_000_000.0 {
-        (bytes_per_second / 1_000_000.0, "MB/s")
-    } else if bytes_per_second >= 1000.0 {
-        (bytes_per_second / 1000.0, "KB/s")
-    } else {
-        (bytes_per_second, "B/s")
-    };
-    format!("{value:.1} {unit}")
-}
-
-fn format_terminal_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-fn format_terminal_size_pair(completed: u64, total: u64) -> String {
-    let (divisor, unit) = if total >= 1_000_000_000_000 {
-        (1_000_000_000_000.0, "TB")
-    } else if total >= 1_000_000_000 {
-        (1_000_000_000.0, "GB")
-    } else if total >= 1_000_000 {
-        (1_000_000.0, "MB")
-    } else if total >= 1000 {
-        (1000.0, "KB")
-    } else {
-        return format!("{completed} / {total} B");
-    };
-    format!(
-        "{:.1} / {:.1} {unit}",
-        completed as f64 / divisor,
-        total as f64 / divisor
-    )
-}
-
-fn terminal_task_activity(task: &tasks::TaskSnapshot) -> (&'static str, &'static str) {
-    match task.state.as_str() {
-        "queued" => ("Queued", "Queue"),
-        "validating" => ("Verifying", "Verify"),
-        "cancelling" => ("Cancelling", "Cancel"),
-        "paused" | "cancelled" => ("Paused", "Paused"),
-        "failed" => ("Failed", "Failed"),
-        "downloaded" => ("Ready to install", "Ready"),
-        "running" => match task.phase.as_str() {
-            "recovery-scan" => ("Scanning recovery", "Scan"),
-            "recovery-input" => ("Preparing recovery", "Prepare"),
-            "recovery-merge" => ("Joining recovery", "Join"),
-            "indexing-variants" => ("Building variant table", "Index"),
-            "indexing-evidence" => ("Building evidence tables", "Index"),
-            "reconnecting" | "retrying" => ("Reconnecting", "Reconnect"),
-            "replaying" => ("Replaying", "Replay"),
-            "building-cache" => ("Building cache", "Cache"),
-            "downloading-source-part" | "downloading" => ("Downloading", "Download"),
-            "streaming-to-fastvep" => ("Streaming", "Stream"),
-            "finalizing-annotation" => ("Finishing annotation output", "Finish"),
-            "validating" => ("Verifying", "Verify"),
-            "reading-index" | "reading-indexes" => ("Reading index", "Index"),
-            "publishing" => ("Publishing", "Publish"),
-            _ if task.kind == "download" => ("Downloading", "Download"),
-            _ if task.kind == "installation" => ("Installing", "Install"),
-            _ => ("Annotating", "Annotate"),
-        },
-        _ => ("Working", "Work"),
-    }
-}
-
-fn terminal_task_chromosome(task: &tasks::TaskSnapshot, compact: bool) -> String {
-    match (&task.chromosome, task.total_chromosomes) {
-        (Some(chromosome), total) if total > 0 && compact => format!("chr{chromosome}/{total}"),
-        (Some(chromosome), total) if total > 0 => format!("{chromosome} / {total}"),
-        (Some(chromosome), _) if compact => format!("chr{chromosome}"),
-        (Some(chromosome), _) => chromosome.clone(),
-        (None, total) if total > 0 => format!("{} / {total}", task.completed_chromosomes),
-        _ => "-".into(),
-    }
-}
-
-fn terminal_task_table(active: &[tasks::TaskSnapshot], available: usize) -> Vec<String> {
-    if active.is_empty() {
-        return Vec::new();
-    }
-    let header = [
-        "Source",
-        "Activity",
-        "Chromosome",
-        "Progress",
-        "Complete",
-        "Speed",
-    ];
-    let rows = active
-        .iter()
-        .map(|task| {
-            let downloaded = if task.kind == "annotation"
-                && task.phase.starts_with("indexing-")
-                && task.completed_bytes > 0
-            {
-                format!("{} written", format_terminal_size(task.completed_bytes))
-            } else if task.kind == "annotation" && task.total_records > 0 {
-                format!(
-                    "{} / {} variants",
-                    task.completed_records, task.total_records
-                )
-            } else if task.total_bytes > 0 {
-                format_terminal_size_pair(task.completed_bytes, task.total_bytes)
-            } else if task.completed_bytes > 0 {
-                format_terminal_size(task.completed_bytes)
-            } else {
-                "-".into()
-            };
-            let percent =
-                if task.percent.is_finite() && (task.total_bytes > 0 || task.percent > 0.0) {
-                    format!("{:.1}%", task.percent)
-                } else {
-                    "-".into()
-                };
-            let speed = if task.throughput_records_per_second > 0.0 {
-                format!("{:.0} variants/s", task.throughput_records_per_second)
-            } else {
-                format_terminal_rate(task.throughput_bytes_per_second)
-            };
-            [
-                task.title.clone(),
-                terminal_task_activity(task).0.into(),
-                terminal_task_chromosome(task, false),
-                downloaded,
-                percent,
-                if speed.is_empty() { "-".into() } else { speed },
-            ]
-        })
-        .collect::<Vec<_>>();
-    let widths = std::array::from_fn::<_, 6, _>(|column| {
-        rows.iter()
-            .map(|row| row[column].chars().count())
-            .chain(std::iter::once(header[column].len()))
-            .max()
-            .unwrap_or(0)
-    });
-    let table_width = widths.iter().sum::<usize>() + (widths.len() - 1) * 2;
-    let format_row = |columns: &[String; 6]| {
-        columns
-            .iter()
-            .zip(widths)
-            .map(|(value, width)| format!("{value:<width$}"))
-            .collect::<Vec<_>>()
-            .join("  ")
-    };
-    if table_width <= available {
-        let header = header.map(str::to_owned);
-        std::iter::once("Active tasks".into())
-            .chain(std::iter::once(format_row(&header)))
-            .chain(rows.iter().map(format_row))
-            .collect()
-    } else {
-        std::iter::once("Active tasks".into())
-            .chain(active.iter().map(|task| {
-                let (_, activity) = terminal_task_activity(task);
-                let chromosome = terminal_task_chromosome(task, true);
-                let percent = if task.percent.is_finite() {
-                    format!("{:.1}%", task.percent)
-                } else {
-                    "-".into()
-                };
-                let downloaded = if task.kind == "annotation" && task.total_records > 0 {
-                    format!(
-                        "{} / {} variants",
-                        task.completed_records, task.total_records
-                    )
-                } else if task.total_bytes > 0 {
-                    format_terminal_size_pair(task.completed_bytes, task.total_bytes)
-                } else {
-                    format_terminal_size(task.completed_bytes)
-                };
-                format!(
-                    "{}  {activity} {chromosome}  {percent}  {downloaded}",
-                    task.title
-                )
-            }))
-            .collect()
-    }
-}
-
-fn terminal_active_lines() -> Vec<String> {
-    let active = portable_paths()
-        .map(|paths| {
-            task_snapshots(&paths)
-                .into_iter()
-                .filter(tasks::TaskSnapshot::is_active)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    terminal_task_table(&active, terminal_viewport_width().saturating_sub(1))
+    terminal::log(component, message);
 }
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
@@ -767,70 +419,7 @@ fn web_asset(relative_path: &str, embedded: &str) -> String {
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("annocat: {error}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None | Some("help") | Some("--help") | Some("-h") => print_help(),
-        Some("version") | Some("--version") | Some("-V") => {
-            println!("annocat {}", env!("CARGO_PKG_VERSION"))
-        }
-        Some("doctor") => doctor_command(&args[1..])?,
-        Some("annotate") => annotate_command(&args[1..])?,
-        Some("fastvep") => fastvep_command(&args[1..])?,
-        Some("sources") => list_sources(),
-        Some("inspect-vcf") => inspect_vcf_command(&args[1..])?,
-        Some("inspect-fastvep") => inspect_fastvep_command(&args[1..])?,
-        Some("validate-report") => validate_report_command(&args[1..])?,
-        Some("share-report") => share_report_command(&args[1..])?,
-        Some("report-worker") => report_worker_command(&args[1..])?,
-        Some("check-normalization") => check_normalization_command(&args[1..])?,
-        Some("resources") => resource_command(&args[1..])?,
-        Some("serve") => {
-            ensure_portable_layout()?;
-            serve(parse_port(&args[1..])?, false)?
-        }
-        Some("launch") => {
-            ensure_portable_layout()?;
-            serve(parse_port(&args[1..])?, true)?
-        }
-        Some("interactive") => interactive()?,
-        Some(command) => return Err(format!("unknown command '{command}'. Run 'annocat help'.")),
-    }
-    Ok(())
-}
-
-fn validate_report_command(args: &[String]) -> Result<(), String> {
-    let [path] = args else {
-        return Err("usage: annocat validate-report REPORT.zip".into());
-    };
-    println!("{}", worker::validate_report(std::path::Path::new(path))?);
-    Ok(())
-}
-
-fn share_report_command(args: &[String]) -> Result<(), String> {
-    let [run_id, destination] = args else {
-        return Err("usage: annocat share-report RUN_ID DESTINATION.zip".into());
-    };
-    let paths = portable_paths()?;
-    let result = completed_run_result(&paths.runs, run_id)?;
-    let run_directory = result.parent().ok_or("completed run has no directory")?;
-    let package = report_package::create(run_directory, std::path::Path::new(destination))?;
-    if let Err(error) = worker::validate_report(&package.path) {
-        let _ = std::fs::remove_file(&package.path);
-        return Err(format!("created report failed import validation: {error}"));
-    }
-    println!(
-        "Created AnnoCAT report: {} ({} bytes)",
-        package.path.display(),
-        package.bytes
-    );
-    Ok(())
+    cli::main_entry();
 }
 
 fn report_worker_command(args: &[String]) -> Result<(), String> {
@@ -838,17 +427,19 @@ fn report_worker_command(args: &[String]) -> Result<(), String> {
     let report = {
         use std::os::windows::io::FromRawHandle;
         let [action, raw_handle] = args else {
-            return Err("invalid report worker request".into());
+            return Err("invalid result validation worker request".into());
         };
         if action != "validate-handle" {
-            return Err("Windows report worker accepts only inherited archive handles".into());
+            return Err(
+                "Windows result validation worker accepts only inherited archive handles".into(),
+            );
         }
         worker::require_appcontainer()?;
         let handle = raw_handle
             .parse::<usize>()
-            .map_err(|_| "invalid inherited report archive handle")?;
+            .map_err(|_| "invalid inherited result archive handle")?;
         if handle == 0 {
-            return Err("invalid inherited report archive handle".into());
+            return Err("invalid inherited result archive handle".into());
         }
         let file = unsafe { std::fs::File::from_raw_handle(handle as _) };
         report_import::validate_archive_file(file)?
@@ -856,76 +447,23 @@ fn report_worker_command(args: &[String]) -> Result<(), String> {
     #[cfg(not(windows))]
     let report = {
         let [action, path] = args else {
-            return Err("invalid report worker request".into());
+            return Err("invalid result validation worker request".into());
         };
         if action != "validate" {
-            return Err("invalid report worker action".into());
+            return Err("invalid result validation worker action".into());
         }
         report_import::validate_archive(std::path::Path::new(path))?
     };
     println!(
-        "Valid AnnoCAT report: {} (schema {}, {} files, {} bytes)",
+        "Valid AnnoCAT result: {} (schema {}, {} files, {} bytes)",
         report.run_id, report.schema_version, report.file_count, report.uncompressed_bytes
     );
     Ok(())
 }
 
-fn print_help() {
-    println!(
-        "AnnoCAT — local-first WGS variant annotation\n\nUSAGE:\n  annocat <COMMAND> [OPTIONS]\n\nCOMMANDS:\n  annotate INPUT [--name NAME] [--output DIRECTORY] [--annotated-vcf]\n                     Run pinned fastVEP and publish a validated result\n  share-report RUN_ID DESTINATION.zip\n                     Create a portable canonical AnnoCAT report\n  validate-report REPORT.zip\n                     Validate a shared AnnoCAT report without importing it\n  doctor [--json]    Check primary fastVEP backend readiness\n  fastvep status [--json]\n                     Check portable fastVEP readiness\n  sources            Show annotation sources\n  inspect-vcf FILE   Validate and summarize a VCF/VCF.GZ\n  inspect-fastvep FILE\n                     Validate and summarize dynamic CSQ output\n  check-normalization FILE [--chromosome NAME] [--limit N]\n  resources plan comprehensive\n                     Show the current comprehensive GRCh38 source plan\n  launch [--port N]  Start AnnoCAT and open the browser (recommended)\n  serve [--port N]   Run the local service without opening a browser\n  interactive        Open a guided terminal menu\n  version            Print the version\n  help               Print this help"
-    );
-}
-
-fn annotate_command(args: &[String]) -> Result<(), String> {
-    let input = args.first().ok_or(
-        "usage: annocat annotate INPUT [--name NAME] [--output DIRECTORY] [--annotated-vcf]",
-    )?;
-    let mut name = None;
-    let mut output_directory = None;
-    let mut include_annotated_vcf = false;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--name" if index + 1 < args.len() => {
-                name = Some(args[index + 1].clone());
-                index += 2;
-            }
-            "--output" if index + 1 < args.len() => {
-                output_directory = Some(std::path::PathBuf::from(&args[index + 1]));
-                index += 2;
-            }
-            "--annotated-vcf" => {
-                include_annotated_vcf = true;
-                index += 1;
-            }
-            value => return Err(format!("unknown annotation option: {value}")),
-        }
-    }
-    let paths = portable_paths()?;
-    let output = annotation::run_blocking(
-        annotation::AnnotationRequest {
-            input: std::path::PathBuf::from(input),
-            name,
-            output_directory,
-            source_ids: Vec::new(),
-            include_annotated_vcf,
-            run_mode: annotation::RunMode::Annotation,
-            add_local_consequences: false,
-            confirm_grch38: false,
-        },
-        paths.runs,
-        paths.resources,
-    )?;
-    println!("Completed annotation: {}", output.display());
-    Ok(())
-}
-
-fn inspect_fastvep_command(args: &[String]) -> Result<(), String> {
-    let [path] = args else {
-        return Err("usage: annocat inspect-fastvep FILE.vcf[.gz]".into());
-    };
-    let summary = csq::inspect(std::path::Path::new(path))?;
-    println!("fastVEP output: {path}");
+fn inspect_fastvep_command(path: &std::path::Path) -> Result<(), String> {
+    let summary = csq::inspect(path)?;
+    println!("fastVEP output: {}", path.display());
     println!("  CSQ fields          : {}", summary.fields.len());
     println!("  Records (source)    : {}", summary.source_records);
     println!("  Records (variants)  : {}", summary.records);
@@ -940,12 +478,9 @@ fn inspect_fastvep_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn inspect_vcf_command(args: &[String]) -> Result<(), String> {
-    let [path] = args else {
-        return Err("usage: annocat inspect-vcf FILE.vcf[.gz]".into());
-    };
-    let summary = annocat_core::vcf::inspect(std::path::Path::new(path))?;
-    println!("VCF: {path}");
+fn inspect_vcf_command(path: &std::path::Path) -> Result<(), String> {
+    let summary = annocat_core::vcf::inspect(path)?;
+    println!("VCF: {}", path.display());
     println!(
         "  Assembly             : {}",
         summary.assembly.as_deref().unwrap_or("not declared")
@@ -972,36 +507,17 @@ fn inspect_vcf_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn check_normalization_command(args: &[String]) -> Result<(), String> {
-    let input = args
-        .first()
-        .ok_or("usage: annocat check-normalization FILE [--chromosome NAME] [--limit N]")?;
-    let mut chromosome = None;
-    let mut limit = None;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--chromosome" if index + 1 < args.len() => {
-                chromosome = Some(args[index + 1].as_str());
-                index += 2;
-            }
-            "--limit" if index + 1 < args.len() => {
-                limit = Some(
-                    args[index + 1]
-                        .parse::<u64>()
-                        .map_err(|_| "--limit must be an integer")?,
-                );
-                index += 2;
-            }
-            value => return Err(format!("unknown normalization option: {value}")),
-        }
-    }
+fn check_normalization_command(
+    input: &std::path::Path,
+    chromosome: Option<&str>,
+    limit: Option<u64>,
+) -> Result<(), String> {
     let paths = portable_paths()?;
     if !reference::is_ready(&paths.resources) {
         return Err("the required GRCh38 reference is not installed".into());
     }
     let summary = annocat_core::vcf::check_normalization(
-        std::path::Path::new(input),
+        input,
         &reference::fasta_path(&paths.resources),
         chromosome,
         limit,
@@ -1019,228 +535,35 @@ fn check_normalization_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn command_available(name: &str, version_arg: &str) -> bool {
-    Command::new(name)
-        .arg(version_arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn doctor_command(args: &[String]) -> Result<(), String> {
-    if args == ["--json"] {
-        println!("{}", serialize_json(&fastvep::readiness()));
-        return Ok(());
-    }
-    if !args.is_empty() {
-        return Err("usage: annocat doctor [--json]".into());
-    }
-    doctor();
-    Ok(())
-}
-
-fn fastvep_command(args: &[String]) -> Result<(), String> {
-    match args {
-        [command] if command == "status" => {
-            print_fastvep_readiness(&fastvep::readiness());
-            Ok(())
-        }
-        [command, json] if command == "status" && json == "--json" => {
-            println!("{}", serialize_json(&fastvep::readiness()));
-            Ok(())
-        }
-        _ => Err("usage: annocat fastvep status [--json]".into()),
-    }
-}
-
-fn print_fastvep_readiness(report: &fastvep::Readiness) {
-    println!("AnnoCAT fastVEP backend readiness");
-    println!("  State       : {}", report.state);
-    println!(
-        "  Executable  : {}",
-        report
-            .executable
-            .as_deref()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "not found".into())
-    );
-    println!(
-        "  Version     : {}",
-        report.version.as_deref().unwrap_or("unknown")
-    );
-    println!(
-        "  SHA-256     : {}",
-        report.sha256.as_deref().unwrap_or("unavailable")
-    );
-    println!(
-        "  Managed     : {}",
-        if report.managed { "yes" } else { "no" }
-    );
-    println!("  Next action : {}", report.next_action);
-}
-
-fn doctor() {
-    let fastvep = fastvep::readiness();
-    println!("AnnoCAT environment check");
-    println!("  Rust executable : OK");
-    println!(
-        "  Git             : {}",
-        if command_available("git", "--version") {
-            "available"
-        } else {
-            "not found"
-        }
-    );
-    println!("  Browser UI      : ready (embedded, localhost only)");
-    println!("  Annotation data : not installed");
-    println!(
-        "  fastVEP backend : {}",
-        if fastvep.ready {
-            "detected"
-        } else {
-            "not ready"
-        }
-    );
-    println!("  Next action     : {}", fastvep.next_action);
-}
-
-fn list_sources() {
-    println!("{:<14} {:<8} PURPOSE", "ID", "DEFAULT");
-    for source in &annocat_core::source_catalog::catalog().sources {
-        println!(
-            "{:<14} {:<8} {}",
-            source.id,
-            if source.default_enabled { "yes" } else { "no" },
-            source.purpose
-        );
-    }
-}
-
-fn resource_command(args: &[String]) -> Result<(), String> {
-    ensure_portable_layout()?;
-    match args {
-        [command, profile]
-            if command == "plan"
-                && matches!(profile.as_str(), "comprehensive" | "practical-wgs") =>
-        {
-            println!("Comprehensive annotation resource plan (GRCh38)");
-            let profile = annocat_core::source_catalog::profile("wgs")
-                .ok_or("the comprehensive profile is missing")?;
-            for id in ["grch38-reference", "ensembl-gff3"]
-                .into_iter()
-                .chain(profile.source_ids.iter().map(String::as_str))
-            {
-                if let Ok(release) = resource_release(id) {
-                    let size = release
-                        .download_bytes
-                        .map(format_terminal_size)
-                        .unwrap_or_else(|| "unknown".into());
-                    println!("  {:<10} {:<8} {:>10}  missing", id, release.version, size);
-                } else {
-                    println!("  {id:<10} pending  size unknown  catalog metadata pending");
-                }
-            }
-            Ok(())
-        }
-        [command, resource, destination, action] if command == "download" => {
-            let release = resource_release(resource)?;
-            match action.as_str() {
-                "--yes" => {
-                    downloader::download_release(&release, std::path::Path::new(destination))
-                }
-                "--dry-run" => {
-                    downloader::print_download_plan(&release, std::path::Path::new(destination))
-                }
-                _ => Err("download requires --dry-run or --yes".into()),
-            }
-        }
-        [command, resource, action] if command == "download" => {
-            let release = resource_release(resource)?;
-            let destination = portable_paths()?.downloads;
-            match action.as_str() {
-                "--yes" => downloader::download_release(&release, &destination),
-                "--dry-run" => downloader::print_download_plan(&release, &destination),
-                _ => Err("download requires --dry-run or --yes".into()),
-            }
-        }
-        _ => Err("usage: annocat resources plan comprehensive | resources download ID [DESTINATION] --dry-run|--yes".into()),
-    }
-}
-
 fn resource_release(id: &str) -> Result<annocat_core::ResourceRelease, String> {
     annocat_core::source_catalog::download_release(id)
-        .ok_or_else(|| format!("resource '{id}' is not present in the download catalog"))
-}
-
-fn parse_port(args: &[String]) -> Result<u16, String> {
-    if args.is_empty() {
-        return Ok(8787);
-    }
-    if args.len() == 2 && args[0] == "--port" {
-        return args[1]
-            .parse()
-            .map_err(|_| "--port must be an integer from 1 to 65535".into())
-            .and_then(|port| {
-                if port == 0 {
-                    Err("--port must be an integer from 1 to 65535".into())
-                } else {
-                    Ok(port)
-                }
-            });
-    }
-    Err("usage: annocat serve|launch [--port N]".into())
-}
-
-fn interactive() -> Result<(), String> {
-    loop {
-        println!(
-            "\nAnnoCAT\n  1. Check environment\n  2. List annotation sources\n  3. Start browser UI\n  4. Exit"
-        );
-        print!("> ");
-        io::stdout().flush().map_err(|e| e.to_string())?;
-        let mut choice = String::new();
-        io::stdin()
-            .read_line(&mut choice)
-            .map_err(|e| e.to_string())?;
-        match choice.trim() {
-            "1" => doctor(),
-            "2" => list_sources(),
-            "3" => return serve(8787, true),
-            "4" | "q" | "quit" => return Ok(()),
-            _ => println!("Choose 1, 2, 3, or 4."),
-        }
-    }
+        .ok_or_else(|| format!("data source '{id}' is not present in the download catalog"))
 }
 
 fn serve(port: u16, open_browser: bool) -> Result<(), String> {
     let address = format!("127.0.0.1:{port}");
     let listener =
         TcpListener::bind(&address).map_err(|e| format!("cannot bind {address}: {e}"))?;
-    println!("AnnoCAT is running at http://{address}");
-    println!("Local annotation and results service. Press Ctrl+C to stop.");
-    terminal_log(
-        "server",
-        format!(
-            "version {} process {} started{}",
-            env!("CARGO_PKG_VERSION"),
-            std::process::id(),
-            if open_browser {
-                " with browser launch"
-            } else {
-                ""
-            }
-        ),
-    );
-    if let Ok(paths) = portable_paths() {
-        terminal_log(
-            "server",
-            format!(
-                "resources={} downloads={} runs={}",
-                paths.resources.display(),
-                paths.downloads.display(),
-                paths.runs.display()
-            ),
-        );
+    let paths = portable_paths().ok();
+    let mut startup = vec![
+        format!("AnnoCAT {}", env!("CARGO_PKG_VERSION")),
+        format!("  Local application  http://{address}"),
+    ];
+    if let Some(paths) = &paths {
+        startup.extend([
+            format!("  Annotation data    {}", paths.resources.display()),
+            format!("  Downloads          {}", paths.downloads.display()),
+            format!("  Results            {}", paths.runs.display()),
+        ]);
+    }
+    startup.extend([
+        format!("  Process            {}", std::process::id()),
+        String::new(),
+        "Press Ctrl+C to stop.".into(),
+    ]);
+    eprintln!("{}", startup.join("\n"));
+
+    if let Some(paths) = paths {
         downloader::restore_queue(&paths.downloads);
         match install_queue::restore(&paths.downloads) {
             Ok(start_worker) => {
@@ -1267,7 +590,10 @@ fn serve(port: u16, open_browser: bool) -> Result<(), String> {
     }
     std::thread::spawn(|| {
         loop {
-            terminal_progress(&terminal_active_lines());
+            let tasks = portable_paths()
+                .map(|paths| task_snapshots(&paths))
+                .unwrap_or_default();
+            terminal::sync_tasks(&tasks);
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     });
@@ -1351,8 +677,6 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         || path.ends_with("/name")
         || path.ends_with("/share")
         || path.ends_with("/export")
-        || path.ends_with("/phenotypes/rank")
-        || path.ends_with("/phenotypes/explore")
         || path.ends_with("/favor/enrich")
         || (path.ends_with("/phenotypes") && method == "POST")
         || (path.ends_with("/config") && method == "POST")
@@ -1840,6 +1164,25 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     }
     if let Some(run_id) = path
         .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/delete"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = if method == "POST" {
+            portable_paths().and_then(|paths| delete_completed_run(&paths.runs, run_id))
+        } else {
+            Err("POST required".into())
+        };
+        let (status, body) = match response {
+            Ok(()) => ("200 OK", r#"{"deleted":true}"#.into()),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
         .and_then(|value| value.strip_suffix("/name"))
         .filter(|value| !value.is_empty() && !value.contains('/'))
     {
@@ -1944,90 +1287,28 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     }
     if path == "/api/phenotypes/terms" {
         let response = portable_paths().and_then(|paths| {
+            if method == "POST" {
+                let request =
+                    serde_json::from_slice::<phenotype::TermResolutionRequest>(request_body)
+                        .map_err(|error| format!("invalid terminology list: {error}"))?;
+                return serde_json::to_string(&phenotype::resolve_terms(
+                    &paths.resources,
+                    request,
+                )?)
+                .map_err(|error| error.to_string());
+            }
+            if method != "GET" {
+                return Err("GET or POST required".into());
+            }
             let search_query = query_parameter(query, "q").transpose()?.unwrap_or_default();
             let limit = query_parameter_u64(query, "limit").unwrap_or(20) as usize;
             let terms = phenotype::search_terms(&paths.resources, &search_query, limit)?;
             Ok(serde_json::json!({
                 "hpoRelease": phenotype::hpo_release(&paths.resources)?,
+                "mondoRelease": phenotype::mondo_release(&paths.resources),
                 "terms": terms
             })
             .to_string())
-        });
-        let (status, body) = match response {
-            Ok(body) => ("200 OK", body),
-            Err(error) => (
-                "409 Conflict",
-                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-            ),
-        };
-        return write_http_response(stream, status, "application/json", &body);
-    }
-    if let Some(run_id) = path
-        .strip_prefix("/api/runs/")
-        .and_then(|value| value.strip_suffix("/phenotypes/explore"))
-        .filter(|value| !value.is_empty() && !value.contains('/'))
-    {
-        let response = portable_paths().and_then(|paths| {
-            let result = completed_run_result(&paths.runs, run_id)?;
-            let consequences = completed_run_file(
-                &paths.runs,
-                run_id,
-                "consequencesFile",
-                "consequences.parquet",
-                "parquet",
-            )?;
-            let request = if request_body.is_empty() {
-                phenotype::ExploreRequest::default()
-            } else {
-                serde_json::from_slice::<phenotype::ExploreRequest>(request_body)
-                    .map_err(|error| format!("invalid phenotype exploration request: {error}"))?
-            };
-            phenotype::explore_report(
-                &paths.resources,
-                &paths.runs,
-                run_id,
-                &result,
-                Some(&consequences),
-                request,
-            )
-            .and_then(|exploration| {
-                serde_json::to_string(&exploration).map_err(|error| error.to_string())
-            })
-        });
-        let (status, body) = match response {
-            Ok(body) => ("200 OK", body),
-            Err(error) => (
-                "409 Conflict",
-                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
-            ),
-        };
-        return write_http_response(stream, status, "application/json", &body);
-    }
-    if let Some(run_id) = path
-        .strip_prefix("/api/runs/")
-        .and_then(|value| value.strip_suffix("/phenotypes/rank"))
-        .filter(|value| !value.is_empty() && !value.contains('/'))
-    {
-        let response = portable_paths().and_then(|paths| {
-            let result = completed_run_result(&paths.runs, run_id)?;
-            let consequences = completed_run_file(
-                &paths.runs,
-                run_id,
-                "consequencesFile",
-                "consequences.parquet",
-                "parquet",
-            )?;
-            let request = serde_json::from_slice::<phenotype::RankRequest>(request_body)
-                .map_err(|error| format!("invalid phenotype comparison request: {error}"))?;
-            phenotype::rank(
-                &paths.resources,
-                &paths.runs,
-                run_id,
-                &result,
-                Some(&consequences),
-                request,
-            )
-            .and_then(|profile| phenotype::profile_json(&paths.resources, &profile, &result))
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -2050,11 +1331,15 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             } else if method == "POST" {
                 let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
                     .map_err(|error| format!("invalid phenotype profile request: {error}"))?;
-                phenotype::update(&paths.resources, &paths.runs, run_id, request)?
+                if request.action == "apply" {
+                    phenotype::apply(&paths.resources, &paths.runs, run_id, &result, request)?
+                } else {
+                    phenotype::update(&paths.resources, &paths.runs, run_id, request)?
+                }
             } else {
                 return Err("GET or POST required".into());
             };
-            phenotype::profile_json(&paths.resources, &profile, &result)
+            phenotype::profile_json(&paths.resources, &profile)
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -2111,7 +1396,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                             .len()
                     {
                         return Err(
-                            "one or more candidate alleles do not belong to this report".into()
+                            "one or more candidate alleles do not belong to this result".into()
                         );
                     }
                 }
@@ -2161,7 +1446,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "json",
             )?;
             let request = serde_json::from_slice::<favor::EnrichRequest>(request_body)
-                .map_err(|error| format!("invalid FAVOR enrichment request: {error}"))?;
+                .map_err(|error| format!("invalid online annotation request: {error}"))?;
             let run_directory = variants
                 .parent()
                 .ok_or("completed result has no run directory")?;
@@ -2322,7 +1607,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 "parquet",
             )
             .ok();
-            let (evidence, _) = completed_run_query_inputs(&paths.runs, run_id)?;
+            let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
             let record_number = query_parameter_u64(query, "recordNumber")
                 .and_then(|value| i64::try_from(value).ok());
             let alt_index =
@@ -2331,6 +1616,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 &variants,
                 consequences.as_deref(),
                 evidence.as_deref(),
+                catalog.as_deref(),
                 allele_id,
                 record_number,
                 alt_index,
@@ -2661,7 +1947,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                     if std::path::Path::new(&path)
                         .extension()
                         .and_then(|value| value.to_str())
-                        == Some("zip") =>
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip")) =>
                 {
                     let imported = worker::validate_report(std::path::Path::new(&path))
                         .and_then(|_| portable_paths())
@@ -2690,7 +1976,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 Some(_) => (
                     "409 Conflict",
                     "application/json",
-                    "{\"error\":\"Import currently accepts AnnoCAT report ZIPs\"}".into(),
+                    "{\"error\":\"Choose an AnnoCAT result ZIP file\"}".into(),
                 ),
                 None => ("200 OK", "application/json", "{\"path\":null}".into()),
             },
@@ -2997,7 +2283,7 @@ struct ProfilePreparationStatus {
 
 fn profile_preparation_status(profile_id: &str) -> Result<ProfilePreparationStatus, String> {
     let profile = annocat_core::source_catalog::profile(profile_id)
-        .ok_or_else(|| format!("unknown profile '{profile_id}'"))?;
+        .ok_or_else(|| format!("profile '{profile_id}' does not exist"))?;
     let resources = portable_paths()?.resources;
     let sources = profile
         .source_ids
@@ -3126,8 +2412,8 @@ fn managed_preparation_status(
                 completed_chromosomes: 1,
                 remaining_chromosomes: 0,
                 detail: format!(
-                    "Indexed {} HPO terms and {} disease profiles",
-                    ready.term_count, ready.disease_count
+                    "Indexed {} phenotype terms, {} condition terms, and {} disease profiles",
+                    ready.term_count, ready.mondo_term_count, ready.disease_count
                 ),
                 ..preparation::LivePreparationState::default()
             };
@@ -3147,7 +2433,7 @@ fn managed_preparation_status(
             resource_id: Some(resource_id.into()),
             expected_network_bytes: release.download_bytes.unwrap_or(0),
             remaining_chromosomes: 1,
-            detail: "Human Phenotype Ontology data is not installed".into(),
+            detail: "Phenotype and condition knowledge is not installed".into(),
             ..preparation::LivePreparationState::default()
         };
     }
@@ -3197,7 +2483,7 @@ fn managed_preparation_status(
             phase: "queued".into(),
             expected_network_bytes: release.download_bytes.unwrap_or(0),
             remaining_chromosomes: chromosomes.len() as u16,
-            detail: format!("Waiting in the profile installation queue (position {position})"),
+            detail: format!("Queue position {position}"),
             ..preparation::LivePreparationState::default()
         };
     }
@@ -3206,7 +2492,7 @@ fn managed_preparation_status(
 
 fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
     let profile = annocat_core::source_catalog::profile(profile_id)
-        .ok_or_else(|| format!("unknown profile '{profile_id}'"))?;
+        .ok_or_else(|| format!("profile '{profile_id}' does not exist"))?;
     let resources = portable_paths()?.resources;
     let actionable = profile
         .source_ids
@@ -3566,8 +2852,18 @@ struct PortablePaths {
     config: std::path::PathBuf,
 }
 
+static PORTABLE_HOME_OVERRIDE: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+fn set_portable_home(path: std::path::PathBuf) -> Result<(), String> {
+    PORTABLE_HOME_OVERRIDE
+        .set(path)
+        .map_err(|_| "the AnnoCAT home folder was already set".into())
+}
+
 fn portable_home() -> Result<std::path::PathBuf, String> {
-    if let Some(home) = std::env::var_os("ANNOCAT_HOME") {
+    if let Some(home) = PORTABLE_HOME_OVERRIDE.get() {
+        Ok(home.clone())
+    } else if let Some(home) = std::env::var_os("ANNOCAT_HOME") {
         Ok(std::path::PathBuf::from(home))
     } else {
         std::env::current_exe()
@@ -4024,7 +3320,7 @@ fn completed_run_result(
         return Err("invalid run identifier".into());
     }
     let entries = std::fs::read_dir(runs_directory)
-        .map_err(|error| format!("cannot inspect completed runs: {error}"))?;
+        .map_err(|error| format!("cannot inspect AnnoCAT results: {error}"))?;
     for entry in entries.flatten() {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
@@ -4062,7 +3358,7 @@ fn completed_run_result(
         }
         let root = directory
             .canonicalize()
-            .map_err(|error| format!("cannot resolve completed run: {error}"))?;
+            .map_err(|error| format!("cannot resolve the AnnoCAT result: {error}"))?;
         let result = directory
             .join(relative)
             .canonicalize()
@@ -4074,7 +3370,28 @@ fn completed_run_result(
             return Ok(result);
         }
     }
-    Err(format!("completed run '{requested_id}' was not found"))
+    Err(format!("AnnoCAT result '{requested_id}' was not found"))
+}
+
+fn delete_completed_run(
+    runs_directory: &std::path::Path,
+    requested_id: &str,
+) -> Result<(), String> {
+    let result = completed_run_result(runs_directory, requested_id)?;
+    let runs_root = runs_directory
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the results folder: {error}"))?;
+    let relative = result
+        .strip_prefix(&runs_root)
+        .map_err(|_| "completed result is outside the results folder")?;
+    let directory_name = match relative.components().next() {
+        Some(std::path::Component::Normal(name)) => name,
+        _ => return Err("completed result has an invalid folder".into()),
+    };
+    let directory = runs_root.join(directory_name);
+    std::fs::remove_dir_all(&directory)
+        .map_err(|error| format!("cannot delete the AnnoCAT result: {error}"))?;
+    library_metadata::remove_result_metadata(runs_directory, requested_id)
 }
 
 fn completed_run_file(
@@ -4089,30 +3406,30 @@ fn completed_run_file(
         .parent()
         .ok_or("completed result has no containing directory")?
         .canonicalize()
-        .map_err(|error| format!("cannot resolve completed run: {error}"))?;
+        .map_err(|error| format!("cannot resolve the AnnoCAT result: {error}"))?;
     let manifest_path = root.join("manifest.json");
     let metadata = std::fs::metadata(&manifest_path)
-        .map_err(|error| format!("completed run manifest is missing: {error}"))?;
+        .map_err(|error| format!("AnnoCAT result manifest is missing: {error}"))?;
     if metadata.len() == 0 || metadata.len() > 1024 * 1024 {
-        return Err("completed run manifest has an invalid size".into());
+        return Err("AnnoCAT result manifest has an invalid size".into());
     }
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&manifest_path)
-            .map_err(|error| format!("cannot read completed run manifest: {error}"))?,
+            .map_err(|error| format!("cannot read AnnoCAT result manifest: {error}"))?,
     )
-    .map_err(|error| format!("invalid completed run manifest: {error}"))?;
+    .map_err(|error| format!("invalid AnnoCAT result manifest: {error}"))?;
     if manifest["runId"] != requested_id || manifest[manifest_key] != expected_name {
-        return Err(format!("completed run does not declare {expected_name}"));
+        return Err(format!("AnnoCAT result does not declare {expected_name}"));
     }
     let file = root
         .join(expected_name)
         .canonicalize()
-        .map_err(|error| format!("completed run file is missing: {error}"))?;
+        .map_err(|error| format!("AnnoCAT result file is missing: {error}"))?;
     if !file.is_file()
         || !file.starts_with(&root)
         || file.extension().and_then(|value| value.to_str()) != Some(expected_extension)
     {
-        return Err("completed run file failed containment validation".into());
+        return Err("AnnoCAT result file failed containment validation".into());
     }
     Ok(file)
 }
@@ -4138,11 +3455,16 @@ fn completed_run_query_inputs(
     )
     .ok();
     if let (Some(evidence), Some(catalog)) = (&evidence, &catalog) {
-        let effective_evidence = favor::effective_evidence(evidence);
-        let effective_catalog = favor::effective_catalog(catalog);
-        if effective_evidence == *evidence || effective_catalog == *catalog {
-            favor::prepare_query_assets(evidence, catalog)?;
-        }
+        let phenotype_assets = phenotype::active_query_assets(runs_directory, requested_id)?;
+        favor::prepare_query_assets_with_gene(
+            evidence,
+            catalog,
+            phenotype_assets
+                .as_ref()
+                .map(|(gene_evidence, gene_catalog)| {
+                    (gene_evidence.as_path(), gene_catalog.as_path())
+                }),
+        )?;
         return Ok((
             Some(favor::effective_evidence(evidence)),
             Some(favor::effective_catalog(catalog)),
@@ -4281,7 +3603,7 @@ fn task_snapshots(paths: &PortablePaths) -> Vec<tasks::TaskSnapshot> {
 
 fn task_sort_rank(task: &tasks::TaskSnapshot) -> u8 {
     match task.state.as_str() {
-        "queued" | "running" | "validating" | "cancelling" | "downloaded" => 0,
+        "queued" | "running" | "validating" | "pausing" | "cancelling" | "downloaded" => 0,
         "paused" | "cancelled" | "failed" | "interrupted" => 1,
         "ready" | "completed" => 2,
         _ => 3,
@@ -4388,13 +3710,13 @@ fn share_completed_run_interactive(
 ) -> Result<Option<report_package::PackageSummary>, String> {
     let paths = portable_paths()?;
     let result = completed_run_result(&paths.runs, run_id)?;
-    let run_directory = result.parent().ok_or("completed run has no directory")?;
+    let run_directory = result.parent().ok_or("AnnoCAT result has no folder")?;
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(run_directory.join("manifest.json"))
-            .map_err(|error| format!("cannot read completed run manifest: {error}"))?,
+            .map_err(|error| format!("cannot read AnnoCAT result manifest: {error}"))?,
     )
-    .map_err(|error| format!("invalid completed run manifest: {error}"))?;
-    let original_name = manifest["name"].as_str().unwrap_or("AnnoCAT-report");
+    .map_err(|error| format!("invalid AnnoCAT result manifest: {error}"))?;
+    let original_name = manifest["name"].as_str().unwrap_or("AnnoCAT-result");
     let name = library_metadata::display_name(&paths.runs, run_id)
         .unwrap_or_else(|| original_name.to_owned());
     let completed = manifest["completedAt"]
@@ -4418,19 +3740,26 @@ fn share_completed_run_interactive(
     );
     let destination = run_native_dialog(move || {
         rfd::FileDialog::new()
-            .set_title("Share AnnoCAT report")
-            .add_filter("AnnoCAT report", &["zip"])
+            .set_title("Export AnnoCAT result")
+            .add_filter("AnnoCAT result", &["zip"])
             .set_file_name(filename)
             .save_file()
     })?;
     let Some(destination) = destination else {
         return Ok(None);
     };
-    let package =
-        report_package::create_with_display_name(run_directory, &destination, Some(&name))?;
+    let candidates = library_metadata::candidate_snapshot(&paths.runs, run_id)?;
+    let package = report_package::create_with_display_name(
+        run_directory,
+        &destination,
+        Some(&name),
+        &candidates,
+    )?;
     if let Err(error) = worker::validate_report(&package.path) {
         let _ = std::fs::remove_file(&package.path);
-        return Err(format!("created report failed import validation: {error}"));
+        return Err(format!(
+            "created AnnoCAT result failed import validation: {error}"
+        ));
     }
     Ok(Some(package))
 }
@@ -4460,7 +3789,7 @@ fn export_filtered_results_interactive(
     let result = completed_run_result(&paths.runs, run_id)?;
     let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
     let name = library_metadata::display_name(&paths.runs, run_id)
-        .unwrap_or_else(|| "AnnoCAT-report".to_owned());
+        .unwrap_or_else(|| "AnnoCAT-result".to_owned());
     let (title, extension, suffix) = match request.format.as_str() {
         "rowsCsv" => ("Export filtered variants", "csv", "filtered-variants"),
         "genesTxt" => ("Export filtered genes", "txt", "filtered-genes"),
@@ -4543,7 +3872,7 @@ fn report_safe_name(value: &str) -> String {
         .take(80)
         .collect::<String>();
     if result.is_empty() {
-        "AnnoCAT-report".into()
+        "AnnoCAT-result".into()
     } else {
         result
     }
@@ -4552,8 +3881,7 @@ fn report_safe_name(value: &str) -> String {
 fn pick_resource_folder() -> Result<Option<String>, String> {
     if downloader::is_running() || reference::is_running() || preparation::running_count() > 0 {
         return Err(
-            "cancel the active download or preparation before changing the resource directory"
-                .into(),
+            "cancel the active installation before changing the annotation data folder".into(),
         );
     }
     let selection = pick_folder("Choose AnnoCAT resource folder")?;
@@ -4562,7 +3890,7 @@ fn pick_resource_folder() -> Result<Option<String>, String> {
         ensure_portable_layout()?;
         terminal_log(
             "config",
-            format!("resource directory changed to {}", path.display()),
+            format!("annotation data folder changed to {}", path.display()),
         );
         Ok(Some(path.to_string_lossy().into_owned()))
     } else {
@@ -4572,23 +3900,17 @@ fn pick_resource_folder() -> Result<Option<String>, String> {
 
 fn pick_downloads_folder() -> Result<Option<String>, String> {
     if downloader::is_running() || reference::is_running() || preparation::running_count() > 0 {
-        return Err(
-            "cancel the active download or preparation before changing the downloads directory"
-                .into(),
-        );
+        return Err("cancel the active installation before changing the download folder".into());
     }
     let selection = pick_folder("Choose AnnoCAT downloads folder")?;
     if let Some(path) = selection {
         save_downloads_directory(&path)?;
         std::fs::create_dir_all(&path).map_err(|error| {
-            format!(
-                "cannot create downloads directory {}: {error}",
-                path.display()
-            )
+            format!("cannot create download folder {}: {error}", path.display())
         })?;
         terminal_log(
             "config",
-            format!("downloads directory changed to {}", path.display()),
+            format!("download folder changed to {}", path.display()),
         );
         Ok(Some(path.to_string_lossy().into_owned()))
     } else {
@@ -4598,20 +3920,16 @@ fn pick_downloads_folder() -> Result<Option<String>, String> {
 
 fn pick_results_folder() -> Result<Option<String>, String> {
     if annotation::is_running() {
-        return Err("cancel the active annotation before changing the results directory".into());
+        return Err("cancel the active annotation before changing the results folder".into());
     }
     let selection = pick_folder("Choose AnnoCAT results folder")?;
     if let Some(path) = selection {
         save_results_directory(&path)?;
-        std::fs::create_dir_all(&path).map_err(|error| {
-            format!(
-                "cannot create results directory {}: {error}",
-                path.display()
-            )
-        })?;
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("cannot create results folder {}: {error}", path.display()))?;
         terminal_log(
             "config",
-            format!("results directory changed to {}", path.display()),
+            format!("results folder changed to {}", path.display()),
         );
         Ok(Some(path.to_string_lossy().into_owned()))
     } else {
@@ -4730,6 +4048,7 @@ struct SelectedVcfSummary {
     bytes: u64,
     assembly: Option<String>,
     samples: Vec<String>,
+    has_records: bool,
     error: Option<String>,
 }
 
@@ -4742,9 +4061,9 @@ fn selected_vcf_summaries(paths: &[String]) -> Vec<SelectedVcfSummary> {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             let inspected = annocat_core::vcf::inspect_header(file);
-            let (assembly, samples, error) = match inspected {
-                Ok(summary) => (summary.assembly, summary.samples, None),
-                Err(error) => (None, Vec::new(), Some(error)),
+            let (assembly, samples, has_records, error) = match inspected {
+                Ok(summary) => (summary.assembly, summary.samples, summary.has_records, None),
+                Err(error) => (None, Vec::new(), false, Some(error)),
             };
             SelectedVcfSummary {
                 path: path.clone(),
@@ -4756,6 +4075,7 @@ fn selected_vcf_summaries(paths: &[String]) -> Vec<SelectedVcfSummary> {
                 bytes,
                 assembly,
                 samples,
+                has_records,
                 error,
             }
         })
@@ -4803,8 +4123,8 @@ fn pick_recovery_input() -> Result<Option<String>, String> {
 fn pick_result_file() -> Result<Option<String>, String> {
     let selection = run_native_dialog(|| {
         rfd::FileDialog::new()
-            .set_title("Open AnnoCAT results")
-            .add_filter("AnnoCAT report", &["zip"])
+            .set_title("Import AnnoCAT result")
+            .add_filter("AnnoCAT result", &["zip"])
             .pick_file()
     })?;
     Ok(selection.map(|path| path.to_string_lossy().into_owned()))
@@ -4882,6 +4202,50 @@ mod profile_status_tests {
                 "removed legacy stylesheet must not be imported or served: {removed_stylesheet}"
             );
         }
+    }
+
+    #[test]
+    fn retained_browser_copy_uses_the_controlled_terms() {
+        let copy = [
+            INDEX_HTML,
+            APP_JS,
+            FAVOR_ONLINE_JS,
+            RESULT_FILTERS_JS,
+            VARIANT_PRESENTATION_JS,
+        ]
+        .join("\n")
+        .to_ascii_lowercase();
+        for deprecated in [
+            "browse results",
+            "case notes",
+            "share report",
+            "report zip",
+            "annocat report",
+            "canonical parquet",
+            "canonical result",
+            "current results",
+            "favor enrichment",
+            "network size",
+            "cache on disk",
+            "download safety",
+            "pure streaming",
+            "concurrent source installs",
+            "no completed annotations",
+            "single run",
+            "sequential separate runs",
+            "run order",
+            "none reported",
+            "database field",
+        ] {
+            assert!(
+                !copy.contains(deprecated),
+                "retained browser copy contains deprecated term: {deprecated}"
+            );
+        }
+        assert!(
+            VARIANT_PRESENTATION_JS
+                .contains("The VCF does not contain a genotype call for this sample.")
+        );
     }
 
     #[test]
@@ -5082,14 +4446,6 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn server_port_parser_rejects_zero_and_unknown_options() {
-        assert_eq!(parse_port(&[]).unwrap(), 8787);
-        assert_eq!(parse_port(&["--port".into(), "8792".into()]).unwrap(), 8792);
-        assert!(parse_port(&["--port".into(), "0".into()]).is_err());
-        assert!(parse_port(&["--listen".into(), "8792".into()]).is_err());
-    }
-
-    #[test]
     fn storage_config_is_backward_compatible_and_keeps_both_directories() {
         let legacy: AppConfig =
             serde_json::from_str(r#"{"resource_directory":"D:\\resources"}"#).unwrap();
@@ -5147,18 +4503,31 @@ mod profile_status_tests {
     }
 
     #[test]
+    fn first_run_routes_setup_choices_and_labels_install_cache_work() {
+        let app = web_app_source();
+        assert!(INDEX_HTML.contains("id=\"setup-core-annotation\""));
+        assert!(INDEX_HTML.contains("id=\"setup-offline\""));
+        assert!(INDEX_HTML.contains("id=\"setup-open-results\""));
+        assert!(app.contains("applyDefaultWizardProfile('online')"));
+        assert!(app.contains("$('#setup-offline').addEventListener('click',()=>"));
+        assert!(app.contains("showPage('resources')"));
+        assert!(app.contains("task.kind==='annotation'?'Annotating':'Preparing cache'"));
+    }
+
+    #[test]
     fn about_surface_and_metadata_use_the_project_apache_license() {
         let html = include_str!("../../../web/index.html");
         let manifest = include_str!("../../../Cargo.toml");
         let about = serde_json::to_value(about_status()).unwrap();
         assert!(html.contains("id=\"about-button\""));
         assert!(html.contains("id=\"about-dialog\""));
+        assert!(html.contains("class=\"about-header\""));
+        assert!(html.contains("class=\"about-section\""));
         assert!(!html.contains("class=\"privacy\""));
         assert!(html.contains(">Apache-2.0</a>"));
-        assert!(html.contains("portable, local-first application"));
+        assert!(html.contains("AnnoCAT is an application for annotating and reviewing genomic variants."));
         assert!(html.contains("Research use only"));
-        assert!(html.contains("Not for use in diagnostic procedures"));
-        assert!(html.contains("has not received regulatory clearance or approval"));
+        assert!(html.contains("Do not use AnnoCAT for diagnosis or patient-care decisions."));
         assert!(manifest.contains("license = \"Apache-2.0\""));
         assert_eq!(about["license"], "Apache-2.0");
         assert_eq!(about["version"], env!("CARGO_PKG_VERSION"));
@@ -5167,35 +4536,6 @@ mod profile_status_tests {
                 .as_str()
                 .is_some_and(|value| !value.is_empty())
         );
-    }
-
-    #[test]
-    fn terminal_storage_units_are_consistent() {
-        assert_eq!(format_terminal_size(872_900_000), "872.9 MB");
-        assert_eq!(format_terminal_size(39_000_000_000), "39.0 GB");
-        assert_eq!(format_terminal_rate(12_300_000.0), "12.3 MB/s");
-        let mut task = tasks::from_completed_run("cadd", "CADD", "", "GRCh38", 1, 1);
-        task.kind = "installation";
-        task.state = "running".into();
-        task.phase = "replaying".into();
-        task.chromosome = Some("1".into());
-        task.completed_chromosomes = 0;
-        task.total_chromosomes = 24;
-        task.completed_bytes = 500_000_000;
-        task.total_bytes = 1_000_000_000;
-        task.percent = 50.0;
-        task.throughput_bytes_per_second = 12_300_000.0;
-        let table = terminal_task_table(&[task.clone()], 120);
-        assert_eq!(table[0], "Active tasks");
-        assert!(table[2].contains("CADD"));
-        assert!(table[2].contains("Replaying"));
-        assert!(table[2].contains("1 / 24"));
-        assert!(table[2].contains("0.5 / 1.0 GB"));
-        assert!(table[2].contains("50.0%"));
-        assert!(table[2].contains("12.3 MB/s"));
-        let compact = terminal_task_table(&[task], 40);
-        assert!(compact[1].contains("Replay chr1/24"));
-        assert!(compact[1].contains("50.0%"));
     }
 
     #[test]
@@ -5250,6 +4590,8 @@ mod profile_status_tests {
         assert!(!app.contains("data-source-tasks"));
         assert!(app.contains("task.availableActions"));
         assert!(app.contains("task.throughputBytesPerSecond"));
+        assert!(app.contains("pausing:'Pausing'"));
+        assert!(app.contains("prepare.cancelRequested"));
         assert!(!app.contains("renderDownloadJobs"));
         assert!(!app.contains("resourceJobView"));
         assert!(!app.contains("jobTransferRates"));
@@ -5579,14 +4921,19 @@ mod profile_status_tests {
         ));
         assert!(app.contains("role=\"combobox\""));
         assert!(app.contains("aria-controls=\"phenotype-search-results\""));
-        assert!(app.contains("data-phenotype-sample"));
-        assert!(app.contains("sampleName:phenotypeSampleName"));
-        assert!(app.contains("disease.reportOverlap"));
-        assert!(!app.contains("disease.reportSupport"));
-        assert!(app.contains("HPO license and attribution"));
-        assert!(html.contains("HPO license and attribution terms"));
-        assert!(!app.contains("Disease hypotheses"));
-        assert!(!app.contains("plausible report genes"));
+        assert!(app.contains("Add a feature or condition"));
+        assert!(app.contains("MONDO subtypes"));
+        assert!(app.contains("It does not rank variants or estimate causality."));
+        assert!(!app.contains("candidateRank"));
+        assert!(app.contains("event.composedPath()"));
+        assert!(app.contains("Export phenotype data?"));
+        assert!(app.contains("HPO terms"));
+        assert!(html.contains("Mondo Disease Ontology"));
+        assert!(!app.contains("data-phenotype-sample"));
+        assert!(!app.contains("sampleName:phenotypeSampleName"));
+        assert!(!app.contains("disease.reportOverlap"));
+        assert!(!app.contains("/phenotypes/rank"));
+        assert!(!app.contains("/phenotypes/explore"));
     }
 
     #[test]
@@ -5639,6 +4986,10 @@ mod profile_status_tests {
             .unwrap(),
             "field-catalog.json"
         );
+        delete_completed_run(&root, "run-2").unwrap();
+        assert!(!complete.exists());
+        assert!(library_metadata::display_name(&root, "run-2").is_none());
+        assert!(completed_runs_status(&root).unwrap().runs.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

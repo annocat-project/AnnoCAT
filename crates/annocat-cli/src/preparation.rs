@@ -42,12 +42,12 @@ use fields::dbnsfp_schema_identity;
 #[cfg(test)]
 use fields::{
     DBNSFP_CURATED_SCHEMA, DBNSFP_FIELD_SELECTION_SCHEMA_VERSION, DBNSFP_LEGACY_CURATED_SCHEMA,
-    dbnsfp_contract, dbnsfp_contract_fields, default_dbnsfp_field_selection,
-    default_supplementary_field_selection, full_dbnsfp_field_selection,
+    dbnsfp_contract, dbnsfp_contract_fields, full_dbnsfp_field_selection,
     supplementary_field_contract,
 };
 pub use fields::{
     DbnsfpFieldSelection, SupplementaryFieldSelection, dbnsfp_field_configuration,
+    default_dbnsfp_field_selection, default_supplementary_field_selection,
     load_dbnsfp_field_selection, load_supplementary_field_selection, save_dbnsfp_field_selection,
     save_supplementary_field_selection, supplementary_field_configuration,
     supplementary_schema_identity,
@@ -1801,7 +1801,7 @@ pub fn start_hpo_live(request: HpoLiveRequest) -> Result<(), String> {
         phase: "starting".into(),
         expected_network_bytes,
         remaining_chromosomes: 1,
-        detail: "Starting the Human Phenotype Ontology installation".into(),
+        detail: "Starting the phenotype and condition knowledge installation".into(),
         ..LivePreparationState::default()
     })?;
     spawn_live_job(job, move || run_hpo_live(request))
@@ -2105,15 +2105,15 @@ fn run_hpo_live(request: HpoLiveRequest) {
                 state.percent = 100.0;
                 state.throughput_bytes_per_second = 0.0;
                 state.detail = format!(
-                    "Indexed {} HPO terms and {} disease profiles",
-                    ready.term_count, ready.disease_count
+                    "Indexed {} phenotype terms, {} condition terms, and {} disease profiles",
+                    ready.term_count, ready.mondo_term_count, ready.disease_count
                 );
             }
             Err(_) if cancelled.load(Ordering::SeqCst) => {
                 state.state = "cancelled".into();
                 state.phase = "cancelled".into();
                 state.detail =
-                    "HPO installation paused; verified assets and partial downloads were retained"
+                    "Knowledge installation paused; verified assets and partial downloads were retained"
                         .into();
             }
             Err(error) => {
@@ -2121,7 +2121,7 @@ fn run_hpo_live(request: HpoLiveRequest) {
                 state.phase = "failed".into();
                 state.error = Some(error);
                 state.detail =
-                    "HPO installation failed; incomplete assets were not promoted".into();
+                    "Knowledge installation failed; incomplete assets were not promoted".into();
             }
         }
     }

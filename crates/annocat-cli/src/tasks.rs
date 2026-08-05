@@ -44,7 +44,7 @@ impl TaskSnapshot {
     pub fn is_active(&self) -> bool {
         matches!(
             self.state.as_str(),
-            "queued" | "running" | "validating" | "cancelling"
+            "queued" | "running" | "validating" | "pausing" | "cancelling"
         )
     }
 }
@@ -60,6 +60,7 @@ pub fn from_download(
             .map(|position| format!("Waiting in the download queue (position {position})"))
             .unwrap_or_else(|| "Waiting in the download queue".into()),
         "downloaded" => "Download complete".into(),
+        "pausing" => "Pause requested".into(),
         "paused" | "cancelled" if status.downloaded_bytes > 0 => "Downloaded data retained".into(),
         _ => status.error.clone().unwrap_or_else(|| status.phase.clone()),
     };
@@ -100,13 +101,18 @@ pub fn from_preparation(
     let retained_partial = status.state == "idle"
         && status.completed_chromosomes > 0
         && status.remaining_chromosomes > 0;
+    let pausing = status.state == "running" && status.cancel_requested;
     let state = if retained_partial {
         "paused".into()
+    } else if pausing {
+        "pausing".into()
     } else {
         status.state.clone()
     };
     let phase = if retained_partial {
         "paused".into()
+    } else if pausing {
+        "pausing".into()
     } else {
         status.phase
     };
@@ -254,7 +260,7 @@ pub fn from_completed_run(
         title: title.into(),
         state: "completed".into(),
         phase: "completed".into(),
-        detail: format!("{assembly} · {variant_count} variants"),
+        detail: format!("{assembly} - {variant_count} variants"),
         resource_id: None,
         chromosome: None,
         completed_chromosomes: 0,
@@ -293,6 +299,7 @@ pub fn choose_resource_task(
 fn resource_actions(kind: &str, state: &str) -> Vec<&'static str> {
     match state {
         "queued" | "running" | "validating" => vec!["pause", "cancel"],
+        "pausing" | "cancelling" => Vec::new(),
         "paused" | "cancelled" | "failed" => vec!["resume", "cancel"],
         "downloaded" if kind == "download" => vec!["install", "cancel"],
         "ready" => vec!["remove"],
@@ -425,6 +432,26 @@ mod tests {
         );
         assert_eq!(task.throughput_bytes_per_second, 12.5);
         assert_eq!(task.available_actions, vec!["pause", "cancel"]);
+    }
+
+    #[test]
+    fn requested_installation_pause_is_an_active_transition() {
+        let task = from_preparation(
+            "clinvar",
+            "ClinVar",
+            preparation::LivePreparationState {
+                resource_id: Some("clinvar".into()),
+                state: "running".into(),
+                phase: "downloading-source-part".into(),
+                cancel_requested: true,
+                detail: "Pause requested".into(),
+                ..preparation::LivePreparationState::default()
+            },
+        );
+        assert_eq!(task.state, "pausing");
+        assert_eq!(task.phase, "pausing");
+        assert!(task.is_active());
+        assert!(task.available_actions.is_empty());
     }
 
     #[test]

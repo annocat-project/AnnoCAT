@@ -7,7 +7,7 @@
       "groups": [
         {
           "id": "current",
-          "label": "Current AnnoCat fields",
+          "label": "Current AnnoCAT fields",
           "default": true,
           "fields": [
             "significance", "reviewStatus", "phenotypes", "variantClass", "soAccession",
@@ -29,7 +29,7 @@
       "resourceId": "dbsnp",
       "contractId": "dbsnp-fastvep-fields-v1",
       "groups": [
-        { "id": "current", "label": "Current AnnoCat fields", "default": true, "fields": ["id", "globalMaf"] },
+        { "id": "current", "label": "Current AnnoCAT fields", "default": true, "fields": ["id", "globalMaf"] },
         { "id": "additional", "label": "Additional dbSNP fields", "default": false, "fields": ["variantType", "common"] }
       ]
     },
@@ -105,7 +105,7 @@
       "resourceId": "revel",
       "contractId": "revel-fastvep-fields-v1",
       "groups": [
-        { "id": "current", "label": "Current AnnoCat fields", "default": true, "fields": ["score", "transcriptId"] },
+        { "id": "current", "label": "Current AnnoCAT fields", "default": true, "fields": ["score", "transcriptId"] },
         { "id": "additional", "label": "Additional amino-acid fields", "default": false, "fields": ["aaRef", "aaAlt"] }
       ]
     }

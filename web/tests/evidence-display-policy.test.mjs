@@ -42,6 +42,43 @@ test('variant details honor the backend representative when MANE Select is dupli
   assert.equal(presenter.preferredConsequence([neighboring,representative],'ENST_TARGET'),representative);
 });
 
+test('variant details switch transcript-scoped scalars without changing allele evidence',()=>{
+  const rows=[
+    {...item('dbnsfp','Ensembl_transcriptid','ENST_A'),scope:'transcript',consequenceId:'a',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','AlphaMissense_score','0.0478'),scope:'transcript',consequenceId:'a',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','REVEL_score','0.036'),scope:'transcript',consequenceId:'a',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','PrimateAI_score','0.347287714481'),scope:'transcript',consequenceId:'a',sourceCardinality:'recordScalar'},
+    {...item('dbnsfp','Ensembl_transcriptid','ENST_B'),scope:'transcript',consequenceId:'b',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','AlphaMissense_score','0.0461'),scope:'transcript',consequenceId:'b',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','REVEL_score','0.036'),scope:'transcript',consequenceId:'b',sourceCardinality:'alignedVector'},
+    {...item('dbnsfp','PrimateAI_score','0.347287714481'),scope:'transcript',consequenceId:'b',sourceCardinality:'recordScalar'},
+    {...item('cadd','phred','20'),scope:'allele'}
+  ];
+  const values=(consequence,transcript)=>Object.fromEntries(
+    presenter.evidenceForSelectedConsequence(rows,consequence,transcript)
+      .map(row=>[`${row.sourceId}.${row.fieldPath}`,row.value])
+  );
+  assert.deepEqual(values('a','ENST_A'),{
+    'dbnsfp.Ensembl_transcriptid':'ENST_A',
+    'dbnsfp.AlphaMissense_score':'0.0478',
+    'dbnsfp.REVEL_score':'0.036',
+    'dbnsfp.PrimateAI_score':'0.347287714481',
+    'cadd.phred':'20'
+  });
+  assert.deepEqual(values('b','ENST_B'),{
+    'dbnsfp.Ensembl_transcriptid':'ENST_B',
+    'dbnsfp.AlphaMissense_score':'0.0461',
+    'dbnsfp.REVEL_score':'0.036',
+    'dbnsfp.PrimateAI_score':'0.347287714481',
+    'cadd.phred':'20'
+  });
+  const selected=presenter.evidenceForSelectedConsequence(rows,'a','ENST_A');
+  assert.equal(selected.find(row=>row.fieldPath==='AlphaMissense_score').scopeLabel,'Transcript');
+  const primate=selected.find(row=>row.fieldPath==='PrimateAI_score');
+  assert.equal(primate.scopeLabel,'Variant');
+  assert.match(presenter.evidencePresentation(primate).tooltip,/one value for this variant/i);
+});
+
 test('registered native interpretations are continuous and use semantic tones',()=>{
   const tones=new Set(['neutral','reassuring','caution','adverse']);
   for(const predictor of evidenceCalibrations.predictors.filter(predictor=>predictor.nativeInterpretation)){
@@ -124,7 +161,7 @@ test('FAVOR MutPred2 uses calibrated bands but is excluded from summary votes',(
   assert.match(presenter.predictionSummaryBar([item('favor-online','codingMutPred2Pred','PP')]),/Not reported/);
 });
 
-test('source-native colors are exact-field plain text and remain available when calibration is off',()=>{
+test('source-reported colors are exact-field plain text and remain available when calibration is off',()=>{
   assert.deepEqual(
     [present('cadd','phred','20','stop_gained').tone,present('cadd','phred','20','stop_gained').presentation],
     ['adverse','text']
@@ -159,13 +196,57 @@ test('source-native colors are exact-field plain text and remain available when 
   useCalibratedEvidenceColors=true;
 });
 
-test('context and unverified sources stay neutral unless the policy registers direction',()=>{
-  assert.equal(present('phylop','score','-1.2','intron_variant').tone,'caution');
-  assert.equal(present('phylop','score','1.2','intron_variant').tone,'neutral');
-  assert.equal(present('gnomad-exomes','AF','0.00001','missense_variant').tone,'neutral');
+test('display bands color non-calibrated frequency and conservation context',()=>{
+  useCalibratedEvidenceColors=false;
+  assert.equal(present('gnomad-exomes','AF','0.01','missense_variant').tone,'adverse');
+  assert.equal(present('gnomad-exomes','AF','0.0101','missense_variant').tone,'caution');
+  assert.equal(present('gnomad-exomes','AF','0.05','missense_variant').tone,'caution');
+  assert.equal(present('gnomad-exomes','AF','0.0501','missense_variant').tone,'reassuring');
+  assert.equal(present('favor-online','gnomadAf','0.668503','upstream_gene_variant').tone,'reassuring');
+  assert.equal(present('phylop','score','-1.66','intron_variant').tone,'reassuring');
+  assert.equal(present('phylop','score','0','intron_variant').tone,'reassuring');
+  assert.equal(present('phylop','score','0.1','intron_variant').tone,'reassuring');
+  assert.equal(present('phylop','score','1.2','intron_variant').tone,'caution');
+  assert.equal(present('phylop','score','1.6','intron_variant').tone,'adverse');
+  const phyloPMatch=evidenceCalibrations.predictors.find(predictor=>predictor.id==='phylop-100way-vertebrate').matches.find(match=>match.sourceIds.includes('phylop')),fieldNames=phyloPMatch.fieldNames;
+  phyloPMatch.fieldNames=['score'];
+  assert.equal(present('phylop','value','1.6','intron_variant').tone,'adverse');
+  phyloPMatch.fieldNames=fieldNames;
+  assert.equal(present('dbnsfp','phyloP100way_vertebrate','4.783129','upstream_gene_variant').tone,'adverse');
+  assert.equal(present('favor-online','codingPhyloP100way','4.783129','upstream_gene_variant').tone,'adverse');
+  assert.equal(present('favor-online','apcConservation','4.783129','upstream_gene_variant').tone,'reassuring');
+  assert.equal(present('favor-online','apcConservation','10','upstream_gene_variant').tone,'caution');
+  assert.equal(present('favor-online','apcConservation','20','upstream_gene_variant').tone,'adverse');
+  assert.equal(present('favor-online','apcConservation','30','upstream_gene_variant').tone,'adverse');
+  useCalibratedEvidenceColors=true;
   assert.equal(present('favor-online','caddPhred','30','missense_variant').tone,'neutral');
   assert.equal(present('dbnsfp','ESM1b_score','-24','missense_variant').tone,'neutral');
   assert.equal(present('dbnsfp','REVEL_score','.','missense_variant').tone,'missing');
+});
+
+test('population summary prefers local gnomAD and falls back to FAVOR',()=>{
+  const local=item('gnomad','allAf','0.02','intron_variant');
+  const online=item('favor-online','gnomadAf','0.03','intron_variant');
+  assert.equal(presenter.primaryAlleleFrequency([online,local]),local);
+  assert.equal(presenter.primaryAlleleFrequency([online]),online);
+  assert.equal(presenter.primaryAlleleFrequency([item('gnomad','faf95','0.01','intron_variant'),online]),online);
+  assert.deepEqual(favorFieldPresentation('gnomadAf','gnomadAf'),[
+    'gnomAD genome + exome AF',
+    'Overall allele frequency from gnomAD v4.1.1 genome and exome data represented by FAVOR.'
+  ]);
+});
+
+test('variant summary prefers reported phyloP over conservation aPC',()=>{
+  const apc=item('favor-online','apcConservation','24.1','intron_variant');
+  const phylop=item('phylop','value','1.2','intron_variant');
+  assert.equal(presenter.preferredConservationSummary([apc,phylop]),phylop);
+  assert.equal(presenter.preferredConservationSummary([item('dbnsfp','phyloP100way_vertebrate','4.1','intron_variant'),phylop]),phylop);
+  const legacyScopedPhyloP={...item('dbnsfp','phyloP100way_vertebrate','1.4','intron_variant'),scope:'transcript',consequenceId:'other'};
+  assert.equal(presenter.preferredConservationSummary([apc,legacyScopedPhyloP]),legacyScopedPhyloP);
+  const favorPhyloP=item('favor-online','codingPhyloP100way','1.3','intron_variant');
+  assert.equal(presenter.preferredConservationSummary([apc,favorPhyloP]),favorPhyloP);
+  assert.equal(presenter.preferredConservationSummary([apc,item('dbnsfp','phyloP100way_vertebrate_rankscore','0.99','intron_variant')]),apc);
+  assert.equal(presenter.preferredConservationSummary([apc,item('phylop','score','.','intron_variant')]),apc);
 });
 
 test('missense-only scores are not interpreted for explicit non-missense consequences',()=>{
@@ -185,7 +266,7 @@ test('missense-only scores are not interpreted for explicit non-missense consequ
 test('tooltips and summary use the same structured interpretation',()=>{
   const interpretation=presenter.evidencePresentation(item('revel','score','0.8'));
   assert.equal(interpretation.presentation,'pill');
-  assert.match(interpretation.tooltip,/Calibrated interpretation:/);
+  assert.match(interpretation.tooltip,/calibrated interpretation:/i);
 
   const summary=presenter.predictionSummaryBar([
     item('revel','score','0.8'),
@@ -205,30 +286,30 @@ test('FAVOR transcript-dependent predictors remain explicit variant summaries',(
   const alpha=presenter.evidencePresentation(item('favor-online','alphaMissense','0.4222','intron_variant'));
   assert.equal(alpha.display,'0.4222');
   assert.equal(alpha.tone,'neutral');
-  assert.match(alpha.tooltip,/maximum across its per-transcript AlphaMissense predictions/i);
+  assert.match(alpha.tooltip,/reports the highest AlphaMissense score/i);
 
   const revel=presenter.evidencePresentation(item('favor-online','revel','0.588','intron_variant'));
   assert.equal(revel.display,'0.588');
   assert.doesNotMatch(revel.tooltip,/not applicable/i);
-  assert.match(revel.tooltip,/does not identify the contributing REVEL transcript/i);
+  assert.match(revel.tooltip,/does not identify the transcript for this REVEL summary/i);
 
   const coding=presenter.evidencePresentation(
     item('favor-online','codingRevelScore','0.588','missense_variant'),
     '0.588'
   );
   assert.match(coding.tooltip,/FAVOR selected this coding record/i);
-  assert.match(coding.tooltip,/not independently matched/i);
+  assert.match(coding.tooltip,/did not match it to the selected transcript/i);
   assert.match(
     presenter.predictionSummaryBar([item('favor-online','codingSiftPred','D')]),
     /Not reported/
   );
 });
 
-test('FAVOR categorical summaries retain source-native meaning but not MANE summary votes',()=>{
+test('FAVOR categorical summaries retain source-reported meaning but not MANE summary votes',()=>{
   const sift=presenter.evidencePresentation(item('favor-online','siftCat','deleterious','missense_variant'));
   assert.equal(sift.display,'Deleterious');
   assert.equal(sift.tone,'adverse');
-  assert.match(sift.tooltip,/variant summary, not selected-transcript evidence/i);
+  assert.match(sift.tooltip,/does not identify the transcript for this SIFT summary/i);
 
   const summary=presenter.predictionSummaryBar([
     item('favor-online','siftCat','deleterious'),

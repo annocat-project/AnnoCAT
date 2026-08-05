@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -55,8 +55,6 @@ struct Manifest {
     resource_id: String,
     assembly: String,
     ensembl_release: String,
-    gff3: PathBuf,
-    fasta: PathBuf,
     cache: String,
     cache_bytes: u64,
     cache_sha256: String,
@@ -96,18 +94,6 @@ fn validate_installation(resources: &Path) -> Result<(), String> {
         || manifest.builder_provenance.binary_sha256.len() != 64
     {
         return Err("transcript cache manifest does not match Ensembl 115 on GRCh38".into());
-    }
-    if !manifest.gff3.is_file() {
-        return Err(format!(
-            "managed Ensembl GFF3 is missing: {}",
-            manifest.gff3.display()
-        ));
-    }
-    if !manifest.fasta.is_file() {
-        return Err(format!(
-            "managed GRCh38 FASTA is missing: {}",
-            manifest.fasta.display()
-        ));
     }
     let actual = fs::metadata(cache_path(resources))
         .map_err(|error| format!("transcript cache file is missing: {error}"))?
@@ -252,6 +238,9 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
     }
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
     let cache = staging.join("ensembl-115.cache");
+    let log_path = staging.join("fastvep.log");
+    let log = fs::File::create(&log_path)
+        .map_err(|error| format!("cannot create fastVEP transcript-cache log: {error}"))?;
     let mut child = Command::new(fastvep)
         .args(["cache", "--gff3"])
         .arg(format!("Ensembl={}", gff3.display()))
@@ -260,6 +249,8 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
         .arg("--output")
         .arg(&cache)
         .arg("--no-progress")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log))
         .spawn()
         .map_err(|error| format!("cannot start fastVEP cache builder: {error}"))?;
     let status = loop {
@@ -278,8 +269,18 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
         }
     };
     if !status.success() {
-        return Err(format!("fastVEP cache builder exited with {status}"));
+        let detail = fs::read_to_string(&log_path).unwrap_or_default();
+        return Err(if detail.trim().is_empty() {
+            format!("fastVEP cache builder exited with {status}")
+        } else {
+            format!(
+                "fastVEP cache builder exited with {status}: {}",
+                detail.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        });
     }
+    fs::remove_file(&log_path)
+        .map_err(|error| format!("cannot remove fastVEP transcript-cache log: {error}"))?;
     let bytes = fs::metadata(&cache)
         .map_err(|error| error.to_string())?
         .len();
@@ -416,10 +417,8 @@ mod tests {
         let staging = resources.join("transcript-cache.partial");
         fs::create_dir_all(&target).unwrap();
         fs::create_dir_all(&staging).unwrap();
-        let gff3 = resources.join("genes.gff3.gz");
-        let fasta = resources.join("reference.fna");
-        fs::write(&gff3, b"gff3").unwrap();
-        fs::write(&fasta, b"fasta").unwrap();
+        let gff3 = PathBuf::from(r"C:\original-machine\genes.gff3.gz");
+        let fasta = PathBuf::from(r"C:\original-machine\reference.fna");
         fs::write(target.join("ensembl-115.cache"), b"bad").unwrap();
         fs::write(target.join("manifest.json"), b"{}").unwrap();
         let rebuilt = b"verified rebuilt cache";
@@ -459,6 +458,8 @@ mod tests {
         publish_replacement(&resources, &staging, &target).unwrap();
 
         assert_eq!(fs::read(cache_path(&resources)).unwrap(), rebuilt);
+        assert!(!gff3.exists());
+        assert!(!fasta.exists());
         assert!(validate_installation(&resources).is_ok());
         assert!(!resources.join("transcript-cache.replaced").exists());
         fs::remove_dir_all(resources).unwrap();

@@ -63,6 +63,8 @@ pub struct Profile {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Resource {
     pub id: String,
+    #[serde(default = "default_true")]
+    pub user_visible: bool,
     pub assembly: String,
     pub delivery: String,
     #[serde(default)]
@@ -72,6 +74,10 @@ pub struct Resource {
     pub manifest_role: Option<String>,
     pub field_contract: Option<FieldContract>,
     pub release: Release,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +216,7 @@ pub fn download_releases() -> impl Iterator<Item = crate::ResourceRelease> {
     catalog()
         .resources
         .iter()
+        .filter(|resource| resource.user_visible)
         .filter_map(|resource| download_release(&resource.id))
 }
 
@@ -445,7 +452,8 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
                 return Err(format!("resource {} has an invalid checksum", resource.id));
             }
         }
-        if !matches!(resource.id.as_str(), "grch38-reference" | "ensembl-gff3")
+        if resource.user_visible
+            && !matches!(resource.id.as_str(), "grch38-reference" | "ensembl-gff3")
             && !catalog_source_ids.contains(resource.id.as_str())
         {
             return Err(format!(
@@ -460,6 +468,13 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
         .find(|resource| resource.id == "hpo")
     {
         validate_hpo_manifest_contract(hpo)?;
+    }
+    if let Some(mondo) = catalog
+        .resources
+        .iter()
+        .find(|resource| resource.id == "mondo")
+    {
+        validate_mondo_manifest_contract(mondo)?;
     }
     for resource_id in ["cadd", "spliceai"] {
         let resource = catalog
@@ -1024,6 +1039,53 @@ fn validate_hpo_manifest_contract(resource: &Resource) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_mondo_manifest_contract(resource: &Resource) -> Result<(), String> {
+    if resource.user_visible
+        || resource.manifest_ref.as_deref() != Some("config/mondo-assets.json")
+        || resource.manifest_role.as_deref() != Some("bootstrap-fallback")
+        || resource.release.policy != "rolling"
+        || resource.release.version != "latest"
+        || resource.release.resolver.as_deref() != Some("github-mondo-release-assets")
+        || resource.release.resolver_api_url.as_deref()
+            != Some("https://api.github.com/repos/monarch-initiative/mondo/releases/latest")
+    {
+        return Err("MONDO must use the hidden rolling resolver and bootstrap manifest".into());
+    }
+    let contents = resource
+        .manifest_ref
+        .as_deref()
+        .and_then(embedded_manifest)
+        .ok_or("MONDO resource has no embedded asset manifest")?;
+    let manifest: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|error| format!("invalid MONDO asset manifest: {error}"))?;
+    let assets = manifest
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("MONDO asset manifest has no assets")?;
+    let valid = assets.len() == 1
+        && assets[0].get("kind").and_then(serde_json::Value::as_str) == Some("condition-ontology")
+        && assets[0]
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            == Some("mondo.json")
+        && assets[0]
+            .get("bytes")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|bytes| bytes > 0)
+        && assets[0]
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.starts_with("https://github.com/monarch-initiative/mondo/"))
+        && assets[0]
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_sha256);
+    if !valid {
+        return Err("MONDO bootstrap manifest has invalid asset metadata".into());
+    }
+    Ok(())
+}
+
 fn embedded_manifest_exists(path: &str) -> bool {
     embedded_manifest(path).is_some()
 }
@@ -1037,6 +1099,10 @@ fn embedded_manifest(path: &str) -> Option<&'static str> {
         "config/hpo-assets.json" => Some(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/hpo-assets.json"
+        ))),
+        "config/mondo-assets.json" => Some(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/mondo-assets.json"
         ))),
         "config/indexed-sources.json" => Some(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1114,7 +1180,14 @@ mod tests {
 
     #[test]
     fn every_actionable_release_projects_to_the_downloader_contract() {
-        assert_eq!(download_releases().count(), catalog().resources.len());
+        assert_eq!(
+            download_releases().count(),
+            catalog()
+                .resources
+                .iter()
+                .filter(|resource| resource.user_visible)
+                .count()
+        );
         for current in &catalog().resources {
             let projected = download_release(&current.id).expect("download release");
             assert_eq!(projected.resource_id, current.id);
@@ -1145,7 +1218,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(hpo_sources.len(), 1);
-        assert_eq!(hpo_sources[0].name, "Human Phenotype Ontology");
+        assert_eq!(hpo_sources[0].name, "Phenotype and condition knowledge");
         assert_eq!(hpo_sources[0].fastvep_source, None);
         assert_eq!(hpo_resources.len(), 1);
         assert_eq!(hpo_resources[0].delivery, "knowledge-cache");
@@ -1159,6 +1232,12 @@ mod tests {
         );
         assert_eq!(hpo_resources[0].release.version, "latest");
         assert_eq!(hpo_resources[0].release.policy, "rolling");
+        let mondo = resource("mondo").unwrap();
+        assert!(!mondo.user_visible);
+        assert_eq!(
+            mondo.manifest_ref.as_deref(),
+            Some("config/mondo-assets.json")
+        );
     }
 
     #[test]
@@ -1172,6 +1251,7 @@ mod tests {
             "spliceai",
             "revel",
             "hpo",
+            "mondo",
         ] {
             assert!(
                 resource_manifest_json(resource_id).is_ok(),

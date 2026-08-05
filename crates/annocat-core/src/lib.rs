@@ -25,6 +25,7 @@ pub fn practical_resource_plan_json() -> String {
     let mut rows = catalog
         .resources
         .iter()
+        .filter(|resource| resource.user_visible)
         .map(|resource| {
             let rolling = resource.release.policy == "rolling";
             serde_json::json!({

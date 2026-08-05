@@ -24,7 +24,6 @@ struct InstallQueueState {
     paused: HashSet<String>,
     #[serde(default)]
     in_flight: HashSet<String>,
-    scheduling_paused: bool,
     concurrency: usize,
     #[serde(default = "default_resumable_source_parts")]
     resumable_source_parts: bool,
@@ -42,7 +41,6 @@ impl Default for InstallQueueState {
             waiting: VecDeque::new(),
             paused: HashSet::new(),
             in_flight: HashSet::new(),
-            scheduling_paused: false,
             concurrency: 1,
             resumable_source_parts: true,
             worker_active: false,
@@ -52,9 +50,6 @@ impl Default for InstallQueueState {
 
 impl InstallQueueState {
     fn enqueue(&mut self, resource_id: &str, prioritize: bool) -> EnqueueResult {
-        // Enqueue is an explicit user action. It resumes scheduling, while any
-        // other paused sources remain available for a later explicit resume.
-        self.scheduling_paused = false;
         let inserted = if self.waiting.iter().any(|queued| queued == resource_id)
             || self.in_flight.contains(resource_id)
         {
@@ -78,7 +73,7 @@ impl InstallQueueState {
     }
 
     fn next(&mut self, running: usize) -> NextWork {
-        if self.scheduling_paused || running >= self.concurrency {
+        if running >= self.concurrency {
             return NextWork::Wait;
         }
         match self.waiting.pop_front() {
@@ -153,7 +148,7 @@ pub fn restore(root: &Path) -> Result<bool, String> {
         restored.concurrency = 1;
     }
     restored.recover_interrupted_work();
-    let start_worker = !restored.scheduling_paused && !restored.waiting.is_empty();
+    let start_worker = !restored.waiting.is_empty();
     if start_worker {
         restored.worker_active = true;
     }
@@ -186,7 +181,6 @@ pub fn next(running: usize) -> NextWork {
 
 pub fn hold(resource_id: &str) -> bool {
     state().lock().is_ok_and(|mut state| {
-        state.scheduling_paused = true;
         let changed = state.paused.insert(resource_id.into());
         let _ = persist(&state);
         changed
@@ -214,9 +208,6 @@ pub fn remove(resource_id: &str) -> bool {
         let waiting = state.remove_waiting(resource_id);
         let paused = state.paused.remove(resource_id);
         let in_flight = state.in_flight.remove(resource_id);
-        if paused {
-            state.scheduling_paused = false;
-        }
         let _ = persist(&state);
         waiting || paused || in_flight
     })
@@ -284,25 +275,27 @@ mod tests {
     }
 
     #[test]
-    fn pause_stops_automatic_queue_advance() {
+    fn pausing_one_source_keeps_the_queue_advancing() {
         let mut state = InstallQueueState {
-            concurrency: 2,
+            concurrency: 1,
             ..InstallQueueState::default()
         };
+        state.enqueue("dbsnp", false);
         state.enqueue("cadd", false);
+        assert_eq!(state.next(0), NextWork::Start("dbsnp".into()));
         state.paused.insert("dbsnp".into());
-        state.scheduling_paused = true;
-        assert_eq!(state.next(1), NextWork::Wait);
+        state.in_flight.remove("dbsnp");
+        assert_eq!(state.next(0), NextWork::Start("cadd".into()));
+        assert!(state.paused.contains("dbsnp"));
     }
 
     #[test]
-    fn explicit_start_resumes_queue_without_counting_other_paused_sources() {
+    fn paused_sources_do_not_count_toward_concurrency() {
         let mut state = InstallQueueState {
             concurrency: 1,
             ..InstallQueueState::default()
         };
         state.paused.insert("dbsnp".into());
-        state.scheduling_paused = true;
         state.enqueue("cadd", false);
         assert_eq!(state.next(0), NextWork::Start("cadd".into()));
         assert!(state.paused.contains("dbsnp"));
@@ -359,10 +352,12 @@ mod tests {
 
     #[test]
     fn legacy_queue_defaults_to_resumable_source_parts() {
-        let restored: InstallQueueState = serde_json::from_str(
-            r#"{"waiting":[],"paused":[],"inFlight":[],"schedulingPaused":false,"concurrency":1}"#,
+        let mut restored: InstallQueueState = serde_json::from_str(
+            r#"{"waiting":["cadd"],"paused":["dbsnp"],"inFlight":[],"schedulingPaused":true,"concurrency":1}"#,
         )
         .unwrap();
         assert!(restored.resumable_source_parts);
+        assert_eq!(restored.next(0), NextWork::Start("cadd".into()));
+        assert!(restored.paused.contains("dbsnp"));
     }
 }

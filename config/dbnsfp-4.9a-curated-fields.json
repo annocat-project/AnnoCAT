@@ -4,7 +4,7 @@
   "resourceId": "dbnsfp",
   "release": "4.9a",
   "assembly": "GRCh38",
-  "description": "Transcript-linked coding prediction bundle. Dedicated AnnoCat ClinVar, dbSNP, gnomAD, CADD, SpliceAI, and genome-wide conservation sources remain independently namespaced and take precedence for their domains.",
+  "description": "Transcript-linked coding prediction fields. Dedicated AnnoCAT data sources take precedence for ClinVar, dbSNP, gnomAD, CADD, SpliceAI, and genome-wide conservation.",
   "legacyTranscriptAlignment": {
     "id": "dbnsfp-ensembl-transcripts-v1",
     "kind": "parallelTranscriptVector",
@@ -75,7 +75,7 @@
           "VARITY_ER_score", "VARITY_ER_rankscore",
           "ESM1b_score", "ESM1b_rankscore", "ESM1b_pred",
           "EVE_score", "EVE_rankscore",
-          "AlphaMissense_score", "AlphaMissense_rankscore", "AlphaMissense_pred",
+          "AlphaMissense_rankscore",
           "PHACTboost_score", "PHACTboost_rankscore",
           "MutFormer_score", "MutFormer_rankscore",
           "MutScore_score", "MutScore_rankscore"
@@ -89,7 +89,8 @@
         "fields": [
           "Ensembl_transcriptid", "Ensembl_proteinid", "Uniprot_acc",
           "Uniprot_entry", "HGVSc_VEP", "APPRIS", "GENCODE_basic", "TSL",
-          "VEP_canonical", "VEST4_score", "REVEL_score", "MVP_score",
+          "VEP_canonical", "VEST4_score", "REVEL_score",
+          "AlphaMissense_score", "AlphaMissense_pred", "MVP_score",
           "gMVP_score", "MPC_score"
         ]
       },
@@ -242,9 +243,9 @@
     "hg18/hg19 coordinates and duplicate hg19 scores",
     "ancient hominid alleles",
     "1000 Genomes, UK10K, ESP, ExAC, ALFA, and dbNSFP population-frequency copies",
-    "dbNSFP gnomAD copies because AnnoCat uses a dedicated gnomAD source",
-    "dbNSFP ClinVar copies because AnnoCat uses rolling dedicated ClinVar",
-    "dbNSFP rsIDs because AnnoCat uses dedicated dbSNP",
+    "dbNSFP gnomAD copies because AnnoCAT uses a dedicated gnomAD source",
+    "dbNSFP ClinVar copies because AnnoCAT uses rolling dedicated ClinVar",
+    "dbNSFP rsIDs because AnnoCAT uses dedicated dbSNP",
     "GTEx, eQTLGen, and Geuvadis fields pending a separate optional QTL source",
     "redundant threshold-derived EVE class columns and VARITY leave-one-out research columns"
   ]

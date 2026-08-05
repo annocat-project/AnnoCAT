@@ -25,6 +25,7 @@ pub struct VcfSummary {
 pub struct VcfHeaderSummary {
     pub assembly: Option<String>,
     pub samples: Vec<String>,
+    pub has_records: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -218,7 +219,8 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
     let reader =
         open_vcf(path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     let mut assembly = None;
-    for line in reader.lines() {
+    let mut lines = reader.lines();
+    while let Some(line) = lines.next() {
         let line =
             line.map_err(|error| format!("cannot read VCF header in {}: {error}", path.display()))?;
         if let Some(value) = line.strip_prefix("##reference=") {
@@ -235,6 +237,16 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
         }
         if line.starts_with("#CHROM\t") {
             let columns = line.split('\t').collect::<Vec<_>>();
+            let mut has_records = false;
+            for line in lines {
+                let line = line.map_err(|error| {
+                    format!("cannot read VCF records in {}: {error}", path.display())
+                })?;
+                if !line.trim().is_empty() && !line.starts_with('#') {
+                    has_records = true;
+                    break;
+                }
+            }
             return Ok(VcfHeaderSummary {
                 assembly,
                 samples: columns
@@ -243,6 +255,7 @@ pub fn inspect_header(path: &Path) -> Result<VcfHeaderSummary, String> {
                     .iter()
                     .map(|value| (*value).to_owned())
                     .collect(),
+                has_records,
             });
         }
     }
@@ -459,6 +472,35 @@ mod tests {
                 Some(expected)
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn header_inspection_reports_whether_records_exist() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-core-vcf-record-presence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let empty = root.join("empty.vcf");
+        let populated = root.join("populated.vcf");
+        std::fs::write(
+            &empty,
+            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &populated,
+            b"##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\tG\t.\tPASS\t.\n",
+        )
+        .unwrap();
+
+        assert!(!inspect_header(&empty).unwrap().has_records);
+        assert!(inspect_header(&populated).unwrap().has_records);
         std::fs::remove_dir_all(root).unwrap();
     }
 

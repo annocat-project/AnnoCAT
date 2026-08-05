@@ -1,3 +1,9 @@
+export function applyGenericEvidenceCellPresentation(cell, html) {
+  if (cell.querySelector('.profile-evidence-cell')) return false;
+  cell.innerHTML = html;
+  return true;
+}
+
 export function createVariantPresentation({
   $,columns,escapeHtml,prototypeIcon,resultFieldIdentity,fieldSourceIs,resourceTitle,
   coreColumnPresentation,displayColumns,moveResultColumn,decodeEvidenceValue,resultColumnRawValue,
@@ -13,11 +19,11 @@ const resultGridWidths=new Map((()=>{try{return Object.entries(JSON.parse(localS
 let resultGridViewportObserver=null,resultGridViewportTarget=null;
 const dbnsfpTranscriptMetadata=new Set(['Ensembl_geneid','Ensembl_transcriptid','Ensembl_proteinid','Uniprot_acc','HGVSc_VEP','HGVSp_VEP','APPRIS','GENCODE_basic','TSL','VEP_canonical','aaref','aaalt','aapos','genename']);
 const favorTranscriptSummaries=new Map([
-  ['revel',{family:'revel',note:'FAVOR\'s standard response does not identify the contributing REVEL transcript. Treat this as a variant summary, not selected-transcript evidence.'}],
-  ['alphamissense',{family:'alphamissense',note:'FAVOR reports the maximum across its per-transcript AlphaMissense predictions. It is not resolved to AnnoCAT\'s selected transcript.'}],
-  ['siftcat',{family:'sift',note:'FAVOR\'s standard response does not identify the contributing SIFT transcript. Treat this as a variant summary, not selected-transcript evidence.'}],
-  ['polyphencat',{family:'polyphen',note:'FAVOR\'s standard response does not identify the contributing PolyPhen-2 transcript. Treat this as a variant summary, not selected-transcript evidence.'}],
-  ['metasvmpred',{family:'metasvm',note:'FAVOR\'s standard response does not identify the contributing MetaSVM transcript. Treat this as a variant summary, not selected-transcript evidence.'}]
+  ['revel',{family:'revel',note:'FAVOR does not identify the transcript for this REVEL summary.'}],
+  ['alphamissense',{family:'alphamissense',note:'FAVOR reports the highest AlphaMissense score. FAVOR does not identify the transcript.'}],
+  ['siftcat',{family:'sift',note:'FAVOR does not identify the transcript for this SIFT summary.'}],
+  ['polyphencat',{family:'polyphen',note:'FAVOR does not identify the transcript for this PolyPhen-2 summary.'}],
+  ['metasvmpred',{family:'metasvm',note:'FAVOR does not identify the transcript for this MetaSVM summary.'}]
 ]);
 function dbnsfpVariantLevelField(field){return/^(CADD_|GERP\+\+_|phyloP|phastCons|SiPhy|LINSIGHT|GenoCanyon|fitCons|Eigen)/i.test(String(field||''))}
 function favorTranscriptSummary(item){
@@ -34,40 +40,40 @@ function evidenceReadingGuide(source,field){
   const id=String(source||'').toLowerCase(),key=String(field||''),lower=key.toLowerCase();
   const predictor=calibratedPredictorDefinition({sourceId:source,fieldPath:field});
   const category=categoricalPredictionDefinition({sourceId:source,fieldPath:field});
-  if(category)return category.note||'Source-native dbNSFP category. This is display context, not a variant classification.';
-  if(predictor?.calibrationStatus==='published'&&calibrationSourceVerified(predictor.sourceMatch))return`${predictor.scoreIdentity}. Published calibration is available when its variant-type requirements are met; otherwise AnnoCat uses the verified source-native context when one is registered.`;
-  if(predictor?.nativeInterpretation&&nativeSourceVerified(predictor.sourceMatch))return`${predictor.scoreIdentity}. AnnoCat uses the source-native interpretation; published calibration is not applied because the exact upstream release has not been verified.`;
-  if(predictor)return`${predictor.scoreIdentity}. This source match has no verified calibration or directional threshold, so AnnoCat displays it neutrally.`;
-  if(lower.includes('apc')&&lower.includes('protein'))return'FAVOR PHRED-ranked protein-function summary; 10 is approximately the top 10%, 20 the top 1%, and 30 the top 0.1%. Higher means stronger predicted functional effect, not a diagnosis.';
-  if(lower.includes('apc')&&lower.includes('conservation'))return'FAVOR PHRED-ranked conservation summary; 10 is approximately the top 10%, 20 the top 1%, and 30 the top 0.1%. Higher means stronger evolutionary constraint.';
-  if(lower.includes('apc')&&(lower.includes('epigen')||lower.includes('transcription_factor')||lower.includes('transcription-factor')))return'FAVOR PHRED-ranked regulatory-context summary. Higher means stronger evidence that the surrounding region is biologically active; it does not prove that this allele changes regulation.';
+  if(category)return category.note||'Prediction reported by dbNSFP.';
+  if(predictor?.calibrationStatus==='published'&&calibrationSourceVerified(predictor.sourceMatch))return`${predictor.scoreIdentity}. Published thresholds apply when they support this variant type. Otherwise, AnnoCAT uses the source threshold.`;
+  if(predictor?.nativeInterpretation&&nativeSourceVerified(predictor.sourceMatch))return`${predictor.scoreIdentity}. AnnoCAT uses the threshold from the data source. The source release is not verified for published calibration.`;
+  if(predictor)return`${predictor.scoreIdentity}. No verified threshold is available. AnnoCAT does not assign a direction.`;
+  if(lower.includes('apc')&&lower.includes('protein'))return'FAVOR provides this PHRED-ranked protein-function summary. Scores of 10, 20, and 30 approximate the top 10%, 1%, and 0.1%. Higher scores suggest stronger functional effects.';
+  if(lower.includes('apc')&&lower.includes('conservation'))return'FAVOR provides this PHRED-ranked conservation summary. Scores of 10, 20, and 30 approximate the top 10%, 1%, and 0.1%. Higher scores suggest stronger evolutionary constraint.';
+  if(lower.includes('apc')&&(lower.includes('epigen')||lower.includes('transcription_factor')||lower.includes('transcription-factor')))return'FAVOR provides this PHRED-ranked regulatory-context summary. Higher scores suggest stronger biological activity in the surrounding region. They do not prove an allele-specific effect.';
   if(lower.includes('apc')&&lower.includes('mappability'))return'FAVOR summary of sequence uniqueness. Interpret this as technical context rather than pathogenicity evidence.';
   if(lower.includes('apc')&&(lower.includes('proximity')||lower.includes('distance')))return'FAVOR proximity summary. Nearby genes are candidates, but the nearest gene is not necessarily the affected gene.';
   if(lower.includes('apc')&&(lower.includes('mutation')||lower.includes('diversity')||lower.includes('microrna')))return'FAVOR regional-context summary. Higher values indicate a stronger signal in this category, not pathogenicity by themselves.';
-  if(lower.includes('mappability')||lower.includes('umap')||lower.includes('bismap'))return'0–1 sequence-uniqueness measure; values near 1 are easier to map reliably, while low values warrant review of read and mapping quality.';
+  if(lower.includes('mappability')||lower.includes('umap')||lower.includes('bismap'))return'This sequence-uniqueness measure ranges from 0 to 1. Values near 1 are easier to map. Review low values with read and mapping quality.';
   if(lower.includes('min_dist_tss'))return'Distance in bases to the nearest transcription start site. Smaller values mean closer, but proximity alone does not establish a target gene.';
   if(lower.includes('min_dist_tse')||lower.includes('min_dist_tes'))return'Distance in bases to the nearest transcription end site. Smaller values mean closer.';
   if(lower.includes('remap')&&lower.includes('overlap_tf'))return'Number of transcription factors observed binding at this location. More overlap suggests regulatory activity, but tissue and allele-specific effects still matter.';
   if(lower.includes('remap')&&lower.includes('overlap_cl'))return'Number of transcription-factor and cell-line combinations observed at this location. A larger count indicates broader experimental overlap.';
   if(lower.includes('ccre'))return'ENCODE candidate regulatory-element annotation. It describes the surrounding region and does not prove that this allele changes its activity.';
-  if(lower.includes('chromhmm')||lower.includes('chromatin'))return'Chromatin-state evidence across assayed cells or tissues. Relevance depends on whether those biological contexts match the case.';
-  if(lower.includes('sift_score'))return'0–1; scores at or below 0.05 suggest a deleterious effect.';
-  if(lower.includes('sift_pred'))return'D = deleterious; T = tolerated.';
-  if(lower.includes('polyphen')&&lower.includes('score'))return'0–1; higher scores suggest a damaging protein effect.';
-  if(lower.includes('polyphen')&&lower.includes('pred'))return'D = probably damaging; P = possibly damaging; B = benign.';
-  if(lower.includes('alphamissense_score')||id.includes('alphamissense')&&lower.includes('score'))return'0–1; below 0.34 is typically benign and above 0.56 pathogenic.';
-  if(lower.includes('alphamissense_pred')||id.includes('alphamissense')&&lower.includes('pred'))return'B = benign; A = uncertain; P = pathogenic.';
-  if(lower.includes('revel')||id.includes('revel')&&lower.includes('score'))return'0–1; higher scores suggest pathogenicity; thresholds depend on use case.';
-  if((lower.includes('cadd')||id.includes('cadd'))&&lower.includes('phred'))return'Higher is more deleterious; 10 is approximately the top 10% and 20 the top 1%.';
-  if(lower.includes('primateai_score')||id.includes('primateai')&&lower.includes('score'))return'Original PrimateAI score from 0 to 1; higher scores suggest a damaging protein effect.';
-  if(lower.includes('primateai_pred')||id.includes('primateai')&&lower.includes('pred'))return'D/T is dbNSFP’s source-native fixed 0.803 cutoff.';
-  if(id.includes('spliceai')||lower.startsWith('ds_'))return'Individual 0–1 splice-effect component; the maximum of the four delta scores is the registered summary value.';
-  if(id.includes('phylop')||lower.includes('phylop'))return'Positive values indicate conservation; negative values indicate accelerated change.';
-  if(id.includes('gerp')||lower.includes('gerp'))return'Higher positive values indicate stronger constraint; values above 2 are often conserved.';
-  if(lower==='af'||lower.includes('allele_frequency'))return'Population frequency; lower is rarer, but rarity alone is not pathogenicity.';
+  if(lower.includes('chromhmm')||lower.includes('chromatin'))return'Chromatin-state evidence comes from assayed cells or tissues. Its relevance depends on the study context.';
+  if(lower.includes('sift_score'))return'The score ranges from 0 to 1. Scores at or below 0.05 suggest a deleterious effect.';
+  if(lower.includes('sift_pred'))return'D means deleterious. T means tolerated.';
+  if(lower.includes('polyphen')&&lower.includes('score'))return'The score ranges from 0 to 1. Higher scores suggest a damaging protein effect.';
+  if(lower.includes('polyphen')&&lower.includes('pred'))return'D means probably damaging. P means possibly damaging. B means benign.';
+  if(lower.includes('alphamissense_score')||id.includes('alphamissense')&&lower.includes('score'))return'The score ranges from 0 to 1. Scores below 0.34 are typically benign. Scores above 0.56 are typically pathogenic.';
+  if(lower.includes('alphamissense_pred')||id.includes('alphamissense')&&lower.includes('pred'))return'B means benign. A means uncertain. P means pathogenic.';
+  if(lower.includes('revel')||id.includes('revel')&&lower.includes('score'))return'The score ranges from 0 to 1. Higher scores suggest pathogenicity. Thresholds depend on the intended use.';
+  if((lower.includes('cadd')||id.includes('cadd'))&&lower.includes('phred'))return'Higher scores suggest a more deleterious effect. Scores of 10 and 20 approximate the top 10% and 1%.';
+  if(lower.includes('primateai_score')||id.includes('primateai')&&lower.includes('score'))return'The original PrimateAI score ranges from 0 to 1. Higher scores suggest a damaging protein effect.';
+  if(lower.includes('primateai_pred')||id.includes('primateai')&&lower.includes('pred'))return'dbNSFP uses 0.803 as the cutoff between D and T.';
+  if(id.includes('spliceai')||lower.startsWith('ds_'))return'This splice-effect component ranges from 0 to 1. The registered summary uses the maximum of the four delta scores.';
+  if(id.includes('phylop')||lower.includes('phylop'))return'Positive values indicate conservation. Negative values indicate accelerated change.';
+  if(id.includes('gerp')||lower.includes('gerp'))return'Higher positive values indicate stronger constraint. Values above 2 often indicate conservation.';
+  if(lower==='af'||lower.includes('allele_frequency'))return'Lower population frequencies are rarer. Rarity alone does not indicate pathogenicity.';
   if(lower.includes('significance'))return'Interpret with ClinVar review status and supporting submissions.';
-  if(lower==='tsl')return'Level 1 has the strongest transcript support; missing means no level was reported.';
-  if(lower==='appris')return'Principal marks a preferred protein isoform; alternative marks another supported isoform.';
+  if(lower==='tsl')return'Level 1 has the strongest transcript support. No value means that the source did not report a level.';
+  if(lower==='appris')return'Principal identifies a preferred protein isoform. Alternative identifies another supported isoform.';
   return'';
 }
 
@@ -117,9 +123,9 @@ function scoreBand(bands,score){
 }
 function evidenceFieldLeaf(item){return String(item?.fieldPath||'').split(/[.\[\]]/).filter(Boolean).pop()||''}
 function calibratedPredictorDefinition(item){
-  const field=evidenceFieldLeaf(item).toLowerCase();
+  const field=evidenceFieldLeaf(item).toLowerCase(),fields=fieldSourceIs(item,'phylop')&&field==='value'?new Set(['value','score']):new Set([field]);
   for(const predictor of evidenceCalibrations.predictors||[]){
-    const sourceMatch=(predictor.matches||[]).find(match=>(match.sourceIds||[]).some(sourceId=>fieldSourceIs(item,sourceId))&&(match.fieldNames||[]).some(fieldName=>String(fieldName).toLowerCase()===field));
+    const sourceMatch=(predictor.matches||[]).find(match=>(match.sourceIds||[]).some(sourceId=>fieldSourceIs(item,sourceId))&&(match.fieldNames||[]).some(fieldName=>fields.has(String(fieldName).toLowerCase())));
     if(sourceMatch)return{...predictor,sourceMatch}
   }
   return null
@@ -137,7 +143,7 @@ function categoricalPredictionPresentation(item,raw){
   if(mapped.length!==values.length)return null;
   const labels=[...new Set(mapped.map(code=>code.label))],tones=new Set(mapped.map(code=>code.tone));
   return evidenceResult(labels.join(', '),tones.size===1?mapped[0].tone:'neutral','source-native','text',{
-    summaryNote:definition.note||'Source-native categorical interpretation',
+    summaryNote:definition.note||'This source uses a native categorical interpretation.',
     categoryInterpretation:{fieldName:definition.fieldName,displayOnly:true,note:definition.note||''}
   })
 }
@@ -202,11 +208,35 @@ function alleleFrequencyTone(value){
   if(!text||text==='.'||text==='-'||/not available|not reported/.test(lower))return'missing';
   const number=Number(text.match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/i)?.[0]);
   if(!Number.isFinite(number)||number<0||number>1)return'neutral';
-  return evidenceCalibrations.displayPolicies?.alleleFrequency?.availableTone||'neutral'
+  return scoreBand(evidenceCalibrations.displayPolicies?.alleleFrequency?.bands,number)?.tone||'neutral'
 }
-function primaryAlleleFrequency(items){const frequencies=items.filter(item=>evidenceDomain(item)==='population'&&alleleFrequencyField(item.sourceId,item.fieldPath)),priority=item=>{const field=String(item.fieldPath||'').toLowerCase().replace(/[^a-z0-9]/g,'');if(field==='allaf'||field==='af'||field==='allelefrequency'||field==='gnomadaf')return 0;if(field==='globalmaf')return 1;if(field==='grpmaxaf'||field.includes('maxfrequency'))return 2;if(field==='faf95')return 3;if(field==='faf99')return 4;return 10};return frequencies.sort((left,right)=>priority(left)-priority(right))[0]||null}
+function alleleFrequencySummary(value){
+  const number=Number(String(value??'').trim());
+  const band=Number.isFinite(number)&&number>=0&&number<=1?scoreBand(evidenceCalibrations.displayPolicies?.alleleFrequency?.bands,number):null;
+  return band?`${band.label} (${calibrationThresholdLabel(band)}).`:''
+}
+function conservationApcPresentation(item,number,display){
+  const field=evidenceFieldLeaf(item).toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(!fieldSourceIs(item,'favor-online')||field!=='apcconservation')return null;
+  const band=scoreBand(evidenceCalibrations.displayPolicies?.conservation?.apcBands,number);
+  return band?evidenceResult(display,band.tone,'source-native','text',{summaryNote:`${band.label} (${calibrationThresholdLabel(band)}).`}):null
+}
+function primaryAlleleFrequency(items){
+  const frequencies=items.filter(item=>evidenceDomain(item)==='population'&&alleleFrequencyField(item.sourceId,item.fieldPath));
+  const priority=item=>{
+    const source=String(item.sourceId||'').toLowerCase(),field=String(item.fieldPath||'').toLowerCase().replace(/[^a-z0-9]/g,''),sourceRank=fieldSourceIs(item,'favor-online')?1:source.includes('gnomad')?0:2;
+    if(field==='allaf'||field==='af'||field==='allelefrequency'||field==='gnomadaf')return sourceRank;
+    if(field==='globalmaf')return 10+sourceRank;
+    if(field==='grpmaxaf'||field.includes('maxfrequency'))return 20+sourceRank;
+    if(field==='faf95')return 30+sourceRank;
+    if(field==='faf99')return 40+sourceRank;
+    return 90+sourceRank
+  };
+  return[...frequencies].sort((left,right)=>priority(left)-priority(right))[0]||null
+}
 function groupMaximumAlleleFrequency(items){const rank=item=>{const field=String(item.fieldPath||'').toLowerCase().replace(/[^a-z0-9]/g,'');if(field.includes('grpmaxaf')||field.includes('groupmaxaf')||field.includes('popmaxaf'))return 0;if(field.includes('maxfrequency')||field.includes('maxaf'))return 1;return 10};return items.filter(item=>evidenceDomain(item)==='population'&&alleleFrequencyField(item.sourceId,item.fieldPath)&&rank(item)<10).sort((left,right)=>rank(left)-rank(right))[0]||null}
-function conservationSummaryPriority(item){const source=String(item.sourceId||'').toLowerCase(),field=String(item.fieldPath||'').toLowerCase();if(source.startsWith('phylop')&&field==='score')return 0;if(source.startsWith('dbnsfp')&&field.includes('phylop'))return 1;if(field==='codingphylop100way')return 2;if(field.includes('phylop'))return 3;if(field==='apcconservation')return 4;return 10}
+function conservationSummaryPriority(item){const source=String(item.sourceId||'').toLowerCase(),field=evidenceFieldLeaf(item).toLowerCase().replace(/[^a-z0-9]/g,'');if(field.includes('rank'))return 10;if(source.includes('phylop')&&['score','value'].includes(field))return 0;if(!source.includes('favor')&&field.includes('phylop'))return 1;if(field.includes('phylop'))return 2;if(field==='apcconservation')return 3;return 10}
+function preferredConservationSummary(items){return[...items].filter(item=>conservationSummaryPriority(item)<10&&evidenceValuePresentation(item).tone!=='missing').sort((left,right)=>conservationSummaryPriority(left)-conservationSummaryPriority(right))[0]||null}
 function reportHasFrequencyFields(){return resultFieldCatalog.some(field=>evidenceDomain(field)==='population'&&alleleFrequencyField(field.sourceId,field.fieldPath))}
 function sortPopulationEvidence(items){
   const rank=item=>{
@@ -269,14 +299,14 @@ function populationEvidenceRow(item,label,isMaximum=false,showSource=false){
   const interpreted=evidencePresentation(item,item.value,{includeSource:true}),tooltip=interpreted.tooltip,sourcePrefix=showSource?`${resourceTitle(item.sourceId)} · `:'';
   return`<div class="annotation-row fui-key-value-row tone-${interpreted.tone}${isMaximum?' group-maximum-row':''}" data-field-path="${escapeHtml(String(item.fieldPath||'').toLowerCase())}" title="${escapeHtml(tooltip)}"><span class="annotation-field"><strong>${escapeHtml(`${sourcePrefix}${label}`)}</strong>${isMaximum?'<small>Highest</small>':''}</span><b>${escapeHtml(interpreted.display)}</b></div>`
 }
-function populationEvidenceSubgroup(items,preferredSourceId='',empty='None reported'){
+function populationEvidenceSubgroup(items,preferredSourceId='',empty='Not reported'){
   if(!items.length)return`<div class="key-evidence-subgroup population-evidence" data-evidence-group="population"><div class="key-evidence-subheading fui-section-heading"><strong>Population</strong></div><div class="annotation-list fui-key-value-list"><div class="key-evidence-empty">${escapeHtml(empty)}</div></div></div>`;
   const sourceKey=value=>String(value||'').toLowerCase(),preferredKey=sourceKey(preferredSourceId),primarySourceId=items.find(item=>sourceKey(item.sourceId)===preferredKey)?.sourceId||items.find(item=>sourceKey(item.sourceId).includes('gnomad'))?.sourceId||items[0].sourceId,primaryKey=sourceKey(primarySourceId),primaryItems=items.filter(item=>sourceKey(item.sourceId)===primaryKey);
   const findKind=kind=>primaryItems.find(item=>populationFieldKind(item)===kind),overall=findKind('overall'),alleleCount=findKind('alleleCount'),alleleNumber=findKind('alleleNumber'),homozygotes=findKind('homozygotes'),reported=item=>item&&evidenceValuePresentation(item).tone!=='missing';
   const ancestryRows=primaryItems.map(item=>{const ancestry=populationAncestryEntry(item);if(!ancestry)return null;const number=Number(decodeEvidenceValue(item.value));return{...ancestry,item,number:Number.isFinite(number)&&number>=0&&number<=1?number:Number.NEGATIVE_INFINITY}}).filter(Boolean).sort((left,right)=>right.number-left.number||left.label.localeCompare(right.label));
   const explicitMaximum=findKind('groupMaximum'),maximumLabelItem=findKind('groupMaximumLabel'),derivedMaximum=ancestryRows.find(row=>Number.isFinite(row.number)&&row.number!==Number.NEGATIVE_INFINITY),maximumItem=reported(explicitMaximum)?explicitMaximum:derivedMaximum?.item,maximumPresentation=maximumItem?evidenceValuePresentation(maximumItem):{display:'Not reported',tone:'missing'},maximumCode=populationGroupCode(decodeEvidenceValue(maximumLabelItem?.value))||derivedMaximum?.code||'',maximumLabel=maximumCode?populationAncestryLabels[maximumCode]:maximumLabelItem?readableTerm(displayDetailValue(maximumLabelItem.value)):'';
   const overallPresentation=overall?evidenceValuePresentation(overall):{display:'Not reported',tone:'missing'},countPresentation=populationCountPresentation(alleleCount),numberPresentation=populationCountPresentation(alleleNumber),homozygotePresentation=populationCountPresentation(homozygotes),countReported=countPresentation.tone!=='missing',numberReported=numberPresentation.tone!=='missing',countAndNumber={display:countReported&&numberReported?`${countPresentation.display} of ${numberPresentation.display}`:countReported?`${countPresentation.display}; total not reported`:numberReported?`Alternate count not reported; ${numberPresentation.display} measured`:'Not reported',tone:countReported||numberReported?'neutral':'missing'},maximumDisplay={...maximumPresentation,display:maximumLabel&&maximumPresentation.tone!=='missing'?`${maximumPresentation.display} · ${maximumLabel}`:maximumPresentation.display};
-  const sourceTitle=resourceTitle(primarySourceId),overallTooltip=overall?evidenceValueTooltip(overall,overall.value,{includeSource:true}):`No overall allele frequency was reported by ${sourceTitle}.`,maximumTooltip=maximumItem?`${evidenceValueTooltip(maximumItem,maximumItem.value,{includeSource:true})}${maximumLabel?` Highest group: ${maximumLabel}.`:''}`:`No ancestry-group maximum was reported by ${sourceTitle}.`,countTooltip=countReported||numberReported?`Alternate allele copies observed: ${countPresentation.display}. Total alleles with usable genotype calls: ${numberPresentation.display}. Source: ${sourceTitle}.`:`No allele counts were reported by ${sourceTitle}.`,homozygoteTooltip=homozygotes?evidenceValueTooltip(homozygotes,homozygotes.value,{includeSource:true}):`No alternate-homozygote count was reported by ${sourceTitle}.`;
+  const sourceTitle=resourceTitle(primarySourceId),overallTooltip=overall?evidenceValueTooltip(overall,overall.value,{includeSource:true}):`${sourceTitle} does not report an overall allele frequency for this variant.`,maximumTooltip=maximumItem?`${evidenceValueTooltip(maximumItem,maximumItem.value,{includeSource:true})}${maximumLabel?` The highest group is ${maximumLabel}.`:''}`:`${sourceTitle} does not report an ancestry-group maximum for this variant.`,countTooltip=countReported||numberReported?`Alternate alleles: ${countPresentation.display}. Total alleles: ${numberPresentation.display}. Source: ${sourceTitle}.`:`${sourceTitle} does not report allele counts for this variant.`,homozygoteTooltip=homozygotes?evidenceValueTooltip(homozygotes,homozygotes.value,{includeSource:true}):`${sourceTitle} does not report an alternate-homozygote count for this variant.`;
   const primaryAdditional=primaryItems.filter(item=>!populationFieldKind(item)&&!populationAncestryEntry(item)),secondaryItems=items.filter(item=>sourceKey(item.sourceId)!==primaryKey),additionalItems=sortPopulationEvidence([...primaryAdditional,...secondaryItems]);
   const ancestryHtml=ancestryRows.map(row=>populationEvidenceRow(row.item,row.label,row.code===maximumCode)).join(''),additionalHtml=additionalItems.map(item=>populationEvidenceRow(item,evidenceFieldPresentation(item).label,false,sourceKey(item.sourceId)!==primaryKey)).join('');
   return`<div class="key-evidence-subgroup population-evidence" data-evidence-group="population"><div class="key-evidence-subheading fui-section-heading"><strong>Population</strong></div><div class="annotation-list fui-key-value-list population-summary-list">${populationSummaryMetric('Overall allele frequency',overallPresentation,overallTooltip)}${populationSummaryMetric('Highest group AF',maximumDisplay,maximumTooltip)}${populationSummaryMetric('Alternate alleles observed',countAndNumber,countTooltip)}${populationSummaryMetric('Alternate homozygotes',homozygotePresentation,homozygoteTooltip)}</div>${ancestryRows.length?`<details class="population-breakdown collapsible-detail fui-accordion"><summary><strong>Genetic ancestry breakdown</strong></summary><div class="annotation-list fui-key-value-list">${ancestryHtml}</div></details>`:''}${additionalItems.length?`<details class="population-breakdown collapsible-detail fui-accordion"><summary><strong>Additional frequency data (${additionalItems.length})</strong></summary><div class="annotation-list fui-key-value-list">${additionalHtml}</div></details>`:''}</div>`
@@ -289,11 +319,11 @@ function evidenceVectorParts(value){
 function evidenceVectorPresentation(item,value){
   const vector=evidenceVectorParts(value);
   if(!vector)return null;
-  if(!vector.reported.length)return evidenceResult('Not reported','missing','missing','text',{summaryNote:`No value reported across ${vector.all.length} source transcript entries`});
+  if(!vector.reported.length)return evidenceResult('Not reported','missing','missing','text',{summaryNote:`The ${vector.all.length} source transcript entries do not report a value.`});
   const distinct=[...new Set(vector.reported)];
   if(distinct.length===1){
     const scalar=evidenceValuePresentation(item,distinct[0]);
-    return{...scalar,summaryNote:`Same reported value across ${vector.reported.length} source transcript entr${vector.reported.length===1?'y':'ies'}`}
+    return{...scalar,summaryNote:`The ${vector.reported.length} source transcript entr${vector.reported.length===1?'y reports':'ies report'} the same value.`}
   }
   const numbers=distinct.map(Number);
   if(numbers.every(Number.isFinite)){
@@ -302,15 +332,15 @@ function evidenceVectorPresentation(item,value){
       const labels=new Set(presentations.map(presentation=>presentation.evidenceBand?.label||''));
       if(calibrated.length===presentations.length&&labels.size===1&&!labels.has('')){
         const scalar=presentations[0];
-        return{...scalar,display,summaryNote:`${scalar.evidenceBand.label} · Range across ${vector.reported.length} reported source transcript entries`}
+        return{...scalar,display,summaryNote:`${scalar.evidenceBand.label}. The ${vector.reported.length} source transcript entries form this range.`}
       }
-      return evidenceResult(display,'neutral','neutral','text',{summaryNote:`Range across ${vector.reported.length} reported source transcript entries spans multiple or unresolved calibrated intervals`,predictorInterpretation:{note:'No single calibrated range was assigned because the source transcript scores do not resolve to one interval.'}})
+      return evidenceResult(display,'neutral','neutral','text',{summaryNote:`The values from ${vector.reported.length} source transcript entries span multiple or unresolved calibrated intervals.`,predictorInterpretation:{note:'No single calibrated range was assigned because the source transcript scores do not resolve to one interval.'}})
     }
     const tones=new Set(presentations.map(presentation=>presentation.tone));
-    return{...presentations[0],display,tone:tones.size===1?presentations[0].tone:'neutral',summaryNote:`Range across ${vector.reported.length} reported source transcript entries`}
+    return{...presentations[0],display,tone:tones.size===1?presentations[0].tone:'neutral',summaryNote:`The ${vector.reported.length} source transcript entries form this range.`}
   }
   const values=distinct.map(part=>evidenceValuePresentation(item,part).display),shown=values.slice(0,3),remaining=values.length-shown.length;
-  return evidenceResult(`${shown.join(', ')}${remaining?` +${remaining} more`:''}`,'neutral','neutral','text',{summaryNote:`Distinct values across ${vector.reported.length} reported source transcript entries`})
+  return evidenceResult(`${shown.join(', ')}${remaining?` +${remaining} more`:''}`,'neutral','neutral','text',{summaryNote:`The ${vector.reported.length} source transcript entries report distinct values.`})
 }
 function evidenceValuePresentation(item,value=item.value){
   if(favorTranscriptSummary(item))item={...item,consequenceTerms:undefined};
@@ -343,37 +373,44 @@ function evidenceValuePresentation(item,value=item.value){
     const nativeApplicability=predictor?.nativeInterpretation?predictorApplicability(predictor.nativeInterpretation,item):null,predictorApplicabilityResult=predictor?predictorApplicability(predictor,item):null,activeApplicability=nativeApplicability||predictorApplicabilityResult;
     if(predictor&&!activeApplicability?.applies&&activeApplicability?.reason!=='missing-context')return evidenceResult('Not applicable','neutral','not-applicable','text',{summaryNote:activeApplicability.note,predictorInterpretation:{predictor,applicable:false,note:activeApplicability.note}});
     if(predictor)return evidenceResult(display,'neutral','neutral','text',{summaryNote:calibrated?.note||'No verified directional interpretation is available for this source and field.',predictorInterpretation:calibrated||{predictor,applicable:false,note:'No verified directional interpretation is available for this source and field.'}});
-    if(lower.includes('apc')){const rank=phredRankLabel(number);return evidenceResult(raw,'neutral','neutral','text',{summaryNote:rank?`PHRED rank: ${rank}`:''})}
+    const conservationApc=conservationApcPresentation(item,number,display);
+    if(conservationApc)return conservationApc;
+    if(lower.includes('apc')){const rank=phredRankLabel(number);return evidenceResult(raw,'neutral','neutral','text',{summaryNote:rank?`The PHRED rank is ${rank}.`:''})}
     if(lower.includes('mappability')||lower.includes('umap')||lower.includes('bismap'))return evidenceResult(raw,number<.5?'caution':'neutral','directional');
     if(lower.includes('min_dist_tss')||lower.includes('min_dist_tse')||lower.includes('min_dist_tes'))return evidenceResult(number>=1000?`${(number/1000).toLocaleString(undefined,{maximumFractionDigits:2})} kb`:`${number.toLocaleString()} bp`);
-    if(alleleFrequencyField(source,field))return evidenceResult(display,alleleFrequencyTone(raw),'neutral');
+    if(alleleFrequencyField(source,field))return evidenceResult(display,alleleFrequencyTone(raw),'source-native','text',{summaryNote:alleleFrequencySummary(raw)});
   }
   return evidenceResult(readableTerm(raw));
 }
 
 function evidenceValueTooltip(item,value=item.value,{includeSource=false,resolution=null,interpretation=null}={}){
-  const presentation=evidenceFieldPresentation(item),interpreted=interpretation||evidenceValuePresentation(item,value),raw=displayDetailValue(value),plainRaw=fieldSourceIs(item,'favor-online')&&Number.isFinite(Number(raw))?conciseNumericNotation(raw):plainDecimalNotation(raw),categoryDefinition=categoricalPredictionDefinition(item),transcriptSummary=favorTranscriptSummary(item),parts=[];
-  if(interpreted.tier==='missing')parts.push(`${presentation.label}: Not reported.`);
-  else if(categoryDefinition)parts.push(`Prediction: ${interpreted.display}. Source-native category; not a variant classification.`);
+  const presentation=evidenceFieldPresentation(item),interpreted=interpretation||evidenceValuePresentation(item,value),raw=displayDetailValue(value),plainRaw=fieldSourceIs(item,'favor-online')&&Number.isFinite(Number(raw))?conciseNumericNotation(raw):plainDecimalNotation(raw),categoryDefinition=categoricalPredictionDefinition(item),transcriptSummary=favorTranscriptSummary(item),parts=[],add=part=>{const text=String(part||'').trim();if(text)parts.push(/[.!?]$/.test(text)?text:`${text}.`)};
+  if(interpreted.tier==='missing')add(`No value is reported for ${presentation.label}`);
+  else if(categoryDefinition)add(`Prediction: ${interpreted.display}`);
   else if(interpreted.evidenceBand){
     const threshold=calibrationThresholdLabel(interpreted.evidenceBand);
-    parts.push(`Score: ${plainRaw}. Calibrated interpretation: ${conciseEvidenceBandLabel(interpreted.evidenceBand.label)}${threshold?` (${threshold})`:''}.`)
+    add(`Score: ${plainRaw}. Calibrated interpretation: ${conciseEvidenceBandLabel(interpreted.evidenceBand.label)}${threshold?` (${threshold})`:''}`)
   }else if(interpreted.nativeInterpretation){
     const {policy,band}=interpreted.nativeInterpretation,threshold=calibrationThresholdLabel(band);
-    parts.push(`Score: ${plainRaw}. ${readableTerm(policy.kind)}: ${band.label}${threshold?` (${threshold})`:''}.`)
-  }else if(evidenceVectorParts(raw))parts.push(`Values: ${interpreted.display}.`);
-  else if(alleleFrequencyField(item.sourceId,item.fieldPath))parts.push(`Frequency: ${interpreted.display}. Frequency alone does not determine pathogenicity.`);
-  else{
-    parts.push(`${presentation.label}: ${interpreted.display}.`);
-    const guide=interpreted.summaryNote||presentation.readingGuide||presentation.baseDescription;
-    if(guide)parts.push(guide)
+    add(`Score: ${plainRaw}. Interpretation: ${band.label}${threshold?` (${threshold})`:''}`)
+  }else if(evidenceVectorParts(raw))add(`The source values are ${interpreted.display}`);
+  else if(alleleFrequencyField(item.sourceId,item.fieldPath)){
+    add(`Allele frequency: ${interpreted.display}`);
+    add(interpreted.summaryNote||'Frequency alone does not determine pathogenicity')
   }
-  if(resolution?.kind==='ambiguous')parts.push('Selected transcript unavailable in this source; showing its transcript range.');
-  else if(resolution?.kind==='invalid_vector')parts.push('Transcript alignment unavailable; showing the source range.');
-  else if(resolution?.kind==='source_selected'||favorSourceSelectedCoding(item))parts.push("FAVOR selected this coding record; its transcript was not independently matched to the report's selected transcript.");
-  if(categoryDefinition?.note)parts.push(categoryDefinition.note);
-  if(transcriptSummary)parts.push(transcriptSummary.note);
-  if(includeSource)parts.push(`Source: ${resourceTitle(item.sourceId)}.`);
+  else{
+    add(`Value: ${interpreted.display}`);
+    const guide=interpreted.summaryNote||presentation.readingGuide||presentation.baseDescription;
+    add(guide)
+  }
+  if(resolution?.kind==='ambiguous')add('No value matches the selected transcript. The range includes all reported transcripts');
+  else if(resolution?.kind==='invalid_vector')add('Transcript matching failed. The range includes all reported values');
+  else if(resolution?.kind==='source_selected'||favorSourceSelectedCoding(item))add('FAVOR selected this coding record. AnnoCAT did not match it to the selected transcript');
+  else if(item.sourceCardinality==='alignedVector')add('This value matches the selected transcript');
+  else if(item.sourceCardinality==='recordScalar')add('dbNSFP reports one value for this variant. The value does not change with the selected transcript');
+  if(categoryDefinition?.note&&!transcriptSummary)add(categoryDefinition.note);
+  if(transcriptSummary)add(transcriptSummary.note);
+  if(includeSource)add(`Source: ${resourceTitle(item.sourceId)}`);
   return parts.filter(Boolean).join(' ')
 }
 function evidencePresentation(item,value=item.value,options={}){
@@ -384,24 +421,30 @@ function evidencePresentation(item,value=item.value,options={}){
 function selectedTranscriptEvidence(items,transcriptId){
   const normalizeTranscript=value=>String(value||'').trim().split('.')[0],target=normalizeTranscript(transcriptId);
   return items.flatMap(item=>{
+    if(item.sourceCardinality==='recordScalar')return[{...item,scopeLabel:'Variant'}];
     let group=resultAlignmentGroups.find(group=>group.sourceId===item.sourceId&&group.scope===item.scope&&group.fields?.includes(item.fieldPath));
     if(!group&&String(item.sourceId).toLowerCase()==='dbnsfp'&&!dbnsfpVariantLevelField(item.fieldPath))group={keyField:'Ensembl_transcriptid',separator:';'};
     if(!group)return[{...item,scopeLabel:item.scope==='transcript'?'Transcript':'Variant'}];
     const transcriptField=items.find(candidate=>candidate.sourceId===item.sourceId&&candidate.scope===item.scope&&candidate.fieldPath===group.keyField&&typeof candidate.value==='string'),separator=group.separator||';',transcripts=transcriptField?transcriptField.value.split(separator).map(normalizeTranscript):[],matches=transcripts.map((value,index)=>value===target?index:-1).filter(index=>index>=0),index=matches.length===1?matches[0]:-1;
-    if(index<0)return[{...item,scopeLabel:'Source transcripts',unmatchedTranscript:true}];
+    if(index<0)return[{...item,scopeLabel:'All reported transcripts',unmatchedTranscript:true}];
     if(typeof item.value==='string'&&item.value.includes(';')){
       const values=item.value.split(separator);
       if(values.length===transcripts.length)return[{...item,value:values[index],scopeLabel:'Transcript'}];
-      return[{...item,scopeLabel:'Source transcripts',unmatchedTranscript:true}]
+      return[{...item,scopeLabel:'All reported transcripts',unmatchedTranscript:true}]
     }
     return[{...item,scopeLabel:'Transcript'}];
   });
+}
+function evidenceForSelectedConsequence(items,consequenceId,transcriptId,isTranscript=true){
+  const scoped=items.filter(item=>item.scope==='allele'||!consequenceId||!item.consequenceId||item.consequenceId===consequenceId);
+  return isTranscript?selectedTranscriptEvidence(scoped,transcriptId):scoped
 }
 
 const evidenceDomainTitles={key:'Key evidence',clinical:'Clinical evidence',population:'Population frequency',prediction:'Prediction scores',splicing:'Splicing',conservation:'Conservation',functional:'Functional annotation summaries',regulatory:'Regulatory and noncoding',gene:'Gene relationships',technical:'Technical reliability',regional:'Regional context',other:'Other evidence'};
 const evidenceDomainOrder=['clinical','population','prediction','splicing','conservation','functional','regulatory','gene','technical','regional','other'];
 function evidenceDomain(item){
   const source=String(item?.sourceId||'').toLowerCase(),field=String(item?.fieldPath||'').toLowerCase(),text=`${source} ${field}`;
+  if(source==='hpo')return'phenotype';
   if(alleleFrequencyField(source,field))return'population';
   if(/clinvar|clingen|clnsig|clinical|review.?status|condition|phenotype|disease/.test(text))return'clinical';
   if(/gnomad|topmed|bravo|1000.?genomes|population|allele.?frequency|(^|[._])af([._]|$)|faf|nhomalt|allele.?count|allele.?number/.test(text))return'population';
@@ -469,7 +512,7 @@ function predictionSummaryBar(items){
     {key:'reassuring',label:'benign',title:'Benign or tolerated'},
     {key:'neutral',label:'no direction',title:'No clear direction'}
   ].map(group=>({...group,items:predictions.filter(item=>item.presentation.tone===group.key)})).filter(group=>group.items.length);
-  const details=groups.flatMap(group=>group.items.map(item=>`${item.label}: ${item.presentation.display}`)).join(' · '),label=groups.map(group=>`${group.items.length} ${group.label}`).join(', '),primaryHtml=primary.map(({presentation,item,label})=>`<span class="prediction-summary-primary ${evidenceClass(presentation)}" title="${escapeHtml(evidenceValueTooltip(item,item.value,{includeSource:true,interpretation:presentation}))}">${escapeHtml(`${label} ${presentation.display}`)}</span>`).join(''),barHtml=predictions.length?`<span class="prediction-summary-bar" role="img" aria-label="${escapeHtml(`${predictions.length} direct categorical predictors: ${label}`)}" title="${escapeHtml(`${details}. Counts include only exact source-native categorical calls.`)}">${groups.map(group=>`<span class="prediction-summary-segment tone-${group.key}" style="flex-grow:${group.items.length}" title="${escapeHtml(`${group.title}: ${group.items.map(item=>item.label).join(', ')}`)}"><b>${group.items.length}</b></span>`).join('')}</span>`:'';
+  const details=groups.flatMap(group=>group.items.map(item=>`${item.label}: ${item.presentation.display}`)).join(' · '),label=groups.map(group=>`${group.items.length} ${group.label}`).join(', '),primaryHtml=primary.map(({presentation,item,label})=>`<span class="prediction-summary-primary ${evidenceClass(presentation)}" title="${escapeHtml(evidenceValueTooltip(item,item.value,{includeSource:true,interpretation:presentation}))}">${escapeHtml(`${label} ${presentation.display}`)}</span>`).join(''),barHtml=predictions.length?`<span class="prediction-summary-bar" role="img" aria-label="${escapeHtml(`${predictions.length} direct categorical predictors: ${label}`)}" title="${escapeHtml(`${details}. Counts include only categorical predictions reported by the source.`)}">${groups.map(group=>`<span class="prediction-summary-segment tone-${group.key}" style="flex-grow:${group.items.length}" title="${escapeHtml(`${group.title}: ${group.items.map(item=>item.label).join(', ')}`)}"><b>${group.items.length}</b></span>`).join('')}</span>`:'';
   return`<div class="prediction-summary"><dt>Prediction summary</dt><dd class="prediction-summary-content">${primaryHtml}${barHtml}</dd></div>`
 }
 function numericEvidenceValues(value){
@@ -493,10 +536,24 @@ function annotationRow(item,value=item.value){
   const presentation=evidenceFieldPresentation(item),resolution=(item.resolution||item.unmatchedTranscript)?{kind:item.resolution?.kind||'ambiguous'}:null,interpreted=evidencePresentation(item,value,{includeSource:true,resolution}),tooltip=interpreted.tooltip,listValues=clinicalListValues(item,value),rendered=listValues.length>1?`<ul class="annotation-value-list">${listValues.map(item=>`<li>${escapeHtml(item)}</li>`).join('')}</ul>`:`<b class="${evidenceClass(interpreted)}">${escapeHtml(interpreted.display)}</b>`;
   return`<div class="annotation-row fui-key-value-row tone-${interpreted.tone}" data-field-path="${escapeHtml(String(item.fieldPath||'').toLowerCase())}" title="${escapeHtml(tooltip)}"><span class="annotation-field"><strong>${escapeHtml(presentation.label)}</strong></span>${rendered}</div>`
 }
-function detailEvidenceSubgroup(title,items,empty='None reported',options={}){if(options.kind==='population')return populationEvidenceSubgroup(items,options.preferredSourceId,empty);return`<div class="key-evidence-subgroup" data-evidence-group="${escapeHtml(title.toLowerCase())}"><div class="key-evidence-subheading fui-section-heading"><strong>${escapeHtml(title)}</strong></div><div class="annotation-list fui-key-value-list">${items.length?items.map(item=>annotationRow(item)).join(''):`<div class="key-evidence-empty">${escapeHtml(empty)}</div>`}</div></div>`}
+function detailEvidenceSubgroup(title,items,empty='Not reported',options={}){if(options.kind==='population')return populationEvidenceSubgroup(items,options.preferredSourceId,empty);return`<div class="key-evidence-subgroup" data-evidence-group="${escapeHtml(title.toLowerCase())}"><div class="key-evidence-subheading fui-section-heading"><strong>${escapeHtml(title)}</strong></div><div class="annotation-list fui-key-value-list">${items.length?items.map(item=>annotationRow(item)).join(''):`<div class="key-evidence-empty">${escapeHtml(empty)}</div>`}</div></div>`}
 function groupedEvidenceSection(title,groups,{open=false,className='',extra='',sectionKey=''}={}){
   const expanded=sectionKey?variantDetailOpenSections.has(sectionKey):open,stateAttribute=sectionKey?` data-variant-detail-section="${escapeHtml(sectionKey)}"`:'';
   return`<section class="detail-section annotation-section evidence-domain-section fui-accordion-stack ${escapeHtml(className)}"><details class="evidence-domain collapsible-detail fui-accordion"${stateAttribute} ${expanded?'open':''}><summary><strong>${escapeHtml(title)}</strong></summary><div class="key-evidence-subgroups">${groups.map(([groupTitle,items,empty,options])=>detailEvidenceSubgroup(groupTitle,items,empty,options)).join('')}${extra}</div></details></section>`
+}
+function phenotypeEvidenceExtra(items){
+  const item=items.find(candidate=>String(candidate.fieldPath||'')==='phenotypeEvidenceDetails');
+  if(!item)return'';
+  const details=decodeEvidenceValue(item.value);
+  if(!details||typeof details!=='object')return'';
+  const matches=Array.isArray(details.bestPhenotypeMatch?.matches)?details.bestPhenotypeMatch.matches:[],links=Array.isArray(details.conditionLinks)?details.conditionLinks:[],sections=[];
+  if(matches.length){
+    sections.push(`<div class="key-evidence-subgroup"><div class="key-evidence-subheading fui-section-heading"><strong>Feature matches</strong></div><div class="annotation-list fui-key-value-list">${matches.map(match=>{const query=match.query||{},disease=match.diseaseTerm||{},relation=match.direct?'Exact feature':'Related feature',score=Number(match.similarity);return`<div class="annotation-row fui-key-value-row fui-key-value-row--stacked"><span class="annotation-field fui-key-value-cell"><strong>${escapeHtml(query.label||query.id||'Observed feature')}</strong><small>${escapeHtml(query.id||'')}</small></span><span class="annotation-value fui-key-value-cell"><b>${escapeHtml(disease.label||disease.id||'Not reported')}</b><small>${escapeHtml([disease.id,relation,Number.isFinite(score)?`Score ${score}`:''].filter(Boolean).join(' · '))}</small></span></div>`}).join('')}</div></div>`)
+  }
+  if(links.length){
+    sections.push(`<div class="key-evidence-subgroup"><div class="key-evidence-subheading fui-section-heading"><strong>Condition associations</strong></div><div class="annotation-list fui-key-value-list">${links.map(link=>{const source=String(link.associationSource||''),sourceLabel=/mim2gene/i.test(source)?'NCBI mim2gene/MedGen':source.replace(/^https?:\/\/|^ftp:\/\//i,'').split('/')[0],matched=[link.matchedCondition,link.matchedConditionId].filter(Boolean).join(' · '),provenance=[link.associationType,sourceLabel].filter(Boolean).join(' · ');return`<div class="annotation-row fui-key-value-row fui-key-value-row--stacked"><span class="annotation-field fui-key-value-cell"><strong>${escapeHtml(link.selectedCondition||link.selectedConditionId||'Selected condition')}</strong><small>${escapeHtml(link.selectedConditionId||'')}</small></span><span class="annotation-value fui-key-value-cell"><b>${escapeHtml(link.relation||'Not reported')}</b>${matched?`<small>${escapeHtml(matched)}</small>`:''}${provenance?`<small>${escapeHtml(provenance)}</small>`:''}</span></div>`}).join('')}</div></div>`)
+  }
+  return sections.join('')
 }
 function rememberVariantDetailSectionState(){
   $('#variant-detail-body')?.querySelectorAll('details[data-variant-detail-section]').forEach(section=>section.open?variantDetailOpenSections.add(section.dataset.variantDetailSection):variantDetailOpenSections.delete(section.dataset.variantDetailSection))
@@ -543,7 +600,7 @@ function transcriptDetail(item,metadata=[]){
   const proteinChange=aminoRef||aminoAlt||aminoPosition?[aminoRef&&aminoAlt?`${aminoName(aminoRef)} > ${aminoName(aminoAlt)}`:aminoName(aminoRef)||aminoName(aminoAlt),aminoPosition?`at position ${aminoPosition[1]}`:''].filter(Boolean).join(' '):'';
   const locationFacts=[exon?['Exon',exon,'Affected exon and total exon count when reported.']:null,intron?['Intron',intron,'Affected intron and total intron count when reported.']:null];
   const primaryFacts=[
-    ['Gene',consequenceValue(item,'gene_symbol','SYMBOL'),'Gene symbol associated with the selected transcript.'],
+    ['Gene',consequenceValue(item,'gene_symbol','SYMBOL','gene_id','Gene','transcript_id','Feature'),'Gene symbol associated with the selected transcript, or its stable Ensembl identifier when no symbol is assigned.'],
     ['Primary consequence',readableTerm(primaryTerm),'First Sequence Ontology consequence reported by VEP for the selected transcript.'],
     secondaryTerms.length?['Additional consequences',secondaryTerms.map(readableTerm).join(', '),'Additional Sequence Ontology terms reported for the same transcript.']:null,
     ['HGVSc',compactHgvs(hgvsc),`Full HGVS coding description: ${displayDetailValue(hgvsc)}`],
@@ -573,7 +630,7 @@ function nonTranscriptDetail(item){
   const rawType=String(consequenceValue(item,'feature_type')||'unresolved'),featureType=readableTerm(rawType),terms=consequenceValue(item,'consequence_terms','Consequence'),primaryTerm=primaryConsequence(terms),secondaryTerms=additionalConsequences(terms),impact=readableTerm(consequenceValue(item,'impact','IMPACT'));
   const effectFacts=[
     ['Feature type',featureType,'VEP consequence feature class.'],
-    ['Gene',consequenceValue(item,'gene_symbol','SYMBOL'),'Gene associated with this feature when VEP reports one.'],
+    ['Gene',consequenceValue(item,'gene_symbol','SYMBOL','gene_id','Gene'),'Gene symbol associated with this feature, or its stable Ensembl gene identifier when no symbol is assigned.'],
     ['Primary consequence',readableTerm(primaryTerm),'First Sequence Ontology consequence reported by VEP for the selected feature.'],
     secondaryTerms.length?['Additional consequences',secondaryTerms.map(readableTerm).join(', '),'Additional Sequence Ontology terms reported for the same feature.']:null,
     ['Impact',impact,'VEP impact category for the selected feature.',variantFactTone('Impact',impact)],
@@ -628,20 +685,20 @@ function variantSummaryRow(cells){return`<div class="detail-summary-row fui-desc
 
 function renderVariantDetail(row,detail){
   rememberVariantDetailSectionState();
-  const consequences=detail.consequences||[],evidence=detail.evidence||[],variant=detail.variant||{},unique=[...new Map(consequences.map((item,index)=>[consequenceContextKey(item,index),item])).values()],preferred=preferredConsequence(unique,variant.transcriptId||row.transcriptId),stored=detailConsequenceSelections.get(detail.alleleId||row.alleleId),selected=unique.find((item,index)=>consequenceContextKey(item,index)===stored)||preferred||unique[0]||{},selectedContext=unique.length?consequenceContextKey(selected,unique.indexOf(selected)):'',selectedFeatureType=String(consequenceValue(selected,'feature_type')||'transcript').toLowerCase(),isTranscript=selectedFeatureType==='transcript',transcriptId=isTranscript?String(consequenceValue(selected,'transcript_id','Feature')||''):'',gene=consequenceValue(selected,'gene_symbol','SYMBOL')||variant.geneSymbol||row.geneSymbol||row.gene||'',links=usefulVariantLinks(row,gene,selected,variant);
-  const selectedTerms=consequenceValue(selected,'consequence_terms','Consequence'),selectedConsequenceId=selected._annocatConsequenceId,scopedEvidence=evidence.filter(item=>item.scope==='allele'||!selectedConsequenceId||!item.consequenceId||item.consequenceId===selectedConsequenceId),transcriptMetadataFields=new Set(['APPRIS','GENCODE_basic','TSL','Uniprot_acc','aaref','aaalt','aapos']),alignedEvidence=isTranscript?selectedTranscriptEvidence(scopedEvidence,transcriptId):scopedEvidence,metadata=isTranscript?alignedEvidence.filter(item=>String(item.sourceId).toLowerCase()==='dbnsfp'&&transcriptMetadataFields.has(item.fieldPath)):[],combined=alignedEvidence.filter(item=>!dbnsfpTranscriptMetadata.has(item.fieldPath)).map(item=>({...item,consequenceTerms:selectedTerms})),frequency=primaryAlleleFrequency(combined),frequencySourceItems=frequency?combined.filter(item=>String(item.sourceId||'').toLowerCase()===String(frequency.sourceId||'').toLowerCase()):combined,groupMaximum=groupMaximumAlleleFrequency(frequencySourceItems),frequencyDisplay=frequency?evidenceValuePresentation(frequency).display:reportHasFrequencyFields()?'Not reported':'Not available',groupMaximumDisplay=groupMaximum?evidenceValuePresentation(groupMaximum).display:reportHasFrequencyFields()?'Not reported':'Not available',domainGroups=combined.reduce((groups,item)=>{const domain=evidenceDomain(item);(groups[domain]??=[]).push(item);return groups},{}),sampleFacts=sampleOverview(variant);
-  const conservationCandidates=deduplicateMirroredEvidence(domainGroups.conservation||[]),conservationSummaryItem=conservationCandidates.filter(item=>conservationSummaryPriority(item)<10).sort((left,right)=>conservationSummaryPriority(left)-conservationSummaryPriority(right))[0]||null,conservationSummaryPresentation=conservationSummaryItem?evidencePresentation(conservationSummaryItem,conservationSummaryItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'No phyloP or FAVOR conservation aPC score was reported for this position.'},conservationSummaryTooltip=conservationSummaryPresentation.tooltip;
-  const clinvarItem=(domainGroups.clinical||[]).find(item=>/(^|[._])(significance|clnsig)([._]|$)|clinical.?significance/i.test(String(item.fieldPath||''))),clinvarPresentation=clinvarItem?evidencePresentation(clinvarItem,clinvarItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'No ClinVar classification was reported for this variant.'},clinvarTooltip=clinvarPresentation.tooltip;
-  const revelItem=(domainGroups.prediction||[]).filter(item=>String(item.sourceId||'').toLowerCase().includes('revel')||String(item.fieldPath||'').toLowerCase().includes('revel')).sort((left,right)=>{const rank=item=>{const field=String(item.fieldPath||'').toLowerCase(),scope=item.scopeLabel==='Transcript'&&!item.unmatchedTranscript?0:favorTranscriptSummary(item)?20:10;if(field==='score'||field==='revel_score')return scope;if(field.includes('score')&&!field.includes('rank'))return scope+1;return scope+9};return rank(left)-rank(right)})[0]||null,revelPresentation=revelItem?evidencePresentation(revelItem,revelItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'No REVEL score was reported for this variant.'},revelTooltip=revelPresentation.tooltip,revelLabel=favorTranscriptSummary(revelItem)?'REVEL summary':'REVEL';
-  const readCounts=sampleFacts.referenceReads==='Not available'&&sampleFacts.alternateReads==='Not available'?'Not available':`${sampleFacts.referenceReads} / ${sampleFacts.alternateReads}`,genotypeNotCalled=sampleFacts.zygosity==='Not called',genotypePhase=genotypeNotCalled&&sampleFacts.genotype!=='Not available'?sampleFacts.genotype:genotypeNotCalled?'Not called':sampleFacts.genotype==='Not available'&&sampleFacts.phase==='Not available'?'Not available':[sampleFacts.genotype,sampleFacts.phase].filter(value=>value!=='Not available').join(' · '),genotypePhaseTooltip=genotypeNotCalled?`Raw sample GT is ${sampleFacts.genotype}; the genotype is missing, so phase does not apply.`:`Raw sample GT and phase for ${sampleFacts.sampleName||'the sample'}. Allele numbers refer to the original VCF ALT order; this row represents ALT ${variant.altIndex}.`,frequencyTooltip=frequency?evidenceValueTooltip(frequency,frequency.value,{includeSource:true}):'No overall population allele frequency was available.',groupMaximumTooltip=groupMaximum?evidenceValueTooltip(groupMaximum,groupMaximum.value,{includeSource:true}):'No population group-maximum allele frequency was available.';
+  const consequences=detail.consequences||[],evidence=detail.evidence||[],variant=detail.variant||{},unique=[...new Map(consequences.map((item,index)=>[consequenceContextKey(item,index),item])).values()],preferred=preferredConsequence(unique,variant.transcriptId||row.transcriptId),stored=detailConsequenceSelections.get(detail.alleleId||row.alleleId),selected=unique.find((item,index)=>consequenceContextKey(item,index)===stored)||preferred||unique[0]||{},selectedContext=unique.length?consequenceContextKey(selected,unique.indexOf(selected)):'',selectedFeatureType=String(consequenceValue(selected,'feature_type')||'transcript').toLowerCase(),isTranscript=selectedFeatureType==='transcript',transcriptId=isTranscript?String(consequenceValue(selected,'transcript_id','Feature')||''):'',geneSymbol=consequenceValue(selected,'gene_symbol','SYMBOL')||variant.geneSymbol||row.geneSymbol||'',gene=geneSymbol||consequenceValue(selected,'gene_id','Gene')||variant.geneId||row.geneId||transcriptId||variant.transcriptId||row.transcriptId||'',links=usefulVariantLinks(row,geneSymbol,selected,variant);
+  const selectedTerms=consequenceValue(selected,'consequence_terms','Consequence'),selectedConsequenceId=selected._annocatConsequenceId,transcriptMetadataFields=new Set(['APPRIS','GENCODE_basic','TSL','Uniprot_acc','aaref','aaalt','aapos']),alignedEvidence=evidenceForSelectedConsequence(evidence,selectedConsequenceId,transcriptId,isTranscript),metadata=isTranscript?alignedEvidence.filter(item=>String(item.sourceId).toLowerCase()==='dbnsfp'&&transcriptMetadataFields.has(item.fieldPath)):[],combined=alignedEvidence.filter(item=>!dbnsfpTranscriptMetadata.has(item.fieldPath)).map(item=>({...item,consequenceTerms:selectedTerms})),frequency=primaryAlleleFrequency(combined),frequencySourceItems=frequency?combined.filter(item=>String(item.sourceId||'').toLowerCase()===String(frequency.sourceId||'').toLowerCase()):combined,groupMaximum=groupMaximumAlleleFrequency(frequencySourceItems),frequencyDisplay=frequency?evidenceValuePresentation(frequency).display:reportHasFrequencyFields()?'Not reported':'Not available',groupMaximumDisplay=groupMaximum?evidenceValuePresentation(groupMaximum).display:reportHasFrequencyFields()?'Not reported':'Not available',domainGroups=combined.reduce((groups,item)=>{const domain=evidenceDomain(item);(groups[domain]??=[]).push(item);return groups},{}),sampleFacts=sampleOverview(variant);
+  const conservationCandidates=deduplicateMirroredEvidence(domainGroups.conservation||[]),conservationSummaryItem=preferredConservationSummary(evidence),conservationSummaryPresentation=conservationSummaryItem?evidencePresentation(conservationSummaryItem,conservationSummaryItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'The result does not contain a phyloP or FAVOR conservation aPC score for this position.'},conservationSummaryTooltip=conservationSummaryPresentation.tooltip;
+  const clinvarItem=(domainGroups.clinical||[]).find(item=>/(^|[._])(significance|clnsig)([._]|$)|clinical.?significance/i.test(String(item.fieldPath||''))),clinvarPresentation=clinvarItem?evidencePresentation(clinvarItem,clinvarItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'The result does not contain a ClinVar classification for this variant.'},clinvarTooltip=clinvarPresentation.tooltip;
+  const revelItem=(domainGroups.prediction||[]).filter(item=>String(item.sourceId||'').toLowerCase().includes('revel')||String(item.fieldPath||'').toLowerCase().includes('revel')).sort((left,right)=>{const rank=item=>{const field=String(item.fieldPath||'').toLowerCase(),scope=item.scopeLabel==='Transcript'&&!item.unmatchedTranscript?0:favorTranscriptSummary(item)?20:10;if(field==='score'||field==='revel_score')return scope;if(field.includes('score')&&!field.includes('rank'))return scope+1;return scope+9};return rank(left)-rank(right)})[0]||null,revelPresentation=revelItem?evidencePresentation(revelItem,revelItem.value,{includeSource:true}):{display:'Not reported',tone:'missing',tooltip:'The result does not contain a REVEL score for this variant.'},revelTooltip=revelPresentation.tooltip,revelLabel=favorTranscriptSummary(revelItem)?'REVEL summary':'REVEL';
+  const readCounts=sampleFacts.referenceReads==='Not available'&&sampleFacts.alternateReads==='Not available'?'Not available':`${sampleFacts.referenceReads} / ${sampleFacts.alternateReads}`,genotypeNotCalled=sampleFacts.zygosity==='Not called',genotypePhase=genotypeNotCalled&&sampleFacts.genotype!=='Not available'?sampleFacts.genotype:genotypeNotCalled?'Not called':sampleFacts.genotype==='Not available'&&sampleFacts.phase==='Not available'?'Not available':[sampleFacts.genotype,sampleFacts.phase].filter(value=>value!=='Not available').join(' · '),genotypePhaseTooltip=genotypeNotCalled?'The VCF does not contain a genotype call for this sample.':`The raw genotype and phase are from ${sampleFacts.sampleName||'the sample'}. Allele numbers use the original VCF ALT order. This row represents ALT ${variant.altIndex}.`,frequencyTooltip=frequency?evidenceValueTooltip(frequency,frequency.value,{includeSource:true}):'The result does not contain an overall population allele frequency.',groupMaximumTooltip=groupMaximum?evidenceValueTooltip(groupMaximum,groupMaximum.value,{includeSource:true}):'The result does not contain a population group-maximum allele frequency.';
   const options=unique.map((item,index)=>{const id=consequenceContextKey(item,index),featureId=consequenceValue(item,'feature_id','transcript_id','Feature','regulatory_feature_id','motif_feature_id'),featureType=readableTerm(consequenceValue(item,'feature_type')||'transcript'),label=[featureId||featureType,readableTerm(primaryConsequence(consequenceValue(item,'consequence_terms','Consequence'))),consequenceValue(item,'mane_select','MANE_SELECT','MANE')?'MANE Select':consequenceValue(item,'mane_plus_clinical','MANE_PLUS_CLINICAL')?'MANE Plus Clinical':consequenceValue(item,'canonical','CANONICAL')?'Canonical':''].filter(Boolean).join(' · ');return`<option value="${escapeHtml(id)}" ${id===selectedContext?'selected':''}>${escapeHtml(label)}</option>`}).join('');
   $('#variant-detail-title').textContent=`${row.chromosome}:${row.position} ${row.reference}>${row.alternate}`;
   const clinicalPriority=item=>{const field=String(item.fieldPath||'').toLowerCase();if(/significance|clnsig/.test(field))return 0;if(/review/.test(field))return 1;if(/condition|phenotype|disease/.test(field))return 2;if(/variant.?class/.test(field))return 3;if(/so.?accession|sequence.?ontology/.test(field))return 4;return 10},clinicalItems=[...(domainGroups.clinical||[])].sort((left,right)=>clinicalPriority(left)-clinicalPriority(right)),predictionItems=deduplicateMirroredEvidence(preferLocalPredictorEvidence(domainGroups.prediction||[])),rawSplicingItems=deduplicateMirroredEvidence(domainGroups.splicing||[]),spliceAiMaximum=spliceAiMaximumDeltaItem(rawSplicingItems),splicingItems=spliceAiMaximum?[spliceAiMaximum,...rawSplicingItems]:rawSplicingItems,conservationItems=conservationCandidates,functionalItems=deduplicateMirroredEvidence(domainGroups.functional||[]),populationItems=sortPopulationEvidence(deduplicateMirroredEvidence(domainGroups.population||[])),predictionSummary=predictionSummaryBar([...predictionItems.filter(item=>calibratedPredictorDefinition(item)?.id!=='revel'),...splicingItems]),technicalGroups=evidenceDomainOrder.filter(domain=>!['clinical','population','prediction','splicing','conservation','functional'].includes(domain)&&domainGroups[domain]?.length).map(domain=>[evidenceDomainTitles[domain],deduplicateMirroredEvidence(domainGroups[domain])]),provenance=`<div class="detail-provenance"><dl><div><dt>Assembly</dt><dd>GRCh38</dd></div><div><dt>Allele ID</dt><dd>${escapeHtml(detail.alleleId||row.alleleId)}</dd></div><div><dt>Sources</dt><dd>${escapeHtml([...new Set(evidence.map(item=>resourceTitle(item.sourceId)).filter(Boolean))].join(', ')||'Core annotation')}</dd></div><div><dt>Schema</dt><dd>${escapeHtml(displayDetailValue(detail.schemaVersion))}</dd></div></dl>${detail.evidenceTruncated?'<p class="detail-warning">Only the first 5,000 evidence fields are available.</p>':''}</div>`;
   const featureLabel=isTranscript?'selected transcript':`selected ${readableTerm(selectedFeatureType).toLowerCase()} feature`,sectionHeading=isTranscript?'Transcript & molecular effect':`${readableTerm(selectedFeatureType)} effect`,primarySelectedTerm=primaryConsequence(selectedTerms),secondarySelectedTerms=additionalConsequences(selectedTerms),consequenceDisplay=readableTerm(primarySelectedTerm)||readableTerm(row.consequence||variant.consequence),selectedImpact=readableTerm(consequenceValue(selected,'impact','IMPACT')||row.impact||variant.impact),consequenceTone=selectedImpact?variantFactTone('Impact',selectedImpact):'neutral',summaryRows=[
     variantSummaryRow([
-      variantSummaryCell('Gene',gene,'neutral',`Gene symbol for the ${featureLabel} consequence when reported.`),
+      variantSummaryCell('Gene',gene,'neutral',`Gene symbol for the ${featureLabel} consequence, or its stable Ensembl identifier when no symbol is assigned.`),
       variantSummaryCell('Consequence',consequenceDisplay,consequenceTone,`Primary Sequence Ontology consequence for the ${featureLabel}.${secondarySelectedTerms.length?` Additional terms for this same feature: ${secondarySelectedTerms.map(readableTerm).join(', ')}.`:''}${selectedImpact?` VEP impact: ${selectedImpact}.`:''}`),
-      variantSummaryCell('Zygosity',sampleFacts.zygosity,null,`Relationship of ${sampleFacts.sampleName||'the sample'} to this row's selected ALT allele, derived from GT and alt_index ${variant.altIndex}.`),
+      variantSummaryCell('Zygosity',sampleFacts.zygosity,null,`This value describes how ${sampleFacts.sampleName||'the sample'} relates to the selected alternate allele. It uses GT and the original VCF ALT order.`),
       variantSummaryCell('ClinVar',clinvarPresentation.display,clinvarPresentation.tone,clinvarTooltip,clinvarPresentation.presentation)
     ]),
     variantSummaryRow([
@@ -655,18 +712,19 @@ function renderVariantDetail(row,detail){
       variantSummaryPartsCell('Depth / GQ',[
         {value:sampleFacts.depth,tone:variantFactTone('Depth',sampleFacts.depth)},
         {value:sampleFacts.quality,tone:variantFactTone('GQ',sampleFacts.quality),separator:'/'}
-      ],'Total read depth from FORMAT/DP followed by genotype quality from FORMAT/GQ. No assay- and caller-specific quality profile is attached, so available values are shown as context.'),
+      ],'FORMAT/DP gives the total read depth. FORMAT/GQ gives the genotype quality. AnnoCAT shows these values as context without an assay-specific quality profile.'),
       variantSummaryPartsCell('Allelic support',[
         {value:readCounts,tone:variantFactTone('Allelic support',sampleFacts.referenceReads)},
         {value:sampleFacts.alleleBalance,tone:variantFactTone('Allele balance',sampleFacts.alleleBalance),separator:'·'}
-      ],'Reference / selected-ALT read depths from FORMAT/AD followed by the selected ALT fraction of all allele depths. No assay-specific quality profile is attached, so available values are shown as context.'),
+      ],'FORMAT/AD gives the reference and selected-alternate read depths. The percentage is the selected alternate fraction of all allele depths. AnnoCAT shows these values as context.'),
       variantSummaryPartsCell('VCF call',[
         {value:displayDetailValue(variant.filter),tone:variantFactTone('VCF FILTER',variant.filter)},
         {value:`QUAL ${displayDetailValue(variant.quality)}`,tone:variantFactTone('QUAL',variant.quality),separator:'·'}
-      ],'VCF FILTER status followed by site-level QUAL. PASS reflects the record filter; QUAL remains contextual without a caller-specific quality profile.')
+      ],'VCF FILTER gives the record filter status. QUAL gives the site-level quality. AnnoCAT shows QUAL as context without a caller-specific quality profile.')
     ])
   ].join('');
-  $('#variant-detail-body').innerHTML=`<section class="detail-overview"><div class="detail-links">${links.map(([label,url,title])=>`<a class="fui-button fui-button--small" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)} ↗</a>`).join('')}</div><dl class="detail-summary fui-description-grid">${summaryRows}</dl></section>${groupedEvidenceSection('Clinical & population evidence',[['Clinical',clinicalItems],['Population',populationItems,'None reported',{kind:'population',preferredSourceId:frequency?.sourceId}]],{className:'clinical-population-section',sectionKey:'clinical-population'})}<section class="detail-section transcript-context fui-accordion-stack"><details class="transcript-details collapsible-detail fui-accordion" data-variant-detail-section="transcript-molecular" ${variantDetailOpenSections.has('transcript-molecular')?'open':''}><summary><strong>${escapeHtml(sectionHeading)}</strong></summary><div class="transcript-context-body">${unique.length?`<select id="detail-consequence-select" class="fui-select" aria-label="Consequence context" title="The selected feature controls the effect and identifier fields below.">${options}</select><div class="selected-transcript-card">${isTranscript?transcriptDetail(selected,metadata):nonTranscriptDetail(selected)}</div>`:'<p class="detail-empty">No molecular consequence was recorded.</p>'}${detail.consequencesTruncated?'<p class="detail-warning">Only the first 1,000 consequences are available.</p>':''}</div></details></section>${groupedEvidenceSection('Predictions & conservation',[['Prediction scores',predictionItems],['Splicing',splicingItems],['Conservation',conservationItems],['Functional annotation summaries',functionalItems]],{className:'prediction-evidence-section',sectionKey:'predictions-conservation'})}${groupedEvidenceSection('Technical details & provenance',technicalGroups,{className:'technical-provenance-section',extra:provenance,sectionKey:'technical-provenance'})}`;
+  $('#variant-detail-body').innerHTML=`<section class="detail-overview"><div class="detail-links">${links.map(([label,url,title])=>`<a class="fui-button fui-button--small" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)} ↗</a>`).join('')}</div><dl class="detail-summary fui-description-grid">${summaryRows}</dl></section>${groupedEvidenceSection('Clinical & population evidence',[['Clinical',clinicalItems],['Population',populationItems,'Not reported',{kind:'population',preferredSourceId:frequency?.sourceId}]],{className:'clinical-population-section',sectionKey:'clinical-population'})}<section class="detail-section transcript-context fui-accordion-stack"><details class="transcript-details collapsible-detail fui-accordion" data-variant-detail-section="transcript-molecular" ${variantDetailOpenSections.has('transcript-molecular')?'open':''}><summary><strong>${escapeHtml(sectionHeading)}</strong></summary><div class="transcript-context-body">${unique.length?`<select id="detail-consequence-select" class="fui-select" aria-label="Consequence context" title="Shows transcripts and features annotated for this allele. Transcripts present only in a supplementary source are not added.">${options}</select><div class="selected-transcript-card">${isTranscript?transcriptDetail(selected,metadata):nonTranscriptDetail(selected)}</div>`:'<p class="detail-empty">No molecular consequence was recorded.</p>'}${detail.consequencesTruncated?'<p class="detail-warning">Only the first 1,000 consequences are available.</p>':''}</div></details></section>${groupedEvidenceSection('Predictions & conservation',[['Prediction scores',predictionItems],['Splicing',splicingItems],['Conservation',conservationItems],['Functional annotation summaries',functionalItems]],{className:'prediction-evidence-section',sectionKey:'predictions-conservation'})}${groupedEvidenceSection('Technical details & provenance',technicalGroups,{className:'technical-provenance-section',extra:provenance,sectionKey:'technical-provenance'})}`;
+  if(domainGroups.phenotype?.length){const profileItems=domainGroups.phenotype.filter(item=>String(item.fieldPath||'')!=='phenotypeEvidenceDetails'),extra=phenotypeEvidenceExtra(domainGroups.phenotype),groups=profileItems.length?[['Profile evidence',profileItems]]:[];$('#variant-detail-body .transcript-context')?.insertAdjacentHTML('beforebegin',groupedEvidenceSection('Phenotype & condition evidence',groups,{className:'phenotype-evidence-section',sectionKey:'phenotype-condition',extra}))}
   $('#detail-consequence-select')?.addEventListener('change',event=>{detailConsequenceSelections.set(detail.alleleId||row.alleleId,event.target.value);renderVariantDetail(row,detail)});
   bindVariantDetailSectionState();
   revealVariantDetail();
@@ -704,9 +762,9 @@ function observeResultGridViewport(tableWrap){
 function enhanceResultGrid(){
   const table=document.querySelector('.table-wrap table');if(!table)return;
   const shown=displayColumns(),keys=['selection','candidate',...shown.map(([key])=>key)],tableWrap=table.parentElement,setTableWidth=()=>{const width=`${keys.reduce((total,key)=>total+gridWidth(key),0)}px`;table.style.width=width;tableWrap.style.setProperty('--result-table-width',width)};observeResultGridViewport(tableWrap);let colgroup=table.querySelector('colgroup');if(!colgroup){colgroup=document.createElement('colgroup');table.insertBefore(colgroup,table.firstChild)}colgroup.innerHTML=keys.map(key=>`<col data-grid-column="${escapeHtml(key)}" style="width:${gridWidth(key)}px">`).join('');setTableWidth();
-  [...$('#head').children].forEach((header,index)=>{const key=keys[index];header.dataset.gridColumn=key;if(index<2)return;header.draggable=true;header.classList.add('draggable-column');header.addEventListener('dragstart',event=>{if(event.target.closest('.column-resizer')){event.preventDefault();return}header.dataset.columnDragged='true';event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',key);header.classList.add('column-dragging')});header.addEventListener('dragover',event=>{event.preventDefault();event.dataTransfer.dropEffect='move';header.classList.add('column-drag-target')});header.addEventListener('dragleave',()=>header.classList.remove('column-drag-target'));header.addEventListener('drop',event=>{event.preventDefault();header.classList.remove('column-drag-target');moveResultColumn(event.dataTransfer.getData('text/plain'),key)});header.addEventListener('dragend',()=>{header.classList.remove('column-dragging');document.querySelectorAll('.column-drag-target').forEach(item=>item.classList.remove('column-drag-target'));setTimeout(()=>delete header.dataset.columnDragged,0)});header.addEventListener('click',event=>{if(header.dataset.columnDragged==='true'){event.preventDefault();event.stopImmediatePropagation()}},true);if(!header.querySelector('.column-resizer')){const custom=resultGridWidths.has(gridWidthStorageKey(key)),title=custom?'Drag to resize; double-click to restore the default width':'Drag to resize; double-click to fit loaded values';header.insertAdjacentHTML('beforeend',`<span class="column-resizer" data-resize-column="${escapeHtml(key)}" title="${title}"></span>`)}});
-  $('#head').querySelectorAll('[data-resize-column]').forEach(handle=>{handle.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();const key=handle.dataset.resizeColumn,storageKey=gridWidthStorageKey(key),startX=event.clientX,startWidth=gridWidth(key),col=colgroup.querySelector(`[data-grid-column="${CSS.escape(key)}"]`),move=moveEvent=>{const width=Math.max(minimumGridWidth(key),Math.min(520,startWidth+moveEvent.clientX-startX));resultGridWidths.set(storageKey,String(width));col.style.width=`${width}px`;setTableWidth()},up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);handle.title='Drag to resize; double-click to restore the default width';localStorage.setItem('annocat.resultColumnWidths',JSON.stringify(Object.fromEntries(resultGridWidths)))};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)});handle.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();const key=handle.dataset.resizeColumn,storageKey=gridWidthStorageKey(key),col=colgroup.querySelector(`[data-grid-column="${CSS.escape(key)}"]`);if(resultGridWidths.has(storageKey))resultGridWidths.delete(storageKey);else resultGridWidths.set(storageKey,String(fittedGridWidth(key,handle.parentElement,table)));col.style.width=`${gridWidth(key)}px`;setTableWidth();handle.title=resultGridWidths.has(storageKey)?'Drag to resize; double-click to restore the default width':'Drag to resize; double-click to fit loaded values';localStorage.setItem('annocat.resultColumnWidths',JSON.stringify(Object.fromEntries(resultGridWidths)))})});
-  $('#rows').querySelectorAll('tr[data-allele-id]').forEach(element=>{const row=variants.find(item=>item.alleleId===element.dataset.alleleId);if(!row)return;shown.forEach(([key],index)=>{const cell=element.children[index+2],value=resultColumnRawValue(row,key);if(!cell)return;cell.classList.add('result-cell',`result-cell-${String(key).replace(/[^a-z0-9_-]/gi,'-')}`);if(key.startsWith('evidence:')){const evidenceIndex=Number(key.slice(9)),presentation=tableValuePresentation(key,value,row.evidenceResolution?.[evidenceIndex],row);cell.innerHTML=`<span class="table-value ${evidenceClass(presentation)}" title="${escapeHtml(presentation.description)}">${escapeHtml(presentation.display)}</span>`}else if(key==='consequence'||key==='biotype')cell.textContent=readableTerm(value)})});
+  [...$('#head').children].forEach((header,index)=>{const key=keys[index];header.dataset.gridColumn=key;if(index<2)return;header.draggable=true;header.classList.add('draggable-column');header.addEventListener('dragstart',event=>{if(event.target.closest('.column-resizer')){event.preventDefault();return}header.dataset.columnDragged='true';event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',key);header.classList.add('column-dragging')});header.addEventListener('dragover',event=>{event.preventDefault();event.dataTransfer.dropEffect='move';header.classList.add('column-drag-target')});header.addEventListener('dragleave',()=>header.classList.remove('column-drag-target'));header.addEventListener('drop',event=>{event.preventDefault();header.classList.remove('column-drag-target');moveResultColumn(event.dataTransfer.getData('text/plain'),key)});header.addEventListener('dragend',()=>{header.classList.remove('column-dragging');document.querySelectorAll('.column-drag-target').forEach(item=>item.classList.remove('column-drag-target'));setTimeout(()=>delete header.dataset.columnDragged,0)});header.addEventListener('click',event=>{if(header.dataset.columnDragged==='true'){event.preventDefault();event.stopImmediatePropagation()}},true);if(!header.querySelector('.column-resizer')){const custom=resultGridWidths.has(gridWidthStorageKey(key)),title=custom?'Drag to resize. Double-click to restore the default width.':'Drag to resize. Double-click to fit loaded values.';header.insertAdjacentHTML('beforeend',`<span class="column-resizer" data-resize-column="${escapeHtml(key)}" title="${title}"></span>`)}});
+  $('#head').querySelectorAll('[data-resize-column]').forEach(handle=>{handle.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();const key=handle.dataset.resizeColumn,storageKey=gridWidthStorageKey(key),startX=event.clientX,startWidth=gridWidth(key),col=colgroup.querySelector(`[data-grid-column="${CSS.escape(key)}"]`),move=moveEvent=>{const width=Math.max(minimumGridWidth(key),Math.min(520,startWidth+moveEvent.clientX-startX));resultGridWidths.set(storageKey,String(width));col.style.width=`${width}px`;setTableWidth()},up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);handle.title='Drag to resize. Double-click to restore the default width.';localStorage.setItem('annocat.resultColumnWidths',JSON.stringify(Object.fromEntries(resultGridWidths)))};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)});handle.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();const key=handle.dataset.resizeColumn,storageKey=gridWidthStorageKey(key),col=colgroup.querySelector(`[data-grid-column="${CSS.escape(key)}"]`);if(resultGridWidths.has(storageKey))resultGridWidths.delete(storageKey);else resultGridWidths.set(storageKey,String(fittedGridWidth(key,handle.parentElement,table)));col.style.width=`${gridWidth(key)}px`;setTableWidth();handle.title=resultGridWidths.has(storageKey)?'Drag to resize. Double-click to restore the default width.':'Drag to resize. Double-click to fit loaded values.';localStorage.setItem('annocat.resultColumnWidths',JSON.stringify(Object.fromEntries(resultGridWidths)))})});
+  $('#rows').querySelectorAll('tr[data-allele-id]').forEach(element=>{const row=variants.find(item=>item.alleleId===element.dataset.alleleId);if(!row)return;shown.forEach(([key],index)=>{const cell=element.children[index+2],value=resultColumnRawValue(row,key);if(!cell)return;cell.classList.add('result-cell',`result-cell-${String(key).replace(/[^a-z0-9_-]/gi,'-')}`);if(key.startsWith('evidence:')){const evidenceIndex=Number(key.slice(9)),presentation=tableValuePresentation(key,value,row.evidenceResolution?.[evidenceIndex],row);applyGenericEvidenceCellPresentation(cell,`<span class="table-value ${evidenceClass(presentation)}" title="${escapeHtml(presentation.description)}">${escapeHtml(presentation.display)}</span>`)}else if(key==='consequence'||key==='biotype')cell.textContent=readableTerm(value)})});
 }
 
 function renderTable(event){renderTableBase(event);enhanceResultGrid()}
@@ -717,7 +775,10 @@ function renderTable(event){renderTableBase(event);enhanceResultGrid()}
     evidenceValuePresentation(...args){syncState();return evidenceValuePresentation(...args)},
     evidencePresentation(...args){syncState();return evidencePresentation(...args)},
     predictionSummaryBar(...args){syncState();return predictionSummaryBar(...args)},
+    primaryAlleleFrequency(...args){syncState();return primaryAlleleFrequency(...args)},
+    preferredConservationSummary(...args){syncState();return preferredConservationSummary(...args)},
     preferredConsequence(...args){syncState();return preferredConsequence(...args)},
+    evidenceForSelectedConsequence(...args){syncState();return evidenceForSelectedConsequence(...args)},
     renderVariantDetail(...args){syncState();return renderVariantDetail(...args)},
     renderTable(...args){syncState();return renderTable(...args)}
   }

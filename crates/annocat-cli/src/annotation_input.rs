@@ -36,6 +36,7 @@ pub struct Progress {
 #[derive(Debug, Clone)]
 pub struct ProjectedStream {
     pub summary: annocat_core::vcf::VcfSummary,
+    pub content_sha256: String,
     pub skipped_identity_sha256: String,
     pub written_records: u64,
 }
@@ -58,8 +59,8 @@ pub fn stream_variants(
     output: impl Write,
     cancelled: impl Fn() -> bool,
     report: impl FnMut(Progress),
-) -> Result<annocat_core::vcf::VcfSummary, String> {
-    Ok(stream_variants_after(path, output, 0, cancelled, report)?.summary)
+) -> Result<ProjectedStream, String> {
+    stream_variants_after(path, output, 0, cancelled, report)
 }
 
 pub fn stream_variants_after(
@@ -92,6 +93,7 @@ pub fn stream_variants_after(
         ..Default::default()
     };
     let mut identity = Sha256::new();
+    let mut content = Sha256::new();
     let mut skipped_identity = Sha256::new();
     let mut line = Vec::new();
     let mut saw_columns = false;
@@ -113,6 +115,7 @@ pub fn stream_variants_after(
         if read == 0 {
             break;
         }
+        content.update(&line);
         if line.first() == Some(&b'#') {
             if line.starts_with(b"#CHROM\t") {
                 saw_columns = true;
@@ -250,6 +253,7 @@ pub fn stream_variants_after(
     let written_records = summary.records - skip_records;
     Ok(ProjectedStream {
         summary,
+        content_sha256: format!("{:x}", content.finalize()),
         skipped_identity_sha256: format!("{:x}", skipped_identity.finalize()),
         written_records,
     })
@@ -299,6 +303,7 @@ mod tests {
 
     #[test]
     fn streams_only_records_with_real_alternate_alleles_from_gzip() {
+        const VCF: &[u8] = b"##fileformat=VCFv4.2\n##reference=GRCh38\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n1\t14\t.\tA\t*\t.\tPASS\t.\n";
         let root = std::env::temp_dir().join(format!(
             "annocat-annotation-input-{}-{}",
             std::process::id(),
@@ -310,14 +315,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let input = root.join("input.vcf.gz");
         let mut encoder = GzEncoder::new(File::create(&input).unwrap(), Compression::fast());
-        encoder
-            .write_all(
-                b"##fileformat=VCFv4.2\n##reference=GRCh38\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t10\t.\tA\t.\t.\tPASS\t.\n1\t11\t.\tC\t<NON_REF>\t.\tPASS\t.\n1\t12\t.\tG\tT\t.\tPASS\t.\n1\t13\t.\tA\tC,<NON_REF>\t.\tPASS\t.\n1\t14\t.\tA\t*\t.\tPASS\t.\n",
-            )
-            .unwrap();
+        encoder.write_all(VCF).unwrap();
         encoder.finish().unwrap();
         let mut output = Vec::new();
-        let summary = stream_variants(&input, &mut output, || false, |_| {}).unwrap();
+        let projected = stream_variants(&input, &mut output, || false, |_| {}).unwrap();
+        let compressed_content_sha256 = projected.content_sha256.clone();
+        let summary = projected.summary;
         let output = String::from_utf8(output).unwrap();
         assert_eq!(summary.source_records, 5);
         assert_eq!(summary.skipped_non_variant_records, 3);
@@ -328,6 +331,22 @@ mod tests {
         assert!(!output.contains("\t11\t"));
         assert!(output.contains("\t12\t"));
         assert!(output.contains("\t13\t"));
+
+        let plain = root.join("input.vcf");
+        std::fs::write(&plain, VCF).unwrap();
+        let plain_projected = stream_variants(&plain, Vec::new(), || false, |_| {}).unwrap();
+        assert_eq!(
+            compressed_content_sha256, plain_projected.content_sha256,
+            "content identity must use decompressed VCF bytes"
+        );
+
+        let changed = root.join("changed.vcf");
+        let changed_vcf = std::str::from_utf8(VCF)
+            .unwrap()
+            .replace("#CHROM", "##extra=changed\n#CHROM");
+        std::fs::write(&changed, changed_vcf).unwrap();
+        let changed_projected = stream_variants(&changed, Vec::new(), || false, |_| {}).unwrap();
+        assert_ne!(compressed_content_sha256, changed_projected.content_sha256);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

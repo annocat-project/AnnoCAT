@@ -95,7 +95,7 @@
       },
       "matches": [
         {"sourceIds": ["dbnsfp"], "fieldNames": ["BayesDel_noAF_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
-        {"sourceIds": ["favor-online"], "fieldNames": ["codingBayesDelNoAfScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: BayesDel v1 no-AF score", "reason": "The score identity and source-native cutoff are documented, but the rolling FAVOR response does not immutably report its data release."}
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingBayesDelNoAfScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: BayesDel v1 no-AF score", "reason": "The score and source cutoff are documented. FAVOR does not report a fixed data release."}
       ]
     },
     {
@@ -133,7 +133,7 @@
       "matches": [
         {"sourceIds": ["primateai"], "fieldNames": ["score"], "verificationStatus": "unverified", "reason": "The dedicated PrimateAI source is not yet backed by a pinned release contract."},
         {"sourceIds": ["dbnsfp"], "fieldNames": ["PrimateAI_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
-        {"sourceIds": ["favor-online"], "fieldNames": ["codingPrimateAiScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PrimateAI (numbered release unspecified)", "reason": "The score identity and source-native thresholds are documented, but the README does not name a numbered release and the FAVOR response does not immutably report its data release."}
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingPrimateAiScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PrimateAI (numbered release unspecified)", "reason": "The score and source thresholds are documented. The README and FAVOR do not report a fixed release."}
       ]
     },
     {
@@ -156,7 +156,7 @@
       },
       "matches": [
         {"sourceIds": ["dbnsfp"], "fieldNames": ["Polyphen2_HVAR_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
-        {"sourceIds": ["favor-online"], "fieldNames": ["codingPolyphen2HvarScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PolyPhen-2 v2.2.2 HumVar", "reason": "The score identity, model, and source-native categories are documented, but the rolling FAVOR response does not immutably report its data release."}
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingPolyphen2HvarScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: PolyPhen-2 v2.2.2 HumVar", "reason": "The score, model, and source categories are documented. FAVOR does not report a fixed data release."}
       ]
     },
     {
@@ -178,7 +178,7 @@
       },
       "matches": [
         {"sourceIds": ["dbnsfp"], "fieldNames": ["SIFT_score"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
-        {"sourceIds": ["favor-online"], "fieldNames": ["codingSiftScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: SIFT Ensembl 66 (January 2015)", "reason": "The score identity and source-native cutoff are documented, but the rolling FAVOR response does not immutably report its data release."}
+        {"sourceIds": ["favor-online"], "fieldNames": ["codingSiftScore"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: SIFT Ensembl 66 (January 2015)", "reason": "The score and source cutoff are documented. FAVOR does not report a fixed data release."}
       ]
     },
     {
@@ -245,15 +245,17 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "phyloP 100-way vertebrate score for the variant position; rank scores are excluded",
       "nativeInterpretation": {
-        "kind": "directional context",
+        "kind": "General phyloP ranges",
         "variantClasses": ["any"],
         "bands": [
-          {"maximumExclusive": 0.0, "label": "Accelerated-change direction", "tone": "caution"},
-          {"minimumInclusive": 0.0, "label": "Nonnegative conservation direction", "tone": "neutral"}
+          {"maximumInclusive": 0.0, "label": "Not conserved", "tone": "reassuring"},
+          {"minimumExclusive": 0.0, "maximumInclusive": 1.0, "label": "Marginally conserved", "tone": "reassuring"},
+          {"minimumExclusive": 1.0, "maximumInclusive": 1.5, "label": "Moderately conserved", "tone": "caution"},
+          {"minimumExclusive": 1.5, "label": "Highly conserved", "tone": "adverse"}
         ]
       },
       "matches": [
-        {"sourceIds": ["phylop"], "fieldNames": ["score"], "verificationStatus": "approved", "sourceVersion": "UCSC hg38 phyloP 100-way"},
+        {"sourceIds": ["phylop"], "fieldNames": ["score", "value"], "verificationStatus": "approved", "sourceVersion": "UCSC hg38 phyloP 100-way"},
         {"sourceIds": ["dbnsfp"], "fieldNames": ["phyloP100way_vertebrate"], "verificationStatus": "approved", "sourceVersion": "dbNSFP 4.9a"},
         {"sourceIds": ["favor-online"], "fieldNames": ["codingPhyloP100way"], "verificationStatus": "unverified", "nativeVerificationStatus": "approved", "sourceVersion": "dbNSFP 5.3.1a contract: UCSC hg38 phyloP 100-way vertebrate", "reason": "The score identity is available for directional display, but the rolling FAVOR response does not immutably report its data release."}
       ]
@@ -308,7 +310,7 @@
       "variantClasses": ["missense_variant"],
       "scoreIdentity": "Original ESM1b log-likelihood-ratio score; lower values predict greater functional impact",
       "matches": [
-        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"], "verificationStatus": "unverified", "reason": "dbNSFP 4.9a documents the original ESM1b LLR, but AnnoCat has not verified source precision and transcript mapping against the 2025 calibration input."},
+        {"sourceIds": ["dbnsfp"], "fieldNames": ["ESM1b_score"], "verificationStatus": "unverified", "reason": "dbNSFP 4.9a documents the original ESM1b LLR, but AnnoCAT has not verified source precision and transcript mapping against the 2025 calibration input."},
         {"sourceIds": ["favor-online"], "fieldNames": ["codingEsm1bScore"], "verificationStatus": "unverified", "sourceVersion": "dbNSFP 5.3.1a contract: ESM1b LLR (release unspecified)", "reason": "The exact ESM1b score direction is documented, but its release, precision contract, and transcript mapping against the calibration input remain unverified."}
       ]
     },
@@ -378,7 +380,6 @@
       "fieldName": "codingAlphaMissensePred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
       "codes": [
         {"value": "B", "label": "Likely benign", "tone": "reassuring"},
         {"value": "A", "label": "Uncertain", "tone": "caution"},
@@ -390,7 +391,6 @@
       "fieldName": "codingSiftPred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
       "codes": [
         {"value": "D", "label": "Deleterious", "tone": "adverse"},
         {"value": "T", "label": "Tolerated", "tone": "reassuring"}
@@ -401,7 +401,6 @@
       "fieldName": "codingPolyphen2HvarPred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
       "codes": [
         {"value": "D", "label": "Probably damaging", "tone": "adverse"},
         {"value": "P", "label": "Possibly damaging", "tone": "caution"},
@@ -413,7 +412,6 @@
       "fieldName": "codingMetaSvmPred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
       "codes": [
         {"value": "D", "label": "Damaging", "tone": "adverse"},
         {"value": "T", "label": "Tolerated", "tone": "reassuring"}
@@ -424,7 +422,6 @@
       "fieldName": "codingPrimateAiPred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "Source-native category for FAVOR's selected coding annotation record; not a variant classification.",
       "codes": [
         {"value": "D", "label": "Damaging", "tone": "adverse"},
         {"value": "T", "label": "Tolerated", "tone": "reassuring"}
@@ -435,7 +432,7 @@
       "fieldName": "codingEsm1bPred",
       "displayOnly": true,
       "referenceUrl": "https://favor-beta.genohub.org/docs/data",
-      "note": "dbNSFP derives this source-native category at -7.5; the ESM1b authors did not recommend a binary threshold.",
+      "note": "dbNSFP uses -7.5 for this category. The ESM1b authors do not recommend a binary threshold.",
       "codes": [
         {"value": "D", "label": "Deleterious", "tone": "adverse"},
         {"value": "T", "label": "Tolerated", "tone": "reassuring"}
@@ -651,7 +648,7 @@
       "fieldName": "Aloft_pred",
       "displayOnly": true,
       "referenceUrl": "https://grr.iossifovlab.com/hg38/scores/dbNSFP4.9a/index.html",
-      "note": "ALoFT predicts loss-of-function tolerance or inheritance context; Dominant and Recessive are not variant classifications.",
+      "note": "ALoFT predicts loss-of-function tolerance and inheritance.",
       "codes": [
         {"value": "Tolerant", "label": "Tolerant", "tone": "reassuring"},
         {"value": "Recessive", "label": "Recessive loss-of-function context", "tone": "neutral"},
@@ -925,20 +922,25 @@
   ],
   "displayPolicies": {
     "alleleFrequency": {
-      "interpretation": "Population frequency is context, not an independent pathogenic or benign classification.",
-      "availableTone": "neutral",
-      "rareTone": "neutral",
-      "commonTone": "neutral"
+      "interpretation": "Population frequency shows how common the variant is. It does not show the effect of the variant.",
+      "bands": [
+        {"maximumInclusive": 0.01, "label": "Rare population frequency", "tone": "adverse"},
+        {"minimumExclusive": 0.01, "maximumInclusive": 0.05, "label": "Uncommon population frequency", "tone": "caution"},
+        {"minimumExclusive": 0.05, "label": "Common population frequency", "tone": "reassuring"}
+      ]
     },
     "cadd": {
-      "interpretation": "CADD is rank-scaled. Its published clinical calibration applies only to missense variants and is not the primary AnnoCat missense interpretation.",
+      "interpretation": "CADD is rank-scaled. Its published clinical calibration applies only to missense variants and is not the primary AnnoCAT missense interpretation.",
       "tone": "neutral"
     },
     "conservation": {
-      "interpretation": "Conservation is contextual. Published missense calibration is shown when applicable but is not stacked with REVEL.",
-      "conservedTone": "neutral",
-      "acceleratedTone": "caution",
-      "neutralTone": "neutral"
+      "interpretation": "Conservation gives supporting context. AnnoCAT uses general phyloP ranges when no calibration applies. FAVOR conservation aPC uses documented PHRED ranks. AnnoCAT does not combine missense calibration with REVEL.",
+      "apcBands": [
+        {"maximumExclusive": 10.0, "label": "Below the top 10% conservation rank", "tone": "reassuring"},
+        {"minimumInclusive": 10.0, "maximumExclusive": 20.0, "label": "Top 10% conservation rank", "tone": "caution"},
+        {"minimumInclusive": 20.0, "maximumExclusive": 30.0, "label": "Top 1% conservation rank", "tone": "adverse"},
+        {"minimumInclusive": 30.0, "label": "Top 0.1% conservation rank", "tone": "adverse"}
+      ]
     },
     "quality": {
       "interpretation": "Without a versioned assay- and caller-specific profile, quality values are context rather than inferred pass or failure states.",

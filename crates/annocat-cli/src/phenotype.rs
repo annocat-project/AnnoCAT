@@ -1,4 +1,4 @@
-use duckdb::arrow::array::{ArrayRef, BooleanArray, Int32Array, StringArray};
+use duckdb::arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
 use duckdb::arrow::datatypes::{DataType, Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{Connection, params};
@@ -7,6 +7,8 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -15,17 +17,19 @@ use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::SystemTime;
+use std::time::{Duration, UNIX_EPOCH};
 
-const PROFILE_SCHEMA_VERSION: u16 = 3;
+const PROFILE_SCHEMA_VERSION: u16 = 4;
 const INSTALL_SCHEMA_VERSION: u16 = 1;
-const REPORT_OVERLAP_CACHE_SCHEMA_VERSION: u16 = 6;
-const CARRIED_ALLELE_SCHEMA_VERSION: i32 = 1;
 const PHENOTYPIC_ABNORMALITY_ROOT: &str = "HP:0000118";
 const MAX_PROFILE_TERMS: usize = 500;
 const READY_FILENAME: &str = "hpo-ready.json";
 const INSTALLED_ASSET_MANIFEST_FILENAME: &str = "hpo-assets.json";
 const MAX_RELEASE_METADATA_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PORTABLE_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PORTABLE_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -42,7 +46,30 @@ pub struct PhenotypeProfile {
     pub updated_at: String,
     pub observed: Vec<PhenotypeTerm>,
     pub excluded: Vec<PhenotypeTerm>,
+    #[serde(default)]
+    pub conditions: Vec<PhenotypeTerm>,
+    #[serde(default)]
+    pub limit_to_linked_genes: bool,
+    #[serde(default)]
+    pub active_generation: Option<PhenotypeGeneration>,
+    #[serde(default)]
     pub ranking: Option<PhenotypeRanking>,
+    #[serde(default)]
+    pub monarch_suggestions: Option<MonarchGeneRanking>,
+    #[serde(default)]
+    pub monarch_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PhenotypeGeneration {
+    pub fingerprint: String,
+    pub evidence_file: String,
+    pub catalog_file: String,
+    #[serde(default)]
+    pub matched_gene_count: Option<usize>,
+    #[serde(default, skip_serializing)]
+    pub candidate_evidence_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +93,7 @@ pub struct PhenotypeRanking {
 }
 
 fn default_phenotype_algorithm_version() -> String {
-    "hpo-lin-query-v3".into()
+    "hpo-lin-query-v4".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +102,8 @@ pub struct MonarchGeneRanking {
     pub provider: String,
     pub provider_url: String,
     pub metric: String,
+    #[serde(default)]
+    pub generated_at: String,
     #[serde(default)]
     pub result_limit: usize,
     pub genes: Vec<MonarchRankedGene>,
@@ -159,47 +188,6 @@ pub struct ReportGeneOverlap {
     pub tier_label: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReportPhenotypeExploration {
-    pub generated_at: String,
-    pub hpo_release: String,
-    pub sample_name: String,
-    pub report_gene_count: usize,
-    pub associated_diseases: usize,
-    pub diseases: Vec<ReportAssociatedDisease>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReportAssociatedDisease {
-    pub order: usize,
-    pub disease_id: String,
-    pub disease_name: String,
-    pub phenotypes: Vec<PhenotypeTerm>,
-    pub genes: Vec<GeneAssociation>,
-    pub report_overlap: DiseaseReportOverlap,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RankRequest {
-    pub observed: Vec<PhenotypeTerm>,
-    #[serde(default)]
-    pub excluded: Vec<PhenotypeTerm>,
-    #[serde(default)]
-    pub online_consent: bool,
-    #[serde(default)]
-    pub sample_name: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ExploreRequest {
-    #[serde(default)]
-    pub sample_name: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileUpdate {
@@ -208,6 +196,12 @@ pub struct ProfileUpdate {
     pub observed: Vec<PhenotypeTerm>,
     #[serde(default)]
     pub excluded: Vec<PhenotypeTerm>,
+    #[serde(default)]
+    pub conditions: Vec<PhenotypeTerm>,
+    #[serde(default)]
+    pub limit_to_linked_genes: bool,
+    #[serde(default)]
+    pub request_monarch_suggestions: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,7 +209,36 @@ pub struct ProfileUpdate {
 pub struct TermSearchResult {
     pub id: String,
     pub label: String,
+    pub term_type: String,
+    pub matched_text: String,
+    pub match_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synonym_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtype_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub synonyms: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TermResolutionRequest {
+    pub entries: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TermResolution {
+    pub entry: String,
+    pub matches: Vec<TermSearchResult>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TermResolutionResponse {
+    pub recognized: Vec<TermResolution>,
+    pub ambiguous: Vec<TermResolution>,
+    pub not_recognized: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +261,10 @@ pub struct HpoReadyManifest {
     pub term_count: usize,
     pub disease_count: usize,
     pub disease_gene_association_count: usize,
+    #[serde(default)]
+    pub mondo_release: Option<String>,
+    #[serde(default)]
+    pub mondo_term_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +273,10 @@ pub(crate) struct HpoAssetManifest {
     schema_version: u16,
     release: String,
     release_url: String,
+    #[serde(default)]
+    mondo_release: Option<String>,
+    #[serde(default)]
+    mondo_release_url: Option<String>,
     assets: Vec<HpoAsset>,
 }
 
@@ -256,6 +287,13 @@ impl HpoAssetManifest {
 
     pub(crate) fn expected_bytes(&self) -> u64 {
         self.assets.iter().map(|asset| asset.bytes).sum()
+    }
+
+    pub(crate) fn version_key(&self) -> String {
+        self.mondo_release
+            .as_ref()
+            .map(|mondo| format!("{}+mondo-{mondo}", self.release))
+            .unwrap_or_else(|| self.release.clone())
     }
 }
 
@@ -332,12 +370,20 @@ struct DiseaseBuilder {
 }
 
 #[derive(Debug)]
+struct ConditionAssociation {
+    id: String,
+    name: String,
+    genes: Vec<GeneAssociation>,
+}
+
+#[derive(Debug)]
 struct HpoKnowledge {
     terms: Vec<OntologyTerm>,
     term_index: HashMap<String, usize>,
     active_terms: Vec<usize>,
     phenotypic_abnormality_root: usize,
     diseases: Vec<DiseaseProfile>,
+    condition_associations: Vec<ConditionAssociation>,
     information_content: Vec<f64>,
     disease_gene_association_count: usize,
 }
@@ -347,22 +393,6 @@ struct AssetIntegrityStamp {
     filename: String,
     bytes: u64,
     modified_nanos: u128,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReportOverlapCache {
-    schema_version: u16,
-    parquet_bytes: u64,
-    parquet_modified_nanos: u128,
-    sample_name: String,
-    genes: Vec<ReportGeneOverlap>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawSampleCall {
-    name: String,
-    value: String,
 }
 
 fn knowledge_cache() -> &'static Mutex<HashMap<PathBuf, Arc<HpoKnowledge>>> {
@@ -377,6 +407,12 @@ fn integrity_cache() -> &'static Mutex<HashMap<PathBuf, Vec<AssetIntegrityStamp>
 
 pub fn hpo_release(resources: &Path) -> Result<String, String> {
     Ok(installed_asset_manifest(resources)?.release)
+}
+
+pub fn mondo_release(resources: &Path) -> Option<String> {
+    installed_asset_manifest(resources)
+        .ok()
+        .and_then(|manifest| manifest.mondo_release)
 }
 
 pub fn release_root(resources: &Path) -> Result<PathBuf, String> {
@@ -396,7 +432,8 @@ pub fn installed_versions(resources: &Path) -> Vec<String> {
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .filter_map(|entry| {
-            installed_status_and_manifest_at(&entry.path()).map(|(_, manifest)| manifest.release)
+            installed_status_and_manifest_at(&entry.path())
+                .map(|(_, manifest)| manifest.version_key())
         })
         .collect::<Vec<_>>();
     versions.sort();
@@ -434,6 +471,7 @@ fn installed_status_and_manifest_at(root: &Path) -> Option<(HpoReadyManifest, Hp
     if ready.schema_version != INSTALL_SCHEMA_VERSION
         || ready.release != manifest.release
         || ready.asset_bytes != manifest.expected_bytes()
+        || ready.mondo_release != manifest.mondo_release
     {
         return None;
     }
@@ -565,6 +603,11 @@ pub fn install_hpo(
     });
     ensure_not_cancelled(cancelled, "HPO installation")?;
     let knowledge = Arc::new(load_knowledge_from_root(resource_root)?);
+    let mondo_term_count = if manifest.mondo_release.is_some() {
+        crate::mondo::validate_file(&raw_root.join("mondo.json"))?
+    } else {
+        0
+    };
     let ready = HpoReadyManifest {
         schema_version: INSTALL_SCHEMA_VERSION,
         release: manifest.release.clone(),
@@ -573,6 +616,8 @@ pub fn install_hpo(
         term_count: knowledge.active_terms.len(),
         disease_count: knowledge.diseases.len(),
         disease_gene_association_count: knowledge.disease_gene_association_count,
+        mondo_release: manifest.mondo_release.clone(),
+        mondo_term_count,
     };
     let bytes = serde_json::to_vec_pretty(&ready)
         .map_err(|error| format!("cannot serialize the HPO ready marker: {error}"))?;
@@ -590,8 +635,8 @@ pub fn install_hpo(
     progress(InstallProgress {
         phase: "ready".into(),
         detail: format!(
-            "Validated {} phenotype terms and {} disease profiles",
-            ready.term_count, ready.disease_count
+            "Validated {} phenotype terms, {} conditions, and {} disease profiles",
+            ready.term_count, ready.mondo_term_count, ready.disease_count
         ),
         network_bytes: expected,
         expected_network_bytes: expected,
@@ -618,22 +663,28 @@ pub fn search_terms(
             let term = &knowledge.terms[index];
             let id = term.id.to_ascii_lowercase();
             let label = term.label.to_ascii_lowercase();
-            let score = if id == query {
-                0
+            let (score, matched_text, match_kind) = if id == query {
+                (0, term.id.clone(), "identifier")
             } else if label == query {
-                1
+                (2, term.label.clone(), "label")
             } else if label.starts_with(&query) {
-                2
-            } else if term
+                (3, term.label.clone(), "label")
+            } else if let Some(synonym) = term
                 .synonyms
                 .iter()
-                .any(|synonym| synonym.eq_ignore_ascii_case(&query))
+                .find(|synonym| synonym.eq_ignore_ascii_case(&query))
             {
-                3
+                (4, synonym.clone(), "synonym")
             } else if label.contains(&query) {
-                4
+                (5, term.label.clone(), "label")
             } else if term.search_text.contains(&query) {
-                5
+                let synonym = term
+                    .synonyms
+                    .iter()
+                    .find(|synonym| synonym.to_ascii_lowercase().contains(&query))
+                    .cloned()
+                    .unwrap_or_else(|| term.label.clone());
+                (6, synonym, "synonym")
             } else {
                 return None;
             };
@@ -643,6 +694,11 @@ pub fn search_terms(
                 TermSearchResult {
                     id: term.id.clone(),
                     label: term.label.clone(),
+                    term_type: "feature".into(),
+                    matched_text,
+                    match_kind: match_kind.into(),
+                    synonym_scope: None,
+                    subtype_count: None,
                     synonyms: term
                         .synonyms
                         .iter()
@@ -654,6 +710,24 @@ pub fn search_terms(
             ))
         })
         .collect::<Vec<_>>();
+    if let Ok(mondo) = crate::mondo::knowledge(&release_root(resources)?) {
+        matches.extend(mondo.search(&query, limit).into_iter().map(|item| {
+            (
+                item.score,
+                item.label.len(),
+                TermSearchResult {
+                    id: item.id,
+                    label: item.label,
+                    term_type: "condition".into(),
+                    matched_text: item.matched_text,
+                    match_kind: item.match_kind,
+                    synonym_scope: item.synonym_scope,
+                    subtype_count: Some(item.subtype_count),
+                    synonyms: Vec::new(),
+                },
+            )
+        }));
+    }
     matches.sort_by(|left, right| {
         left.0
             .cmp(&right.0)
@@ -667,6 +741,51 @@ pub fn search_terms(
         .collect())
 }
 
+pub fn resolve_terms(
+    resources: &Path,
+    request: TermResolutionRequest,
+) -> Result<TermResolutionResponse, String> {
+    if request.entries.len() > MAX_PROFILE_TERMS {
+        return Err(format!(
+            "A pasted list can contain at most {MAX_PROFILE_TERMS} entries"
+        ));
+    }
+    let mut recognized = Vec::new();
+    let mut ambiguous = Vec::new();
+    let mut not_recognized = Vec::new();
+    for entry in request.entries {
+        let entry = entry.trim().to_owned();
+        if entry.is_empty() {
+            continue;
+        }
+        let mut matches = search_terms(resources, &entry, 100)?
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.match_kind.as_str(),
+                    "identifier" | "externalIdentifier" | "label" | "synonym"
+                ) && (item.id.eq_ignore_ascii_case(&entry)
+                    || item.matched_text.eq_ignore_ascii_case(&entry))
+            })
+            .collect::<Vec<_>>();
+        matches.dedup_by(|left, right| left.id == right.id && left.term_type == right.term_type);
+        let resolution = TermResolution {
+            entry: entry.clone(),
+            matches,
+        };
+        match resolution.matches.len() {
+            0 => not_recognized.push(entry),
+            1 => recognized.push(resolution),
+            _ => ambiguous.push(resolution),
+        }
+    }
+    Ok(TermResolutionResponse {
+        recognized,
+        ambiguous,
+        not_recognized,
+    })
+}
+
 pub fn empty_profile(run_id: &str) -> PhenotypeProfile {
     PhenotypeProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
@@ -674,7 +793,12 @@ pub fn empty_profile(run_id: &str) -> PhenotypeProfile {
         updated_at: String::new(),
         observed: Vec::new(),
         excluded: Vec::new(),
+        conditions: Vec::new(),
+        limit_to_linked_genes: false,
+        active_generation: None,
         ranking: None,
+        monarch_suggestions: None,
+        monarch_error: None,
     }
 }
 
@@ -685,8 +809,8 @@ pub fn load(runs: &Path, run_id: &str) -> Result<PhenotypeProfile, String> {
         return Ok(empty_profile(run_id));
     }
     let bytes =
-        fs::read(path).map_err(|error| format!("cannot read phenotype profile: {error}"))?;
-    if bytes.len() > 64 * 1024 * 1024 {
+        fs::read(&path).map_err(|error| format!("cannot read phenotype profile: {error}"))?;
+    if bytes.len() > MAX_PORTABLE_PROFILE_BYTES as usize {
         return Err("phenotype profile exceeds its 64 MB safety limit".into());
     }
     let mut profile: PhenotypeProfile = serde_json::from_slice(&bytes)
@@ -699,48 +823,18 @@ pub fn load(runs: &Path, run_id: &str) -> Result<PhenotypeProfile, String> {
     {
         profile.ranking = None;
     }
+    if profile
+        .active_generation
+        .as_ref()
+        .is_some_and(|active| active.candidate_evidence_file.is_some())
+    {
+        profile.active_generation = None;
+    }
     Ok(profile)
 }
 
-pub fn report_sample_names(parquet: &Path) -> Result<Vec<String>, String> {
-    let connection = Connection::open_in_memory()
-        .map_err(|error| format!("cannot inspect report samples: {error}"))?;
-    let mut statement = connection
-        .prepare("SELECT sample_names_json FROM read_parquet(?) LIMIT 1")
-        .map_err(|error| format!("cannot prepare report sample lookup: {error}"))?;
-    let mut rows = statement
-        .query(params![parquet.to_string_lossy().as_ref()])
-        .map_err(|error| format!("cannot read report samples: {error}"))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|error| format!("cannot read report samples: {error}"))?
-    else {
-        return Ok(Vec::new());
-    };
-    let raw: Option<String> = row.get(0).map_err(|error| error.to_string())?;
-    let names = match raw {
-        Some(raw) if !raw.trim().is_empty() => serde_json::from_str::<Vec<String>>(&raw)
-            .map_err(|error| format!("invalid report sample metadata: {error}"))?,
-        _ => Vec::new(),
-    };
-    let mut seen = HashSet::new();
-    for name in &names {
-        if name.trim().is_empty()
-            || name.chars().any(char::is_control)
-            || !seen.insert(name.clone())
-        {
-            return Err("report sample metadata contains an invalid or duplicate name".into());
-        }
-    }
-    Ok(names)
-}
-
-pub fn profile_json(
-    resources: &Path,
-    profile: &PhenotypeProfile,
-    parquet: &Path,
-) -> Result<String, String> {
-    let manifest = installed_asset_manifest(resources)?;
+pub fn profile_json(resources: &Path, profile: &PhenotypeProfile) -> Result<String, String> {
+    let manifest = installed_asset_manifest(resources).ok();
     let mut value = serde_json::to_value(profile)
         .map_err(|error| format!("cannot serialize phenotype profile: {error}"))?;
     let object = value
@@ -748,34 +842,55 @@ pub fn profile_json(
         .ok_or("phenotype profile did not serialize as an object")?;
     object.insert(
         "hpoRelease".into(),
-        serde_json::Value::String(manifest.release),
+        manifest
+            .as_ref()
+            .map(|manifest| serde_json::Value::String(manifest.release.clone()))
+            .or_else(|| {
+                profile
+                    .ranking
+                    .as_ref()
+                    .map(|ranking| serde_json::Value::String(ranking.hpo_release.clone()))
+            })
+            .unwrap_or(serde_json::Value::Null),
     );
     object.insert(
         "hpoReleaseUrl".into(),
-        serde_json::Value::String(manifest.release_url),
+        manifest
+            .as_ref()
+            .map(|manifest| serde_json::Value::String(manifest.release_url.clone()))
+            .unwrap_or(serde_json::Value::Null),
     );
     object.insert(
-        "sampleNames".into(),
-        serde_json::to_value(report_sample_names(parquet)?)
-            .map_err(|error| format!("cannot serialize report samples: {error}"))?,
+        "mondoRelease".into(),
+        manifest
+            .as_ref()
+            .and_then(|manifest| manifest.mondo_release.clone())
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
     );
-    serde_json::to_string(&value).map_err(|error| error.to_string())
-}
-
-fn resolve_sample_name(parquet: &Path, requested: Option<&str>) -> Result<Option<String>, String> {
-    let names = report_sample_names(parquet)?;
-    if let Some(requested) = requested.filter(|name| !name.is_empty()) {
-        return names
-            .iter()
-            .find(|name| name.as_str() == requested)
-            .cloned()
-            .map(Some)
-            .ok_or_else(|| format!("sample {requested} is not present in this report"));
+    object.insert(
+        "mondoReleaseUrl".into(),
+        manifest
+            .and_then(|manifest| manifest.mondo_release_url)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    if let Ok(root) = release_root(resources)
+        && let Ok(mondo) = crate::mondo::knowledge(&root)
+        && let Some(conditions) = object
+            .get_mut("conditions")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        for condition in conditions {
+            if let Some(entry) = condition.as_object_mut()
+                && let Some(id) = entry.get("id").and_then(serde_json::Value::as_str)
+                && let Some(count) = mondo.subtype_count(id)
+            {
+                entry.insert("subtypeCount".into(), count.into());
+            }
+        }
     }
-    Ok(match names.as_slice() {
-        [only] => Some(only.clone()),
-        _ => None,
-    })
+    serde_json::to_string(&value).map_err(|error| error.to_string())
 }
 
 pub fn update(
@@ -799,23 +914,45 @@ pub fn update(
             )?;
             ensure_consistent_profile(&knowledge, &observed, &excluded)?;
             let existing = load(runs, run_id)?;
-            let same_profile = existing.observed == observed && existing.excluded == excluded;
+            let same_profile = existing.observed == observed
+                && existing.excluded == excluded
+                && existing.conditions == request.conditions
+                && existing.limit_to_linked_genes == request.limit_to_linked_genes;
             let profile = PhenotypeProfile {
                 schema_version: PROFILE_SCHEMA_VERSION,
                 run_id: run_id.to_owned(),
                 updated_at: super::annotation::current_timestamp(),
                 observed,
                 excluded,
+                conditions: request.conditions,
+                limit_to_linked_genes: request.limit_to_linked_genes,
+                active_generation: same_profile.then_some(existing.active_generation).flatten(),
                 ranking: same_profile.then_some(existing.ranking).flatten(),
+                monarch_suggestions: same_profile
+                    .then_some(existing.monarch_suggestions)
+                    .flatten(),
+                monarch_error: same_profile.then_some(existing.monarch_error).flatten(),
             };
             save(runs, &profile)?;
             Ok(profile)
         }
         "clear" => {
             let path = profile_path(runs, run_id);
+            let active = load(runs, run_id)
+                .ok()
+                .and_then(|profile| profile.active_generation);
             if path.exists() {
-                fs::remove_file(path)
+                fs::remove_file(&path)
                     .map_err(|error| format!("cannot clear phenotype profile: {error}"))?;
+            }
+            if let Some(active) = active
+                && let Some(root) = path.parent()
+            {
+                let mut names = vec![active.evidence_file, active.catalog_file];
+                names.extend(active.candidate_evidence_file);
+                for name in names {
+                    let _ = fs::remove_file(root.join(name));
+                }
             }
             Ok(empty_profile(run_id))
         }
@@ -823,19 +960,25 @@ pub fn update(
     }
 }
 
-pub fn rank(
+pub fn apply(
     resources: &Path,
     runs: &Path,
     run_id: &str,
     parquet: &Path,
-    consequences: Option<&Path>,
-    request: RankRequest,
+    request: ProfileUpdate,
 ) -> Result<PhenotypeProfile, String> {
+    if request.action != "apply" {
+        return Err("phenotype action must be apply".into());
+    }
     super::library_metadata::validate_run_id(run_id)?;
     let knowledge = knowledge(resources)?;
     let observed = normalize_terms(
         &knowledge,
-        canonical_terms(&knowledge, &request.observed, false)?,
+        canonical_terms(
+            &knowledge,
+            &request.observed,
+            !request.conditions.is_empty(),
+        )?,
         true,
     )?;
     let excluded = normalize_terms(
@@ -844,29 +987,36 @@ pub fn rank(
         false,
     )?;
     ensure_consistent_profile(&knowledge, &observed, &excluded)?;
+    let root = release_root(resources)?;
+    let mondo = (!request.conditions.is_empty())
+        .then(|| crate::mondo::knowledge(&root))
+        .transpose()?;
+    let canonical_conditions = mondo
+        .as_ref()
+        .map(|knowledge| knowledge.canonical_conditions(&request.conditions))
+        .transpose()?
+        .unwrap_or_default();
+    let conditions = canonical_conditions
+        .iter()
+        .map(|condition| PhenotypeTerm {
+            id: condition.id.clone(),
+            label: condition.label.clone(),
+        })
+        .collect::<Vec<_>>();
+    if observed.is_empty() && conditions.is_empty() {
+        return Err("Add at least one observed feature or known condition".into());
+    }
+    if request.request_monarch_suggestions && observed.is_empty() {
+        return Err("Add an observed feature before you request Monarch suggestions".into());
+    }
+    let existing = load(runs, run_id)?;
+    let same_observed = existing.observed == observed;
     let observed_indexes = term_indexes(&knowledge, &observed)?;
     let excluded_indexes = term_indexes(&knowledge, &excluded)?;
-    let sample_name = resolve_sample_name(parquet, request.sample_name.as_deref())?;
-    let report_overlaps = match &sample_name {
-        Some(sample_name) => {
-            report_gene_overlap_summary(runs, run_id, parquet, consequences, sample_name)?
-        }
-        None => Vec::new(),
-    };
-    let report_overlap_by_gene = candidate_report_overlap_by_gene(&report_overlaps);
-
     let mut diseases = knowledge
         .diseases
         .par_iter()
-        .map(|disease| {
-            rank_disease(
-                &knowledge,
-                disease,
-                &observed_indexes,
-                &excluded_indexes,
-                &report_overlap_by_gene,
-            )
-        })
+        .map(|disease| rank_disease(&knowledge, disease, &observed_indexes, &excluded_indexes))
         .collect::<Vec<_>>();
     diseases.sort_by(|left, right| {
         right
@@ -881,29 +1031,82 @@ pub fn rank(
         disease.query_coverage = round(disease.query_coverage, 1);
         disease.conflict_score = round(disease.conflict_score, 1);
     }
-    let (online_enrichment, online_error) = if request.online_consent {
-        match monarch_gene_ranking(&observed) {
-            Ok(ranking) => (Some(ranking), None),
-            Err(error) => (None, Some(error)),
-        }
+    let condition_matches = if let Some(mondo) = &mondo {
+        knowledge
+            .condition_associations
+            .iter()
+            .filter_map(|association| {
+                let matches = mondo.disease_matches(&canonical_conditions, &association.id);
+                (!matches.is_empty()).then(|| (association.id.clone(), matches))
+            })
+            .collect::<HashMap<_, _>>()
     } else {
-        (None, None)
+        HashMap::new()
     };
+    if !condition_matches.is_empty() {
+        let ranked = diseases
+            .iter()
+            .map(|disease| disease.disease_id.clone())
+            .collect::<HashSet<_>>();
+        diseases.extend(
+            knowledge
+                .condition_associations
+                .iter()
+                .filter(|association| {
+                    condition_matches.contains_key(&association.id)
+                        && !ranked.contains(&association.id)
+                })
+                .map(|association| RankedDisease {
+                    phenotype_rank: 0,
+                    disease_id: association.id.clone(),
+                    disease_name: association.name.clone(),
+                    phenotype_score: 0.0,
+                    query_coverage: 0.0,
+                    conflict_score: 0.0,
+                    conflict_frequency_complete: true,
+                    matched_phenotypes: Vec::new(),
+                    genes: association.genes.clone(),
+                    report_overlap: DiseaseReportOverlap::default(),
+                }),
+        );
+    }
     let manifest = installed_asset_manifest(resources)?;
+    let mondo_release = manifest.mondo_release.clone();
     let ranking = PhenotypeRanking {
         algorithm_version: default_phenotype_algorithm_version(),
         provider: "Human Phenotype Ontology".into(),
-        provider_url: manifest.release_url,
-        hpo_release: manifest.release,
-        metric: "Patient-to-disease best-match Lin semantic similarity; explicit-absence conflict is weighted by disease-feature frequency when HPO reports it".into(),
-        score_interpretation: "A relative match of the patient's recorded findings to each disease profile. Unrecorded disease findings are treated as unknown, not absent. This is not a diagnosis or disease probability; variant overlap is displayed separately and does not change the phenotype score.".into(),
+        provider_url: manifest.release_url.clone(),
+        hpo_release: manifest.release.clone(),
+        metric: "Query-to-disease best-match Lin semantic similarity".into(),
+        score_interpretation: "A relative match between the recorded features and each disease profile. This is not a diagnosis or a disease probability.".into(),
         generated_at: super::annotation::current_timestamp(),
         evaluated_diseases: diseases.len(),
-        sample_name,
-        report_gene_count: report_overlap_by_gene.len(),
-        online_enrichment,
-        online_error,
+        sample_name: None,
+        report_gene_count: 0,
+        online_enrichment: None,
+        online_error: None,
         diseases,
+    };
+    let generation = publish_gene_evidence(
+        runs,
+        run_id,
+        &super::results::report_gene_identities(parquet)?,
+        &observed,
+        &excluded,
+        &conditions,
+        &condition_matches,
+        mondo_release.as_deref(),
+        &ranking,
+    )?;
+    let (monarch_suggestions, monarch_error) = if request.request_monarch_suggestions {
+        match monarch_gene_ranking(&observed) {
+            Ok(suggestions) => (Some(suggestions), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else if same_observed {
+        (existing.monarch_suggestions, existing.monarch_error)
+    } else {
+        (None, None)
     };
     let profile = PhenotypeProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
@@ -911,106 +1114,604 @@ pub fn rank(
         updated_at: super::annotation::current_timestamp(),
         observed,
         excluded,
-        ranking: Some(ranking),
+        conditions,
+        limit_to_linked_genes: request.limit_to_linked_genes,
+        active_generation: Some(generation),
+        ranking: None,
+        monarch_suggestions,
+        monarch_error,
     };
     save(runs, &profile)?;
     Ok(profile)
 }
 
-pub fn explore_report(
-    resources: &Path,
+#[derive(Default)]
+struct GenePhenotypeSummary {
+    hpo_gene_id: String,
+    result_gene_id: String,
+    symbol: String,
+    has_profile: bool,
+    observed_feature_linked: bool,
+    relevance: f64,
+    direct_matches: i64,
+    absent_conflict: f64,
+    best_condition: String,
+    details: String,
+    condition_links: BTreeMap<String, GeneConditionLink>,
+}
+
+#[derive(Clone)]
+struct GeneConditionLink {
+    selected_id: String,
+    selected_label: String,
+    matched_id: String,
+    matched_label: String,
+    relation: String,
+    source_disease_id: String,
+    source_disease_name: String,
+    association_type: String,
+    association_source: String,
+}
+
+struct GeneEvidenceRow {
+    gene_id: String,
+    gene_symbol: String,
+    field_path: &'static str,
+    value_type: &'static str,
+    string_value: Option<String>,
+    integer_value: Option<i64>,
+    number_value: Option<f64>,
+    boolean_value: Option<bool>,
+    json_value: Option<String>,
+}
+
+fn publish_gene_evidence(
     runs: &Path,
     run_id: &str,
-    parquet: &Path,
-    consequences: Option<&Path>,
-    request: ExploreRequest,
-) -> Result<ReportPhenotypeExploration, String> {
-    super::library_metadata::validate_run_id(run_id)?;
-    let knowledge = knowledge(resources)?;
-    let sample_name = resolve_sample_name(parquet, request.sample_name.as_deref())?
-        .ok_or("choose the patient sample before exploring carried-ALT report overlap")?;
-    let report_overlaps =
-        report_gene_overlap_summary(runs, run_id, parquet, consequences, &sample_name)?;
-    let report_overlap_by_gene = candidate_report_overlap_by_gene(&report_overlaps);
-    let mut diseases = knowledge
+    report_genes: &[(String, String)],
+    observed: &[PhenotypeTerm],
+    excluded: &[PhenotypeTerm],
+    conditions: &[PhenotypeTerm],
+    condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
+    mondo_release: Option<&str>,
+    ranking: &PhenotypeRanking,
+) -> Result<PhenotypeGeneration, String> {
+    let mut fingerprint_input = observed
+        .iter()
+        .map(|term| format!("O:{}", term.id))
+        .chain(excluded.iter().map(|term| format!("A:{}", term.id)))
+        .chain(conditions.iter().map(|term| format!("C:{}", term.id)))
+        .collect::<Vec<_>>();
+    fingerprint_input.sort();
+    fingerprint_input.push(format!("H:{}", ranking.hpo_release));
+    if let Some(release) = mondo_release {
+        fingerprint_input.push(format!("M:{release}"));
+    }
+    fingerprint_input.push(format!("V:{}", ranking.algorithm_version));
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(fingerprint_input.join("\n").as_bytes())
+    );
+    let short = &fingerprint[..16];
+    let evidence_file = format!("phenotype-gene-evidence.{short}.parquet");
+    let catalog_file = format!("phenotype-field-catalog.{short}.json");
+    let root = profile_path(runs, run_id)
+        .parent()
+        .ok_or("phenotype profile has no directory")?
+        .to_path_buf();
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("cannot create phenotype result directory: {error}"))?;
+    let evidence_path = root.join(&evidence_file);
+    let catalog_path = root.join(&catalog_file);
+    if !evidence_path.is_file() {
+        write_gene_evidence(
+            &evidence_path,
+            report_genes,
+            !observed.is_empty(),
+            condition_matches,
+            ranking,
+        )?;
+    }
+    // The catalog is small and can gain presentation dependencies without rebuilding evidence.
+    write_gene_catalog(
+        &catalog_path,
+        &evidence_file,
+        &fingerprint,
+        &ranking.hpo_release,
+        mondo_release,
+        &ranking.algorithm_version,
+        ranking.provider_url.as_str(),
+    )?;
+    let matched_gene_count = phenotype_matched_gene_count(&evidence_path)?;
+    Ok(PhenotypeGeneration {
+        fingerprint,
+        evidence_file,
+        catalog_file,
+        matched_gene_count: Some(matched_gene_count),
+        candidate_evidence_file: None,
+    })
+}
+
+fn phenotype_matched_gene_count(path: &Path) -> Result<usize, String> {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(DISTINCT upper(gene_symbol))
+             FROM read_parquet(?)
+             WHERE field_path='profileLinked' AND boolean_value=true",
+            params![path.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("cannot count phenotype-linked genes: {error}"))?;
+    usize::try_from(count).map_err(|_| "phenotype-linked gene count is invalid".into())
+}
+
+fn write_gene_evidence(
+    path: &Path,
+    report_genes: &[(String, String)],
+    has_observed_features: bool,
+    condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
+    ranking: &PhenotypeRanking,
+) -> Result<(), String> {
+    let result_gene_ids = report_genes
+        .iter()
+        .map(|(symbol, gene_id)| (symbol.as_str(), gene_id.as_str()))
+        .collect::<HashMap<_, _>>();
+    let mut hpo_gene_ids = HashMap::<String, HashSet<String>>::new();
+    for gene in ranking
         .diseases
         .iter()
-        .filter_map(|disease| {
-            let report_overlap = disease_report_overlap(disease, &report_overlap_by_gene);
-            if !report_overlap.has_overlap {
-                return None;
+        .flat_map(|disease| disease.genes.iter())
+    {
+        let symbol = gene.symbol.trim().to_ascii_uppercase();
+        let gene_id = gene.gene_id.trim();
+        if result_gene_ids.contains_key(symbol.as_str()) && !gene_id.is_empty() {
+            hpo_gene_ids
+                .entry(symbol)
+                .or_default()
+                .insert(gene_id.to_owned());
+        }
+    }
+    let mut genes = BTreeMap::<String, GenePhenotypeSummary>::new();
+    for disease in &ranking.diseases {
+        let direct_matches = disease
+            .matched_phenotypes
+            .iter()
+            .filter(|item| item.direct)
+            .count() as i64;
+        let details = serde_json::to_string(&json!({
+            "conditionId": disease.disease_id,
+            "condition": disease.disease_name,
+            "matches": disease.matched_phenotypes,
+        }))
+        .map_err(|error| format!("cannot serialize phenotype evidence details: {error}"))?;
+        for gene in &disease.genes {
+            let symbol = gene.symbol.trim().to_ascii_uppercase();
+            let Some(&result_gene_id) = result_gene_ids.get(symbol.as_str()) else {
+                continue;
+            };
+            let Some(unique_hpo_ids) = hpo_gene_ids
+                .get(&symbol)
+                .filter(|gene_ids| gene_ids.len() == 1)
+            else {
+                continue;
+            };
+            let hpo_gene_id = unique_hpo_ids.iter().next().unwrap();
+            let association_type = gene.association_type.to_ascii_uppercase();
+            if has_observed_features
+                && association_type == "MENDELIAN"
+                && !disease.matched_phenotypes.is_empty()
+            {
+                let observed_feature_linked = genes
+                    .get(&symbol)
+                    .is_some_and(|current| current.observed_feature_linked)
+                    || direct_matches > 0;
+                let replace = genes
+                    .get(&symbol)
+                    .is_none_or(|current| disease.phenotype_score > current.relevance);
+                if replace {
+                    let condition_links = genes
+                        .get(&symbol)
+                        .map(|current| current.condition_links.clone())
+                        .unwrap_or_default();
+                    genes.insert(
+                        symbol.clone(),
+                        GenePhenotypeSummary {
+                            hpo_gene_id: hpo_gene_id.clone(),
+                            result_gene_id: result_gene_id.to_owned(),
+                            symbol: symbol.clone(),
+                            has_profile: true,
+                            observed_feature_linked,
+                            relevance: disease.phenotype_score,
+                            direct_matches,
+                            absent_conflict: disease.conflict_score,
+                            best_condition: disease.disease_name.clone(),
+                            details: details.clone(),
+                            condition_links,
+                        },
+                    );
+                } else if direct_matches > 0
+                    && let Some(summary) = genes.get_mut(&symbol)
+                {
+                    summary.observed_feature_linked = true;
+                }
             }
-            let mut phenotypes = disease
-                .positive
-                .iter()
-                .map(|&term| {
-                    (
-                        knowledge.information_content[term],
-                        term_value(&knowledge, term),
-                    )
+            if !matches!(association_type.as_str(), "MENDELIAN" | "POLYGENIC") {
+                continue;
+            }
+            for matched in condition_matches
+                .get(&disease.disease_id)
+                .into_iter()
+                .flatten()
+            {
+                let summary = genes
+                    .entry(symbol.clone())
+                    .or_insert_with(|| GenePhenotypeSummary {
+                        hpo_gene_id: hpo_gene_id.clone(),
+                        result_gene_id: result_gene_id.to_owned(),
+                        symbol: symbol.clone(),
+                        ..GenePhenotypeSummary::default()
+                    });
+                let candidate = GeneConditionLink {
+                    selected_id: matched.selected_id.clone(),
+                    selected_label: matched.selected_label.clone(),
+                    matched_id: matched.matched_id.clone(),
+                    matched_label: matched.matched_label.clone(),
+                    relation: matched.relation.into(),
+                    source_disease_id: disease.disease_id.clone(),
+                    source_disease_name: disease.disease_name.clone(),
+                    association_type: gene.association_type.clone(),
+                    association_source: gene.source.clone(),
+                };
+                summary
+                    .condition_links
+                    .entry(matched.selected_id.clone())
+                    .and_modify(|current| {
+                        if current.relation != "Exact condition"
+                            && candidate.relation == "Exact condition"
+                        {
+                            *current = candidate.clone();
+                        }
+                    })
+                    .or_insert(candidate);
+            }
+        }
+    }
+    for (symbol, result_gene_id) in report_genes {
+        let Some(hpo_gene_id) = hpo_gene_ids
+            .get(symbol)
+            .filter(|gene_ids| gene_ids.len() == 1)
+            .and_then(|gene_ids| gene_ids.iter().next())
+        else {
+            continue;
+        };
+        genes
+            .entry(symbol.clone())
+            .or_insert_with(|| GenePhenotypeSummary {
+                hpo_gene_id: hpo_gene_id.clone(),
+                result_gene_id: result_gene_id.clone(),
+                symbol: symbol.clone(),
+                ..GenePhenotypeSummary::default()
+            });
+    }
+    let mut rows = Vec::with_capacity(genes.len() * 10);
+    for gene in genes.values() {
+        let base = |field_path, value_type| GeneEvidenceRow {
+            gene_id: gene.result_gene_id.clone(),
+            gene_symbol: gene.symbol.clone(),
+            field_path,
+            value_type,
+            string_value: None,
+            integer_value: None,
+            number_value: None,
+            boolean_value: None,
+            json_value: None,
+        };
+        let condition_count = gene.condition_links.len() as i64;
+        let matched_conditions = gene
+            .condition_links
+            .values()
+            .map(|link| format!("{} {}", link.selected_id, link.selected_label))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let condition_relation = if gene
+            .condition_links
+            .values()
+            .any(|link| link.relation == "Exact condition")
+        {
+            "Exact condition"
+        } else if condition_count > 0 {
+            "Condition subtype"
+        } else {
+            ""
+        };
+        let condition_details = gene
+            .condition_links
+            .values()
+            .map(|link| {
+                json!({
+                    "selectedConditionId": link.selected_id,
+                    "selectedCondition": link.selected_label,
+                    "matchedConditionId": link.matched_id,
+                    "matchedCondition": link.matched_label,
+                    "relation": link.relation,
+                    "sourceDiseaseId": link.source_disease_id,
+                    "sourceDisease": link.source_disease_name,
+                    "associationType": link.association_type,
+                    "associationSource": link.association_source,
                 })
-                .collect::<Vec<_>>();
-            phenotypes.sort_by(|left, right| right.0.total_cmp(&left.0));
-            phenotypes.dedup_by(|left, right| left.1.id == right.1.id);
-            Some(ReportAssociatedDisease {
-                order: 0,
-                disease_id: disease.id.clone(),
-                disease_name: disease.name.clone(),
-                phenotypes: phenotypes
-                    .into_iter()
-                    .take(8)
-                    .map(|(_, term)| term)
-                    .collect(),
-                genes: disease.genes.clone(),
-                report_overlap,
+            })
+            .collect::<Vec<_>>();
+        let combined_details = serde_json::to_string(&json!({
+            "geneResolution": "uniqueGeneSymbol",
+            "resultGeneId": gene.result_gene_id,
+            "hpoGeneId": gene.hpo_gene_id,
+            "bestPhenotypeMatch": serde_json::from_str::<serde_json::Value>(&gene.details)
+                .unwrap_or(serde_json::Value::Null),
+            "conditionLinks": condition_details,
+        }))
+        .map_err(|error| format!("cannot serialize phenotype and condition details: {error}"))?;
+        rows.push(GeneEvidenceRow {
+            number_value: (has_observed_features && gene.has_profile).then_some(gene.relevance),
+            ..base("phenotypeRelevance", "number")
+        });
+        rows.push(GeneEvidenceRow {
+            boolean_value: Some(gene.observed_feature_linked || condition_count > 0),
+            ..base("profileLinked", "boolean")
+        });
+        rows.push(GeneEvidenceRow {
+            boolean_value: Some(gene.observed_feature_linked),
+            ..base("observedFeatureLinked", "boolean")
+        });
+        rows.push(GeneEvidenceRow {
+            string_value: (has_observed_features && gene.has_profile)
+                .then(|| gene.best_condition.clone()),
+            ..base("bestMatchingCondition", "text")
+        });
+        rows.push(GeneEvidenceRow {
+            integer_value: Some(gene.direct_matches),
+            ..base("directFeatureMatches", "integer")
+        });
+        rows.push(GeneEvidenceRow {
+            number_value: (has_observed_features && gene.has_profile)
+                .then_some(gene.absent_conflict),
+            ..base("absentFeatureConflict", "number")
+        });
+        rows.push(GeneEvidenceRow {
+            integer_value: Some(condition_count),
+            ..base("selectedConditionMatches", "integer")
+        });
+        rows.push(GeneEvidenceRow {
+            string_value: Some(matched_conditions),
+            ..base("matchedSelectedConditions", "text")
+        });
+        rows.push(GeneEvidenceRow {
+            string_value: Some(condition_relation.into()),
+            ..base("selectedConditionRelation", "text")
+        });
+        rows.push(GeneEvidenceRow {
+            json_value: Some(combined_details),
+            ..base("phenotypeEvidenceDetails", "json")
+        });
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("gene_id", DataType::Utf8, false),
+        Field::new("gene_symbol", DataType::Utf8, false),
+        Field::new("scope", DataType::Utf8, false),
+        Field::new("source_id", DataType::Utf8, false),
+        Field::new("field_path", DataType::Utf8, false),
+        Field::new("value_type", DataType::Utf8, false),
+        Field::new("string_value", DataType::Utf8, true),
+        Field::new("integer_value", DataType::Int64, true),
+        Field::new("number_value", DataType::Float64, true),
+        Field::new("boolean_value", DataType::Boolean, true),
+        Field::new("json_value", DataType::Utf8, true),
+    ]));
+    let len = rows.len();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.gene_id.as_str())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.gene_symbol.as_str())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(vec!["gene"; len])),
+            Arc::new(StringArray::from(vec!["hpo"; len])),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.field_path).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.value_type).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.string_value.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|row| row.integer_value).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|row| row.number_value).collect::<Vec<_>>(),
+            )),
+            Arc::new(BooleanArray::from(
+                rows.iter().map(|row| row.boolean_value).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.json_value.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .map_err(|error| format!("cannot build phenotype evidence batch: {error}"))?;
+    let temporary = path.with_extension("parquet.part");
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        File::create(&temporary)
+            .map_err(|error| format!("cannot create phenotype evidence: {error}"))?,
+        schema,
+        Some(properties),
+    )
+    .map_err(|error| format!("cannot create phenotype evidence writer: {error}"))?;
+    writer
+        .write(&batch)
+        .and_then(|_| writer.close())
+        .map_err(|error| format!("cannot write phenotype evidence: {error}"))?;
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let written: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM read_parquet(?)",
+            params![temporary.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("cannot verify phenotype evidence: {error}"))?;
+    if written != len as i64 {
+        let _ = fs::remove_file(&temporary);
+        return Err("phenotype evidence row count changed while writing".into());
+    }
+    super::library_metadata::publish_atomic_file(&temporary, path)
+}
+
+fn write_gene_catalog(
+    path: &Path,
+    evidence_file: &str,
+    fingerprint: &str,
+    hpo_release: &str,
+    mondo_release: Option<&str>,
+    algorithm_version: &str,
+    provider_url: &str,
+) -> Result<(), String> {
+    let definitions = [
+        ("phenotypeRelevance", "number", "Phenotype relevance", true),
+        ("profileLinked", "boolean", "Profile link", false),
+        (
+            "observedFeatureLinked",
+            "boolean",
+            "Observed feature link",
+            false,
+        ),
+        (
+            "bestMatchingCondition",
+            "text",
+            "Best matching condition",
+            false,
+        ),
+        (
+            "directFeatureMatches",
+            "integer",
+            "Direct feature matches",
+            false,
+        ),
+        (
+            "absentFeatureConflict",
+            "number",
+            "Absent feature conflict",
+            false,
+        ),
+        (
+            "selectedConditionMatches",
+            "integer",
+            "Condition matches",
+            false,
+        ),
+        (
+            "matchedSelectedConditions",
+            "text",
+            "Matched selected conditions",
+            false,
+        ),
+        (
+            "selectedConditionRelation",
+            "text",
+            "Selected condition relation",
+            false,
+        ),
+        (
+            "phenotypeEvidenceDetails",
+            "json",
+            "Phenotype evidence details",
+            false,
+        ),
+    ];
+    let fields = definitions
+        .iter()
+        .map(|(field, value_type, label, recommended)| {
+            json!({
+                "scope": "gene",
+                "physicalScope": "gene",
+                "biologicalScope": "gene",
+                "sourceId": "hpo",
+                "fieldPath": field,
+                "valueType": value_type,
+                "label": label,
+                "recommended": recommended,
+                "selectable": *field == "phenotypeRelevance",
+                "storageRelation": "geneEvidence",
+                "resolutionPolicy": "geneDirect",
+                "columnPresentation": (*field == "phenotypeRelevance").then_some("profileEvidence"),
+                "presentationDependencies": (*field == "phenotypeRelevance").then_some([
+                    "selectedConditionMatches",
+                    "matchedSelectedConditions",
+                    "selectedConditionRelation",
+                    "directFeatureMatches",
+                    "absentFeatureConflict",
+                    "phenotypeEvidenceDetails"
+                ]),
             })
         })
         .collect::<Vec<_>>();
-    diseases.sort_by(|left, right| {
-        right
-            .report_overlap
-            .tier
-            .cmp(&left.report_overlap.tier)
-            .then_with(|| {
-                let left_count = left
-                    .report_overlap
-                    .genes
-                    .iter()
-                    .map(|gene| gene.variant_count)
-                    .sum::<u64>();
-                let right_count = right
-                    .report_overlap
-                    .genes
-                    .iter()
-                    .map(|gene| gene.variant_count)
-                    .sum::<u64>();
-                right_count.cmp(&left_count)
-            })
-            .then_with(|| left.disease_name.cmp(&right.disease_name))
+    let catalog = json!({
+        "schemaVersion": 1,
+        "geneEvidenceFile": evidence_file,
+        "profileFingerprint": fingerprint,
+        "hpoRelease": hpo_release,
+        "mondoRelease": mondo_release,
+        "algorithmVersion": algorithm_version,
+        "sources": [{
+            "id": "hpo",
+            "name": "Phenotype and condition knowledge",
+            "providerUrl": provider_url
+        }],
+        "fields": fields,
     });
-    for (index, disease) in diseases.iter_mut().enumerate() {
-        disease.order = index + 1;
+    super::library_metadata::atomic_write(
+        path,
+        &serde_json::to_vec_pretty(&catalog).map_err(|error| error.to_string())?,
+    )
+}
+
+pub fn active_query_assets(
+    runs: &Path,
+    run_id: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let profile = load(runs, run_id)?;
+    let Some(active) = profile.active_generation else {
+        return Ok(None);
+    };
+    let profile = profile_path(runs, run_id);
+    let root = profile
+        .parent()
+        .ok_or("phenotype profile has no directory")?;
+    let evidence = root.join(active.evidence_file);
+    let catalog = root.join(active.catalog_file);
+    if !evidence.is_file() || !catalog.is_file() {
+        return Err("active phenotype evidence is incomplete".into());
     }
-    let report_gene_count = diseases
-        .iter()
-        .flat_map(|disease| disease.report_overlap.genes.iter())
-        .map(|gene| gene.symbol.to_ascii_uppercase())
-        .collect::<HashSet<_>>()
-        .len();
-    let manifest = installed_asset_manifest(resources)?;
-    Ok(ReportPhenotypeExploration {
-        generated_at: super::annotation::current_timestamp(),
-        hpo_release: manifest.release,
-        sample_name,
-        report_gene_count,
-        associated_diseases: diseases.len(),
-        diseases,
-    })
+    Ok(Some((evidence, catalog)))
 }
 
 fn monarch_gene_ranking(observed: &[PhenotypeTerm]) -> Result<MonarchGeneRanking, String> {
     let service = annocat_core::source_catalog::service("monarch-phenotype-gene-ranking")
-        .ok_or("Monarch phenotype-ranking service is not configured")?;
+        .ok_or("Monarch gene-suggestion service is not configured")?;
     let payload = monarch_request_payload(observed, service.max_results);
     let payload = serde_json::to_vec(&payload)
         .map_err(|error| format!("cannot serialize Monarch gene-ranking request: {error}"))?;
@@ -1029,6 +1730,7 @@ fn monarch_gene_ranking(observed: &[PhenotypeTerm]) -> Result<MonarchGeneRanking
         provider: service.provider.clone(),
         provider_url: service.provider_url.clone(),
         metric: "Ancestor information content, bidirectional".into(),
+        generated_at: super::annotation::current_timestamp(),
         result_limit: service.max_results,
         genes,
     })
@@ -1095,7 +1797,6 @@ fn rank_disease(
     disease: &DiseaseProfile,
     observed: &[usize],
     excluded: &[usize],
-    report_overlap_by_gene: &HashMap<String, ReportGeneOverlap>,
 ) -> RankedDisease {
     let observed_best = observed
         .iter()
@@ -1172,7 +1873,6 @@ fn rank_disease(
         .collect::<Vec<_>>();
     matched_phenotypes.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
     matched_phenotypes.truncate(5);
-    let report_overlap = disease_report_overlap(disease, report_overlap_by_gene);
     RankedDisease {
         phenotype_rank: 0,
         disease_id: disease.id.clone(),
@@ -1183,307 +1883,7 @@ fn rank_disease(
         conflict_frequency_complete,
         matched_phenotypes,
         genes: disease.genes.clone(),
-        report_overlap,
-    }
-}
-
-fn disease_report_overlap(
-    disease: &DiseaseProfile,
-    report_overlap_by_gene: &HashMap<String, ReportGeneOverlap>,
-) -> DiseaseReportOverlap {
-    let mut overlapping_genes = disease
-        .genes
-        .iter()
-        .filter(|gene| gene.association_type.eq_ignore_ascii_case("MENDELIAN"))
-        .filter_map(|gene| {
-            report_overlap_by_gene
-                .get(&gene.symbol.to_ascii_uppercase())
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    overlapping_genes.sort_by(|left, right| {
-        right
-            .tier
-            .cmp(&left.tier)
-            .then(right.variant_count.cmp(&left.variant_count))
-            .then(left.symbol.cmp(&right.symbol))
-    });
-    overlapping_genes.dedup_by(|left, right| left.symbol.eq_ignore_ascii_case(&right.symbol));
-    let tier = overlapping_genes.first().map(|gene| gene.tier).unwrap_or(0);
-    DiseaseReportOverlap {
-        has_overlap: !overlapping_genes.is_empty(),
-        tier,
-        label: report_overlap_label(tier).into(),
-        genes: overlapping_genes,
-    }
-}
-
-fn candidate_report_overlap_by_gene(
-    report_overlaps: &[ReportGeneOverlap],
-) -> HashMap<String, ReportGeneOverlap> {
-    report_overlaps
-        .iter()
-        .filter(|gene| gene.tier >= 3)
-        .cloned()
-        .map(|gene| (gene.symbol.to_ascii_uppercase(), gene))
-        .collect()
-}
-
-fn write_carried_allele_batch(
-    writer: &mut ArrowWriter<File>,
-    schema: &Arc<Schema>,
-    allele_ids: &mut Vec<String>,
-    passed: &mut Vec<bool>,
-) -> Result<(), String> {
-    if allele_ids.is_empty() {
-        return Ok(());
-    }
-    let row_count = allele_ids.len();
-    let columns = vec![
-        Arc::new(Int32Array::from(vec![
-            CARRIED_ALLELE_SCHEMA_VERSION;
-            row_count
-        ])) as ArrayRef,
-        Arc::new(StringArray::from(std::mem::take(allele_ids))) as ArrayRef,
-        Arc::new(BooleanArray::from(std::mem::take(passed))) as ArrayRef,
-    ];
-    let batch = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|error| format!("cannot build carried-allele batch: {error}"))?;
-    writer
-        .write(&batch)
-        .map_err(|error| format!("cannot write carried-allele batch: {error}"))
-}
-
-fn build_carried_allele_sidecar(
-    variants: &Path,
-    sample_name: &str,
-    destination: &Path,
-) -> Result<u64, String> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("schema_version", DataType::Int32, false),
-        Field::new("allele_id", DataType::Utf8, false),
-        Field::new("passed", DataType::Boolean, false),
-    ]));
-    let output = File::create(destination)
-        .map_err(|error| format!("cannot create carried-allele sidecar: {error}"))?;
-    let properties = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_row_count(Some(100_000))
-        .build();
-    let mut writer = ArrowWriter::try_new(output, schema.clone(), Some(properties))
-        .map_err(|error| format!("cannot initialize carried-allele sidecar: {error}"))?;
-    let connection = Connection::open_in_memory()
-        .map_err(|error| format!("cannot initialize carried-allele scan: {error}"))?;
-    let query = if crate::results::parquet_has_column(variants, "alternate_count")? {
-        "SELECT allele_id, filter, alt_index, alternate_count, format, samples_json
-         FROM read_parquet(?)"
-    } else {
-        "SELECT allele_id, filter, alt_index, record_alternate_count, format, samples_json
-         FROM (
-             SELECT *,
-                    max(alt_index) OVER (PARTITION BY record_number) AS record_alternate_count
-             FROM read_parquet(?)
-         )"
-    };
-    let mut statement = connection
-        .prepare(query)
-        .map_err(|error| format!("cannot prepare carried-allele scan: {error}"))?;
-    let mut rows = statement
-        .query(params![variants.to_string_lossy().as_ref()])
-        .map_err(|error| format!("cannot query carried alleles: {error}"))?;
-    let mut allele_ids = Vec::with_capacity(65_536);
-    let mut passed = Vec::with_capacity(65_536);
-    let mut carried_count = 0_u64;
-    let mut row_number = 0_u64;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("cannot read carried-allele scan: {error}"))?
-    {
-        row_number = row_number.saturating_add(1);
-        let allele_id: String = row.get(0).map_err(|error| error.to_string())?;
-        let filter: Option<String> = row.get(1).map_err(|error| error.to_string())?;
-        let alt_index: i32 = row.get(2).map_err(|error| error.to_string())?;
-        let alternate_count: i32 = row.get(3).map_err(|error| error.to_string())?;
-        let format: Option<String> = row.get(4).map_err(|error| error.to_string())?;
-        let samples_json: String = row.get(5).map_err(|error| error.to_string())?;
-        let alt_index = usize::try_from(alt_index)
-            .ok()
-            .filter(|index| *index > 0)
-            .ok_or_else(|| format!("report row {row_number} has an invalid ALT index"))?;
-        let alternate_count = usize::try_from(alternate_count)
-            .ok()
-            .filter(|count| *count >= alt_index)
-            .ok_or_else(|| format!("report row {row_number} has an invalid ALT count"))?;
-        let samples = serde_json::from_str::<Vec<RawSampleCall>>(&samples_json)
-            .map_err(|error| format!("report row {row_number} has invalid sample data: {error}"))?;
-        let sample = samples
-            .iter()
-            .find(|sample| sample.name == sample_name)
-            .ok_or_else(|| {
-                format!("sample {sample_name} is missing from report row {row_number}")
-            })?;
-        let call = annocat_core::sample_call::parse_sample_call(
-            sample_name,
-            format.as_deref(),
-            &sample.value,
-            alt_index,
-            alternate_count,
-        );
-        if call.allele_presence != annocat_core::sample_call::AllelePresence::Carried {
-            continue;
-        }
-        allele_ids.push(allele_id);
-        passed.push(
-            filter.as_deref() == Some("PASS")
-                && call.genotype_filter_state
-                    != annocat_core::sample_call::GenotypeFilterState::Failed,
-        );
-        carried_count = carried_count.saturating_add(1);
-        if allele_ids.len() >= 65_536 {
-            write_carried_allele_batch(&mut writer, &schema, &mut allele_ids, &mut passed)?;
-        }
-    }
-    write_carried_allele_batch(&mut writer, &schema, &mut allele_ids, &mut passed)?;
-    writer
-        .close()
-        .map_err(|error| format!("cannot finish carried-allele sidecar: {error}"))?;
-    Ok(carried_count)
-}
-
-fn aggregate_report_gene_overlap(
-    variants: &Path,
-    carried: &Path,
-) -> Result<Vec<ReportGeneOverlap>, String> {
-    let connection = Connection::open_in_memory()
-        .map_err(|error| format!("cannot initialize gene-overlap aggregation: {error}"))?;
-    let query = "WITH effects AS (
-             SELECT allele_id, gene_symbol, impact FROM read_parquet(?)
-         ),
-         allele_gene AS (
-             SELECT min(trim(e.gene_symbol)) AS symbol,
-                    upper(trim(e.gene_symbol)) AS symbol_key,
-                    e.allele_id,
-                    bool_or(c.passed) AS passed,
-                    max(CASE upper(coalesce(e.impact, ''))
-                        WHEN 'HIGH' THEN 2 WHEN 'MODERATE' THEN 1 ELSE 0 END) AS impact_rank
-             FROM effects e
-             JOIN read_parquet(?) c USING (allele_id)
-             WHERE e.gene_symbol IS NOT NULL AND trim(e.gene_symbol) <> ''
-             GROUP BY symbol_key, e.allele_id
-         )
-         SELECT min(symbol),
-                count(*),
-                sum(CASE WHEN passed THEN 1 ELSE 0 END),
-                sum(CASE WHEN passed AND impact_rank = 2 THEN 1 ELSE 0 END),
-                sum(CASE WHEN passed AND impact_rank = 1 THEN 1 ELSE 0 END)
-         FROM allele_gene
-         GROUP BY symbol_key
-         ORDER BY symbol_key";
-    let mut statement = connection
-        .prepare(query)
-        .map_err(|error| format!("cannot prepare gene-overlap aggregation: {error}"))?;
-    let variants_path = variants.to_string_lossy().into_owned();
-    let carried_path = carried.to_string_lossy().into_owned();
-    let mut rows = statement
-        .query(params![variants_path, carried_path])
-        .map_err(|error| format!("cannot query gene-overlap aggregation: {error}"))?;
-    let mut genes = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| format!("cannot read gene-overlap aggregation: {error}"))?
-    {
-        let mut gene = ReportGeneOverlap {
-            symbol: row.get(0).map_err(|error| error.to_string())?,
-            variant_count: row.get(1).map_err(|error| error.to_string())?,
-            pass_count: row.get(2).map_err(|error| error.to_string())?,
-            high_impact_count: row.get(3).map_err(|error| error.to_string())?,
-            moderate_impact_count: row.get(4).map_err(|error| error.to_string())?,
-            tier: 0,
-            tier_label: String::new(),
-        };
-        gene.tier = if gene.high_impact_count > 0 {
-            4
-        } else if gene.moderate_impact_count > 0 {
-            3
-        } else if gene.pass_count > 0 {
-            2
-        } else {
-            1
-        };
-        gene.tier_label = report_overlap_label(gene.tier).into();
-        genes.push(gene);
-    }
-    Ok(genes)
-}
-
-fn report_gene_overlap_summary(
-    runs: &Path,
-    run_id: &str,
-    parquet: &Path,
-    _consequences: Option<&Path>,
-    sample_name: &str,
-) -> Result<Vec<ReportGeneOverlap>, String> {
-    let metadata =
-        fs::metadata(parquet).map_err(|error| format!("cannot inspect report overlap: {error}"))?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let cache_path = runs
-        .join(".annocat-library")
-        .join(run_id)
-        .join("phenotype-gene-overlap.json");
-    if let Ok(bytes) = fs::read(&cache_path)
-        && bytes.len() <= 32 * 1024 * 1024
-        && let Ok(cache) = serde_json::from_slice::<ReportOverlapCache>(&bytes)
-        && cache.schema_version == REPORT_OVERLAP_CACHE_SCHEMA_VERSION
-        && cache.parquet_bytes == metadata.len()
-        && cache.parquet_modified_nanos == modified
-        && cache.sample_name == sample_name
-    {
-        return Ok(cache.genes);
-    }
-    let cache_directory = cache_path
-        .parent()
-        .ok_or("phenotype overlap cache has no parent directory")?;
-    fs::create_dir_all(cache_directory)
-        .map_err(|error| format!("cannot create phenotype overlap cache: {error}"))?;
-    let sidecar = cache_directory.join(format!(
-        ".carried-alleles-{}-{}.parquet",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("system clock cannot name phenotype sidecar: {error}"))?
-            .as_nanos()
-    ));
-    let genes = (|| {
-        build_carried_allele_sidecar(parquet, sample_name, &sidecar)?;
-        aggregate_report_gene_overlap(parquet, &sidecar)
-    })();
-    let _ = fs::remove_file(&sidecar);
-    let genes = genes?;
-    let cache = ReportOverlapCache {
-        schema_version: REPORT_OVERLAP_CACHE_SCHEMA_VERSION,
-        parquet_bytes: metadata.len(),
-        parquet_modified_nanos: modified,
-        sample_name: sample_name.into(),
-        genes: genes.clone(),
-    };
-    let bytes = serde_json::to_vec(&cache)
-        .map_err(|error| format!("cannot serialize report overlap: {error}"))?;
-    super::library_metadata::atomic_write(&cache_path, &bytes)?;
-    Ok(genes)
-}
-
-fn report_overlap_label(tier: u8) -> &'static str {
-    match tier {
-        4 => "Carried ALT on a PASS row with HIGH VEP impact in an associated feature",
-        3 => "Carried ALT on a PASS row with MODERATE VEP impact in an associated feature",
-        2 => "Carried ALT on a PASS row with an associated gene symbol",
-        1 => "Carried ALT has an associated gene symbol",
-        _ => "No carried-ALT gene overlap",
+        report_overlap: DiseaseReportOverlap::default(),
     }
 }
 
@@ -1536,6 +1936,15 @@ fn load_knowledge_from_root(root: &Path) -> Result<HpoKnowledge, String> {
         &term_index,
         phenotypic_abnormality_root,
     )?;
+    let condition_associations = diseases
+        .iter()
+        .filter(|disease| !disease.genes.is_empty())
+        .map(|disease| ConditionAssociation {
+            id: disease.id.clone(),
+            name: disease.name.clone(),
+            genes: disease.genes.clone(),
+        })
+        .collect();
     diseases.retain(|disease| !disease.positive.is_empty());
     let mut counts = vec![0_u64; terms.len()];
     for disease in &diseases {
@@ -1564,6 +1973,7 @@ fn load_knowledge_from_root(root: &Path) -> Result<HpoKnowledge, String> {
         active_terms,
         phenotypic_abnormality_root,
         diseases,
+        condition_associations,
         information_content,
         disease_gene_association_count: association_count,
     })
@@ -1886,13 +2296,24 @@ fn parse_diseases(
                 .unwrap_or("")
                 .trim()
         };
-        let Some(disease) = diseases.get_mut(value("disease_id")) else {
+        let disease_id = value("disease_id");
+        if disease_id.is_empty() {
             continue;
-        };
+        }
         let symbol = value("gene_symbol");
         if symbol.is_empty() {
             continue;
         }
+        let disease = diseases
+            .entry(disease_id.to_owned())
+            .or_insert_with(|| DiseaseBuilder {
+                id: disease_id.to_owned(),
+                name: disease_id.to_owned(),
+                positive: Vec::new(),
+                negative: Vec::new(),
+                annotations: HashMap::new(),
+                genes: Vec::new(),
+            });
         disease.genes.push(GeneAssociation {
             gene_id: value("ncbi_gene_id").to_owned(),
             symbol: symbol.to_owned(),
@@ -2148,6 +2569,28 @@ fn validate_profile(profile: &PhenotypeProfile, run_id: &str) -> Result<(), Stri
             return Err(format!("invalid label for {}", term.id));
         }
     }
+    for term in &profile.conditions {
+        if !term.id.starts_with("MONDO:")
+            || term.id[6..].is_empty()
+            || !term.id[6..].bytes().all(|byte| byte.is_ascii_digit())
+            || term.label.trim().is_empty()
+            || term.label.len() > 300
+            || term.label.chars().any(char::is_control)
+        {
+            return Err("phenotype profile contains an invalid condition".into());
+        }
+    }
+    if let Some(active) = &profile.active_generation {
+        for name in [&active.evidence_file, &active.catalog_file] {
+            if name.is_empty()
+                || name.len() > 180
+                || name.contains(['/', '\\'])
+                || name.chars().any(char::is_control)
+            {
+                return Err("phenotype profile contains an invalid active generation".into());
+            }
+        }
+    }
     if profile
         .observed
         .len()
@@ -2158,7 +2601,54 @@ fn validate_profile(profile: &PhenotypeProfile, run_id: &str) -> Result<(), Stri
             "a phenotype profile can contain at most {MAX_PROFILE_TERMS} terms"
         ));
     }
+    if let Some(suggestions) = &profile.monarch_suggestions {
+        validate_monarch_suggestions(suggestions)?;
+    }
+    if profile.monarch_error.as_ref().is_some_and(|error| {
+        error.len() > 2_000 || error.chars().any(|character| character.is_control())
+    }) {
+        return Err("phenotype profile contains an invalid Monarch error".into());
+    }
     ensure_exactly_disjoint(&profile.observed, &profile.excluded)
+}
+
+fn validate_monarch_suggestions(suggestions: &MonarchGeneRanking) -> Result<(), String> {
+    if suggestions.genes.len() > 100
+        || suggestions.provider.trim().is_empty()
+        || suggestions.provider.len() > 200
+        || !suggestions.provider_url.starts_with("https://")
+        || suggestions.provider_url.len() > 1_000
+        || suggestions.metric.len() > 300
+        || suggestions.generated_at.len() > 100
+        || suggestions
+            .provider
+            .chars()
+            .chain(suggestions.provider_url.chars())
+            .chain(suggestions.metric.chars())
+            .chain(suggestions.generated_at.chars())
+            .any(char::is_control)
+    {
+        return Err("phenotype profile contains invalid Monarch suggestions".into());
+    }
+    for (index, gene) in suggestions.genes.iter().enumerate() {
+        if gene.rank != index + 1
+            || gene.gene_id.trim().is_empty()
+            || gene.gene_id.len() > 100
+            || gene.symbol.trim().is_empty()
+            || gene.symbol.len() > 100
+            || gene.name.len() > 300
+            || !gene.score.is_finite()
+            || gene
+                .gene_id
+                .chars()
+                .chain(gene.symbol.chars())
+                .chain(gene.name.chars())
+                .any(char::is_control)
+        {
+            return Err("phenotype profile contains invalid Monarch suggestions".into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_hpo_id(id: &str) -> Result<(), String> {
@@ -2185,6 +2675,221 @@ fn profile_path(runs: &Path, run_id: &str) -> PathBuf {
         .join("phenotypes.json")
 }
 
+pub(crate) fn packaged_assets(
+    runs: &Path,
+    run_id: &str,
+) -> Result<Vec<(String, &'static str, PathBuf)>, String> {
+    let profile_file = profile_path(runs, run_id);
+    if !profile_file.is_file() {
+        return Ok(Vec::new());
+    }
+    let profile_bytes = fs::read(&profile_file)
+        .map_err(|error| format!("cannot read phenotype profile: {error}"))?;
+    let profile = load(runs, run_id)?;
+    let Some(active) = profile.active_generation.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let root = profile_file
+        .parent()
+        .ok_or("phenotype profile has no directory")?;
+    let evidence = root.join(&active.evidence_file);
+    let catalog = root.join(&active.catalog_file);
+    let catalog_bytes = fs::read(&catalog)
+        .map_err(|error| format!("cannot read phenotype field catalog: {error}"))?;
+    validate_portable_metadata(
+        &profile_bytes,
+        &catalog_bytes,
+        run_id,
+        &active.evidence_file,
+        &active.catalog_file,
+        None,
+    )?;
+    if !evidence.is_file() {
+        return Err("active phenotype evidence is missing".into());
+    }
+    let assets = vec![
+        ("phenotypes.json".into(), "phenotype-profile", profile_file),
+        (
+            active.evidence_file.clone(),
+            "phenotype-gene-evidence",
+            evidence,
+        ),
+        (
+            active.catalog_file.clone(),
+            "phenotype-field-catalog",
+            catalog,
+        ),
+    ];
+    Ok(assets)
+}
+
+pub(crate) fn validate_portable_metadata(
+    profile_bytes: &[u8],
+    catalog_bytes: &[u8],
+    run_id: &str,
+    evidence_file: &str,
+    catalog_file: &str,
+    candidate_file: Option<&str>,
+) -> Result<PhenotypeProfile, String> {
+    if candidate_file.is_some() {
+        return Err("phenotype candidate ranking data is no longer supported".into());
+    }
+    if profile_bytes.is_empty() || profile_bytes.len() > MAX_PORTABLE_PROFILE_BYTES as usize {
+        return Err("phenotype profile has an invalid size".into());
+    }
+    if catalog_bytes.is_empty() || catalog_bytes.len() > MAX_PORTABLE_CATALOG_BYTES as usize {
+        return Err("phenotype field catalog has an invalid size".into());
+    }
+    let profile: PhenotypeProfile = serde_json::from_slice(profile_bytes)
+        .map_err(|error| format!("invalid phenotype profile: {error}"))?;
+    validate_profile(&profile, run_id)?;
+    let active = profile
+        .active_generation
+        .as_ref()
+        .ok_or("portable phenotype profile has no active evidence")?;
+    if active.evidence_file != evidence_file
+        || active.catalog_file != catalog_file
+        || active.candidate_evidence_file.is_some()
+    {
+        return Err("phenotype profile does not name the packaged evidence files".into());
+    }
+    if active.fingerprint.len() != 64
+        || !active
+            .fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("phenotype profile has an invalid fingerprint".into());
+    }
+    let short = &active.fingerprint[..16];
+    if active.evidence_file != format!("phenotype-gene-evidence.{short}.parquet")
+        || active.catalog_file != format!("phenotype-field-catalog.{short}.json")
+    {
+        return Err("phenotype generation filenames do not match its fingerprint".into());
+    }
+    let catalog: serde_json::Value = serde_json::from_slice(catalog_bytes)
+        .map_err(|error| format!("invalid phenotype field catalog: {error}"))?;
+    if catalog["schemaVersion"] != 1
+        || catalog["geneEvidenceFile"].as_str() != Some(evidence_file)
+        || !catalog["candidateEvidenceFile"].is_null()
+        || catalog["profileFingerprint"].as_str() != Some(&active.fingerprint)
+        || catalog["algorithmVersion"].as_str() != Some("hpo-lin-query-v4")
+        || catalog["hpoRelease"]
+            .as_str()
+            .is_none_or(|release| release.is_empty() || release.len() > 100)
+        || (!profile.conditions.is_empty()
+            && catalog["mondoRelease"]
+                .as_str()
+                .is_none_or(|release| release.is_empty() || release.len() > 100))
+    {
+        return Err("phenotype field catalog does not match its profile".into());
+    }
+    Ok(profile)
+}
+
+pub(crate) fn install_portable_group(
+    runs: &Path,
+    run_id: &str,
+    profile_file: &Path,
+    evidence_file: &Path,
+    catalog_file: &Path,
+    candidate_file: Option<&Path>,
+) -> Result<(), String> {
+    let profile_bytes = fs::read(profile_file)
+        .map_err(|error| format!("cannot read phenotype profile: {error}"))?;
+    let catalog_bytes = fs::read(catalog_file)
+        .map_err(|error| format!("cannot read phenotype field catalog: {error}"))?;
+    let profile = validate_portable_metadata(
+        &profile_bytes,
+        &catalog_bytes,
+        run_id,
+        evidence_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("phenotype evidence has an invalid filename")?,
+        catalog_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("phenotype field catalog has an invalid filename")?,
+        candidate_file
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or("phenotype candidate evidence has an invalid filename")
+            })
+            .transpose()?,
+    )?;
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .prepare(
+            "SELECT gene_id, gene_symbol, scope, source_id, field_path, value_type,
+                    string_value, integer_value, number_value, boolean_value, json_value
+             FROM read_parquet(?) LIMIT 0",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query(params![evidence_file.to_string_lossy().as_ref()])
+                .map(|_| ())
+        })
+        .map_err(|error| format!("invalid phenotype gene evidence: {error}"))?;
+    let root = profile_path(runs, run_id)
+        .parent()
+        .ok_or("phenotype profile has no directory")?
+        .to_path_buf();
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("cannot create phenotype result directory: {error}"))?;
+    let active = profile.active_generation.as_ref().unwrap();
+    let evidence_target = root.join(&active.evidence_file);
+    let catalog_target = root.join(&active.catalog_file);
+    copy_portable_file(evidence_file, &evidence_target)?;
+    if let Err(error) = copy_portable_file(catalog_file, &catalog_target) {
+        let _ = fs::remove_file(&evidence_target);
+        return Err(error);
+    }
+    if let Err(error) =
+        super::library_metadata::atomic_write(&profile_path(runs, run_id), &profile_bytes)
+    {
+        let _ = fs::remove_file(&evidence_target);
+        let _ = fs::remove_file(&catalog_target);
+        return Err(error);
+    }
+    let _ = fs::remove_file(profile_file);
+    Ok(())
+}
+
+fn copy_portable_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("portable phenotype file has an invalid filename")?;
+    let temporary =
+        destination.with_file_name(format!(".{filename}.import-part-{}", std::process::id()));
+    let result = (|| {
+        let mut input = BufReader::new(
+            File::open(source)
+                .map_err(|error| format!("cannot open imported phenotype file: {error}"))?,
+        );
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("cannot stage imported phenotype file: {error}"))?;
+        std::io::copy(&mut input, &mut output)
+            .map_err(|error| format!("cannot copy imported phenotype file: {error}"))?;
+        output
+            .sync_all()
+            .map_err(|error| format!("cannot flush imported phenotype file: {error}"))?;
+        drop(output);
+        super::library_metadata::publish_atomic_file(&temporary, destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    } else {
+        let _ = fs::remove_file(source);
+    }
+    result
+}
+
 fn embedded_asset_manifest() -> Result<HpoAssetManifest, String> {
     let manifest: HpoAssetManifest =
         serde_json::from_str(annocat_core::source_catalog::resource_manifest_json("hpo")?)
@@ -2205,7 +2910,7 @@ fn validate_asset_manifest(manifest: &HpoAssetManifest) -> Result<(), String> {
     if manifest.schema_version != 1
         || !valid_hpo_release_version(&manifest.release)
         || manifest.release_url != release_url
-        || manifest.assets.len() != 3
+        || !matches!(manifest.assets.len(), 3 | 4)
         || manifest.assets.iter().any(|asset| {
             asset.kind.trim().is_empty()
                 || asset.filename.contains(['/', '\\'])
@@ -2230,6 +2935,36 @@ fn validate_asset_manifest(manifest: &HpoAssetManifest) -> Result<(), String> {
                 "HPO asset manifest is missing the official {filename} release asset"
             ));
         }
+    }
+    match (
+        manifest.mondo_release.as_deref(),
+        manifest.mondo_release_url.as_deref(),
+    ) {
+        (None, None) if manifest.assets.len() == 3 => {}
+        (Some(release), Some(release_url))
+            if valid_hpo_release_version(release) && manifest.assets.len() == 4 =>
+        {
+            let tag = format!("v{release}");
+            if release_url
+                != format!("https://github.com/monarch-initiative/mondo/releases/tag/{tag}")
+            {
+                return Err("MONDO release metadata failed validation".into());
+            }
+            let matching = manifest
+                .assets
+                .iter()
+                .filter(|asset| {
+                    asset.kind == "condition-ontology" && asset.filename == "mondo.json"
+                })
+                .collect::<Vec<_>>();
+            let expected_url = format!(
+                "https://github.com/monarch-initiative/mondo/releases/download/{tag}/mondo.json"
+            );
+            if matching.len() != 1 || matching[0].url != expected_url {
+                return Err("phenotype knowledge is missing the official MONDO asset".into());
+            }
+        }
+        _ => return Err("MONDO release metadata is incomplete".into()),
     }
     Ok(())
 }
@@ -2322,6 +3057,8 @@ fn parse_github_release(bytes: &[u8]) -> Result<HpoAssetManifest, String> {
         schema_version: 1,
         release: version,
         release_url: release.html_url,
+        mondo_release: None,
+        mondo_release_url: None,
         assets,
     };
     validate_asset_manifest(&manifest)?;
@@ -2353,7 +3090,20 @@ pub(crate) fn resolve_latest_asset_manifest() -> Result<HpoAssetManifest, String
     if bytes.len() as u64 > MAX_RELEASE_METADATA_BYTES {
         return Err("the HPO release metadata exceeded its safety limit".into());
     }
-    parse_github_release(&bytes)
+    let mut manifest = parse_github_release(&bytes)?;
+    let mondo = crate::mondo::resolve_latest_asset_manifest()?;
+    let asset = mondo.asset();
+    manifest.mondo_release = Some(mondo.release().to_owned());
+    manifest.mondo_release_url = Some(mondo.release_url().to_owned());
+    manifest.assets.push(HpoAsset {
+        kind: asset.kind.clone(),
+        filename: asset.filename.clone(),
+        url: asset.url.clone(),
+        bytes: asset.bytes,
+        sha256: asset.sha256.clone(),
+    });
+    validate_asset_manifest(&manifest)?;
+    Ok(manifest)
 }
 
 fn download_asset(
@@ -2471,12 +3221,7 @@ fn verified_asset(path: &Path, asset: &HpoAsset) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    if verify_sha256(path, &asset.sha256).is_ok() {
-        return Ok(true);
-    }
-    fs::remove_file(path)
-        .map_err(|error| format!("cannot discard corrupt {}: {error}", asset.filename))?;
-    Ok(false)
+    Ok(verify_sha256(path, &asset.sha256).is_ok())
 }
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
@@ -2629,6 +3374,7 @@ mod tests {
             phenotypic_abnormality_root: 0,
             terms,
             diseases: Vec::new(),
+            condition_associations: Vec::new(),
             information_content: vec![0.0, 2.0, 2.0, 2.0, 3.0, 0.0],
             disease_gene_association_count: 0,
         }
@@ -2791,6 +3537,8 @@ mod tests {
                 release_url: format!(
                     "https://github.com/obophenotype/human-phenotype-ontology/releases/tag/{tag}"
                 ),
+                mondo_release: None,
+                mondo_release_url: None,
                 assets,
             };
             fs::write(
@@ -2808,6 +3556,8 @@ mod tests {
                     term_count: 1,
                     disease_count: 1,
                     disease_gene_association_count: 1,
+                    mondo_release: None,
+                    mondo_term_count: 0,
                 })
                 .unwrap(),
             )
@@ -2836,6 +3586,8 @@ mod tests {
             schema_version: 1,
             release: "test".into(),
             release_url: "https://example.test".into(),
+            mondo_release: None,
+            mondo_release_url: None,
             assets: vec![HpoAsset {
                 kind: "test".into(),
                 filename: "asset.txt".into(),
@@ -2845,6 +3597,12 @@ mod tests {
             }],
         };
         assert!(!verified_installation(&root, &manifest));
+        assert!(!verified_asset(&root.join("raw").join("asset.txt"), &manifest.assets[0]).unwrap());
+        assert_eq!(
+            fs::read(root.join("raw").join("asset.txt")).unwrap(),
+            b"abd",
+            "a rolling update must keep the installed asset until its replacement is verified"
+        );
         fs::write(root.join("raw").join("asset.txt"), b"abc").unwrap();
         assert!(verified_installation(&root, &manifest));
         fs::remove_dir_all(root).unwrap();
@@ -2853,21 +3611,8 @@ mod tests {
     #[test]
     fn patient_to_disease_similarity_prefers_the_better_query_match() {
         let knowledge = test_knowledge();
-        let report = HashMap::new();
-        let matching = rank_disease(
-            &knowledge,
-            &disease("matching", &[1, 2]),
-            &[1, 2],
-            &[],
-            &report,
-        );
-        let partial = rank_disease(
-            &knowledge,
-            &disease("partial", &[1, 3]),
-            &[1, 2],
-            &[],
-            &report,
-        );
+        let matching = rank_disease(&knowledge, &disease("matching", &[1, 2]), &[1, 2], &[]);
+        let partial = rank_disease(&knowledge, &disease("partial", &[1, 3]), &[1, 2], &[]);
         assert!(matching.phenotype_score > partial.phenotype_score);
         assert_eq!(matching.query_coverage, 100.0);
     }
@@ -2875,13 +3620,11 @@ mod tests {
     #[test]
     fn unrecorded_disease_findings_do_not_lower_an_exact_query_match() {
         let knowledge = test_knowledge();
-        let report = HashMap::new();
         let ranked = rank_disease(
             &knowledge,
             &disease("exact-with-additional-findings", &[1, 2, 3]),
             &[1],
             &[],
-            &report,
         );
         assert_eq!(ranked.phenotype_score, 100.0);
         assert_eq!(ranked.query_coverage, 100.0);
@@ -2890,10 +3633,9 @@ mod tests {
     #[test]
     fn explicitly_absent_terms_are_reported_separately_from_similarity() {
         let knowledge = test_knowledge();
-        let report = HashMap::new();
         let profile = disease("conflict", &[1, 2]);
-        let without_absent = rank_disease(&knowledge, &profile, &[1], &[], &report);
-        let with_absent = rank_disease(&knowledge, &profile, &[1], &[2], &report);
+        let without_absent = rank_disease(&knowledge, &profile, &[1], &[]);
+        let with_absent = rank_disease(&knowledge, &profile, &[1], &[2]);
         assert_eq!(with_absent.phenotype_score, without_absent.phenotype_score);
         assert_eq!(with_absent.conflict_score, 100.0);
         assert!(!with_absent.conflict_frequency_complete);
@@ -2902,7 +3644,6 @@ mod tests {
     #[test]
     fn absent_feature_conflict_respects_reported_disease_frequency() {
         let knowledge = test_knowledge();
-        let report = HashMap::new();
         let mut profile = disease("frequency-weighted-conflict", &[1, 2]);
         profile.annotations.insert(
             2,
@@ -2911,55 +3652,9 @@ mod tests {
                 ..DiseasePhenotypeContext::default()
             },
         );
-        let ranked = rank_disease(&knowledge, &profile, &[1], &[2], &report);
+        let ranked = rank_disease(&knowledge, &profile, &[1], &[2]);
         assert!((ranked.conflict_score - 17.0).abs() < f64::EPSILON);
         assert!(ranked.conflict_frequency_complete);
-    }
-
-    #[test]
-    fn report_overlap_requires_a_mendelian_gene_disease_association() {
-        let overlap = ReportGeneOverlap {
-            symbol: "GENE1".into(),
-            variant_count: 1,
-            pass_count: 1,
-            high_impact_count: 1,
-            moderate_impact_count: 0,
-            tier: 4,
-            tier_label: report_overlap_label(4).into(),
-        };
-        let report = HashMap::from([("GENE1".into(), overlap)]);
-        let mut profile = disease("association-types", &[1]);
-        profile.genes = vec![GeneAssociation {
-            gene_id: "NCBIGene:1".into(),
-            symbol: "GENE1".into(),
-            association_type: "POLYGENIC".into(),
-            source: "test".into(),
-        }];
-        assert!(!disease_report_overlap(&profile, &report).has_overlap);
-        profile.genes[0].association_type = "MENDELIAN".into();
-        assert!(disease_report_overlap(&profile, &report).has_overlap);
-    }
-
-    #[test]
-    fn candidate_report_support_requires_pass_and_moderate_or_high_effect() {
-        let overlap = |symbol: &str, tier: u8| ReportGeneOverlap {
-            symbol: symbol.into(),
-            variant_count: 1,
-            pass_count: u64::from(tier >= 2),
-            high_impact_count: u64::from(tier == 4),
-            moderate_impact_count: u64::from(tier == 3),
-            tier,
-            tier_label: report_overlap_label(tier).into(),
-        };
-        let candidates = candidate_report_overlap_by_gene(&[
-            overlap("FAILED", 1),
-            overlap("PASS_ONLY", 2),
-            overlap("MODERATE", 3),
-            overlap("HIGH", 4),
-        ]);
-        assert_eq!(candidates.len(), 2);
-        assert!(candidates.contains_key("MODERATE"));
-        assert!(candidates.contains_key("HIGH"));
     }
 
     #[test]
@@ -2988,6 +3683,105 @@ mod tests {
         assert_eq!(genes[0].name, "Gene one");
         assert_eq!(genes[1].rank, 2);
         assert_eq!(genes[1].name, "GENE2");
+    }
+
+    #[test]
+    fn monarch_suggestions_require_safe_ordered_provider_data() {
+        let mut suggestions = MonarchGeneRanking {
+            provider: "Monarch Initiative".into(),
+            provider_url: "https://monarchinitiative.org/".into(),
+            metric: "Ancestor information content, bidirectional".into(),
+            generated_at: "2026-07-31T00:00:00Z".into(),
+            result_limit: 50,
+            genes: vec![MonarchRankedGene {
+                rank: 1,
+                gene_id: "HGNC:1".into(),
+                symbol: "GENE1".into(),
+                name: "Gene one".into(),
+                score: 0.91,
+            }],
+        };
+        assert!(validate_monarch_suggestions(&suggestions).is_ok());
+        suggestions.provider_url = "javascript:alert(1)".into();
+        assert!(validate_monarch_suggestions(&suggestions).is_err());
+    }
+
+    #[test]
+    fn clearing_a_profile_removes_its_active_generation() {
+        let runs = std::env::temp_dir().join(format!(
+            "annocat-hpo-clear-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = runs.join(".annocat-library").join("run-1");
+        fs::create_dir_all(&root).unwrap();
+        let evidence = root.join("phenotype-gene-evidence.test.parquet");
+        let catalog = root.join("phenotype-field-catalog.test.json");
+        fs::write(&evidence, b"evidence").unwrap();
+        fs::write(&catalog, b"catalog").unwrap();
+        let mut profile = empty_profile("run-1");
+        profile.active_generation = Some(PhenotypeGeneration {
+            fingerprint: "test".into(),
+            evidence_file: evidence.file_name().unwrap().to_string_lossy().into_owned(),
+            catalog_file: catalog.file_name().unwrap().to_string_lossy().into_owned(),
+            matched_gene_count: None,
+            candidate_evidence_file: None,
+        });
+        save(&runs, &profile).unwrap();
+
+        update(
+            &runs,
+            &runs,
+            "run-1",
+            ProfileUpdate {
+                action: "clear".into(),
+                observed: Vec::new(),
+                excluded: Vec::new(),
+                conditions: Vec::new(),
+                limit_to_linked_genes: false,
+                request_monarch_suggestions: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!profile_path(&runs, "run-1").exists());
+        assert!(!evidence.exists());
+        assert!(!catalog.exists());
+        fs::remove_dir_all(runs).unwrap();
+    }
+
+    #[test]
+    fn loading_a_profile_invalidates_legacy_candidate_evidence() {
+        let runs = std::env::temp_dir().join(format!(
+            "annocat-hpo-stale-candidates-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = runs.join(".annocat-library").join("run-1");
+        fs::create_dir_all(&root).unwrap();
+        let mut profile = empty_profile("run-1");
+        profile.active_generation = Some(PhenotypeGeneration {
+            fingerprint: "test".into(),
+            evidence_file: "phenotype-gene-evidence.test.parquet".into(),
+            catalog_file: "phenotype-field-catalog.test.json".into(),
+            matched_gene_count: None,
+            candidate_evidence_file: None,
+        });
+        let mut value = serde_json::to_value(profile).unwrap();
+        value["activeGeneration"]["candidateEvidenceFile"] =
+            "phenotype-candidate-evidence.test.parquet".into();
+        fs::write(
+            profile_path(&runs, "run-1"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+
+        assert!(load(&runs, "run-1").unwrap().active_generation.is_none());
+        fs::remove_dir_all(runs).unwrap();
     }
 
     #[test]
@@ -3036,113 +3830,272 @@ mod tests {
     }
 
     #[test]
-    fn report_overlap_uses_exact_carried_alt_literal_pass_and_representative_effect() {
+    fn phenotype_catalog_exposes_only_the_composite_column() {
         let root = std::env::temp_dir().join(format!(
-            "annocat-hpo-filter-test-{}",
-            std::time::SystemTime::now()
+            "annocat-hpo-catalog-{}",
+            SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let parquet = root.join("variants.parquet");
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                r#"CREATE TABLE variants(
-                    allele_id VARCHAR,
-                    gene_symbol VARCHAR,
-                    filter VARCHAR,
-                    impact VARCHAR,
-                    alt_index INTEGER,
-                    format VARCHAR,
-                    samples_json VARCHAR,
-                    record_number UBIGINT
-                 );
-                 INSERT INTO variants VALUES
-                    ('allele-1', 'GENE1', 'PASS', 'HIGH', 1, 'GT', '[{"name":"CASE","value":"0/1"}]', 1),
-                    ('allele-2', 'GENE1', 'PASS', 'HIGH', 2, 'GT', '[{"name":"CASE","value":"0/1"}]', 1),
-                    ('allele-3', 'GENE1', '.', 'HIGH', 1, 'GT', '[{"name":"CASE","value":"0/1"}]', 2),
-                    ('allele-4', 'GENE1', 'LowQual', 'MODERATE', 1, 'GT', '[{"name":"CASE","value":"0/1"}]', 3),
-                    ('allele-5', 'GENE1', 'pass', 'MODERATE', 1, 'GT', '[{"name":"CASE","value":"0/1"}]', 4);"#,
-            )
+        let path = root.join("phenotype-field-catalog.test.json");
+        write_gene_catalog(
+            &path,
+            "phenotype-gene-evidence.test.parquet",
+            "test",
+            "hpo-test",
+            Some("mondo-test"),
+            "test",
+            "https://example.test",
+        )
+        .unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let fields = catalog["fields"].as_array().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|field| field["selectable"] == true)
+                .map(|field| field["fieldPath"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["phenotypeRelevance"]
+        );
+        assert!(
+            fields
+                .iter()
+                .filter(|field| field["fieldPath"] != "phenotypeRelevance")
+                .all(|field| field["selectable"] == false)
+        );
+        let composite = fields
+            .iter()
+            .find(|field| field["fieldPath"] == "phenotypeRelevance")
             .unwrap();
-        let destination = parquet
-            .to_string_lossy()
-            .replace('\\', "/")
-            .replace('\'', "''");
-        connection
-            .execute_batch(&format!(
-                "COPY variants TO '{destination}' (FORMAT PARQUET)"
-            ))
-            .unwrap();
-        let consequences = root.join("consequences.parquet");
-        connection
-            .execute_batch(
-                "CREATE TABLE consequences(allele_id VARCHAR, gene_symbol VARCHAR, impact VARCHAR);
-                 INSERT INTO consequences VALUES ('allele-1', 'GENE2', 'MODERATE');",
-            )
-            .unwrap();
-        let consequence_destination = consequences
-            .to_string_lossy()
-            .replace('\\', "/")
-            .replace('\'', "''");
-        connection
-            .execute_batch(&format!(
-                "COPY consequences TO '{consequence_destination}' (FORMAT PARQUET)"
-            ))
-            .unwrap();
-        let genes =
-            report_gene_overlap_summary(&root, "run-1", &parquet, Some(&consequences), "CASE")
-                .unwrap();
-        assert_eq!(genes.len(), 1);
-        let summary_gene = genes.iter().find(|gene| gene.symbol == "GENE1").unwrap();
-        assert_eq!(summary_gene.variant_count, 4);
-        assert_eq!(summary_gene.pass_count, 1);
-        assert_eq!(summary_gene.high_impact_count, 1);
-        assert_eq!(summary_gene.moderate_impact_count, 0);
-        assert!(genes.iter().all(|gene| gene.symbol != "GENE2"));
+        assert!(
+            composite["presentationDependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "phenotypeEvidenceDetails")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn multisample_reports_require_an_explicit_patient_sample() {
+    fn condition_only_links_do_not_create_a_similarity_score() {
         let root = std::env::temp_dir().join(format!(
-            "annocat-hpo-sample-test-{}",
-            std::time::SystemTime::now()
+            "annocat-hpo-gene-evidence-{}",
+            SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let parquet = root.join("variants.parquet");
+        let path = root.join("gene-evidence.parquet");
+        let ranking = PhenotypeRanking {
+            algorithm_version: default_phenotype_algorithm_version(),
+            provider: "Human Phenotype Ontology".into(),
+            provider_url: "https://hpo.jax.org/".into(),
+            hpo_release: "test".into(),
+            metric: "test".into(),
+            score_interpretation: String::new(),
+            generated_at: String::new(),
+            evaluated_diseases: 1,
+            sample_name: None,
+            report_gene_count: 1,
+            online_enrichment: None,
+            online_error: None,
+            diseases: vec![RankedDisease {
+                phenotype_rank: 1,
+                disease_id: "OMIM:1".into(),
+                disease_name: "Example condition".into(),
+                phenotype_score: 0.0,
+                query_coverage: 0.0,
+                conflict_score: 0.0,
+                conflict_frequency_complete: true,
+                matched_phenotypes: Vec::new(),
+                genes: vec![GeneAssociation {
+                    gene_id: "1".into(),
+                    symbol: "GENE1".into(),
+                    association_type: "MENDELIAN".into(),
+                    source: "HPO".into(),
+                }],
+                report_overlap: DiseaseReportOverlap::default(),
+            }],
+        };
+        let condition_matches = HashMap::from([(
+            "OMIM:1".into(),
+            vec![crate::mondo::DiseaseConditionMatch {
+                selected_id: "MONDO:0000001".into(),
+                selected_label: "Selected condition".into(),
+                matched_id: "MONDO:0000001".into(),
+                matched_label: "Selected condition".into(),
+                relation: "Exact condition",
+            }],
+        )]);
+        write_gene_evidence(
+            &path,
+            &[("GENE1".into(), "ENSG1".into())],
+            false,
+            &condition_matches,
+            &ranking,
+        )
+        .unwrap();
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                r#"CREATE TABLE variants(sample_names_json VARCHAR);
-                   INSERT INTO variants VALUES ('["CASE","MOTHER"]');"#,
+        let parquet = path.to_string_lossy();
+        let profile_link: bool = connection
+            .query_row(
+                "SELECT boolean_value FROM read_parquet(?) WHERE field_path='profileLinked'",
+                params![parquet.as_ref()],
+                |row| row.get(0),
             )
             .unwrap();
-        let destination = parquet
-            .to_string_lossy()
-            .replace('\\', "/")
-            .replace('\'', "''");
-        connection
-            .execute_batch(&format!(
-                "COPY variants TO '{destination}' (FORMAT PARQUET)"
-            ))
+        let condition_matches: i64 = connection
+            .query_row(
+                "SELECT integer_value FROM read_parquet(?) WHERE field_path='selectedConditionMatches'",
+                params![parquet.as_ref()],
+                |row| row.get(0),
+            )
             .unwrap();
+        let condition_label: String = connection
+            .query_row(
+                "SELECT string_value FROM read_parquet(?) WHERE field_path='matchedSelectedConditions'",
+                params![parquet.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let relevance_count: i64 = connection
+            .query_row(
+                "SELECT count(number_value) FROM read_parquet(?) WHERE field_path='phenotypeRelevance'",
+                params![parquet.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(profile_link);
+        assert_eq!(condition_matches, 1);
+        assert_eq!(condition_label, "MONDO:0000001 Selected condition");
+        assert_eq!(relevance_count, 0);
+        assert_eq!(phenotype_matched_gene_count(&path).unwrap(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        assert_eq!(
-            report_sample_names(&parquet).unwrap(),
-            vec!["CASE".to_owned(), "MOTHER".to_owned()]
-        );
-        assert_eq!(resolve_sample_name(&parquet, None).unwrap(), None);
-        assert_eq!(
-            resolve_sample_name(&parquet, Some("CASE")).unwrap(),
-            Some("CASE".to_owned())
-        );
-        assert!(resolve_sample_name(&parquet, Some("UNKNOWN")).is_err());
+    #[test]
+    fn gene_evidence_uses_association_types_for_their_documented_purpose() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-hpo-association-types-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("gene-evidence.parquet");
+        let ranking = PhenotypeRanking {
+            algorithm_version: default_phenotype_algorithm_version(),
+            provider: "Human Phenotype Ontology".into(),
+            provider_url: "https://hpo.jax.org/".into(),
+            hpo_release: "test".into(),
+            metric: "test".into(),
+            score_interpretation: String::new(),
+            generated_at: String::new(),
+            evaluated_diseases: 1,
+            sample_name: None,
+            report_gene_count: 3,
+            online_enrichment: None,
+            online_error: None,
+            diseases: vec![RankedDisease {
+                phenotype_rank: 1,
+                disease_id: "OMIM:1".into(),
+                disease_name: "Example condition".into(),
+                phenotype_score: 80.0,
+                query_coverage: 100.0,
+                conflict_score: 0.0,
+                conflict_frequency_complete: true,
+                matched_phenotypes: vec![PhenotypeMatch {
+                    query: PhenotypeTerm {
+                        id: "HP:0001250".into(),
+                        label: "Seizure".into(),
+                    },
+                    disease_term: PhenotypeTerm {
+                        id: "HP:0001250".into(),
+                        label: "Seizure".into(),
+                    },
+                    similarity: 1.0,
+                    direct: true,
+                    disease_annotation: None,
+                }],
+                genes: vec![
+                    GeneAssociation {
+                        gene_id: "1".into(),
+                        symbol: "MENDEL".into(),
+                        association_type: "MENDELIAN".into(),
+                        source: "HPO".into(),
+                    },
+                    GeneAssociation {
+                        gene_id: "2".into(),
+                        symbol: "POLY".into(),
+                        association_type: "POLYGENIC".into(),
+                        source: "HPO".into(),
+                    },
+                    GeneAssociation {
+                        gene_id: "3".into(),
+                        symbol: "UNKNOWN".into(),
+                        association_type: "UNKNOWN".into(),
+                        source: "HPO".into(),
+                    },
+                ],
+                report_overlap: DiseaseReportOverlap::default(),
+            }],
+        };
+        let condition_matches = HashMap::from([(
+            "OMIM:1".into(),
+            vec![crate::mondo::DiseaseConditionMatch {
+                selected_id: "MONDO:0000001".into(),
+                selected_label: "Selected condition".into(),
+                matched_id: "MONDO:0000001".into(),
+                matched_label: "Selected condition".into(),
+                relation: "Exact condition",
+            }],
+        )]);
+        write_gene_evidence(
+            &path,
+            &[
+                ("MENDEL".into(), "ENSG1".into()),
+                ("POLY".into(), "ENSG2".into()),
+                ("UNKNOWN".into(), "ENSG3".into()),
+            ],
+            true,
+            &condition_matches,
+            &ranking,
+        )
+        .unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        let parquet = path.to_string_lossy();
+        let boolean = |symbol: &str, field: &str| -> bool {
+            connection
+                .query_row(
+                    "SELECT boolean_value FROM read_parquet(?)
+                     WHERE gene_symbol=? AND field_path=?",
+                    params![parquet.as_ref(), symbol, field],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let integer = |symbol: &str, field: &str| -> i64 {
+            connection
+                .query_row(
+                    "SELECT integer_value FROM read_parquet(?)
+                     WHERE gene_symbol=? AND field_path=?",
+                    params![parquet.as_ref(), symbol, field],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(boolean("MENDEL", "observedFeatureLinked"));
+        assert!(!boolean("POLY", "observedFeatureLinked"));
+        assert!(!boolean("UNKNOWN", "observedFeatureLinked"));
+        assert_eq!(integer("MENDEL", "selectedConditionMatches"), 1);
+        assert_eq!(integer("POLY", "selectedConditionMatches"), 1);
+        assert_eq!(integer("UNKNOWN", "selectedConditionMatches"), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3169,12 +4122,13 @@ mod tests {
         .unwrap();
         fs::write(
             raw.join("genes_to_disease.txt"),
-            "ncbi_gene_id\tgene_symbol\tassociation_type\tdisease_id\tsource\nNCBIGene:1\tGENE1\tMENDELIAN\tOMIM:1\ttest\n",
+            "ncbi_gene_id\tgene_symbol\tassociation_type\tdisease_id\tsource\nNCBIGene:1\tGENE1\tMENDELIAN\tOMIM:1\ttest\nNCBIGene:2\tGENE2\tMENDELIAN\tOMIM:2\ttest\n",
         )
         .unwrap();
         let knowledge = load_knowledge_from_root(&root).unwrap();
         assert_eq!(knowledge.active_terms.len(), 2);
         assert_eq!(knowledge.diseases.len(), 1);
+        assert_eq!(knowledge.condition_associations.len(), 2);
         assert_eq!(knowledge.diseases[0].positive.len(), 1);
         assert_eq!(
             knowledge.terms[knowledge.diseases[0].positive[0]].id,

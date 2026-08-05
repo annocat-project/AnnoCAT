@@ -13,6 +13,8 @@ static PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static BATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 const PERFORMANCE_FILE: &str = "annotation-performance.json";
 const PERFORMANCE_PROFILE_ENV: &str = "ANNOCAT_PROFILE_ANNOTATION";
+const CHECKPOINT_SCHEMA_VERSION: u16 = 2;
+const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v1";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -26,6 +28,8 @@ pub enum RunMode {
 #[serde(rename_all = "camelCase")]
 pub struct AnnotationRequest {
     pub input: PathBuf,
+    #[serde(default)]
+    pub requested_profile: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -60,6 +64,8 @@ impl AnnotationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BatchAnnotationRequest {
     pub inputs: Vec<PathBuf>,
+    #[serde(default)]
+    pub requested_profile: Option<String>,
     #[serde(default)]
     pub output_directory: Option<PathBuf>,
     #[serde(default)]
@@ -130,6 +136,12 @@ struct SourceBinding {
     osa_schema_version: u16,
     cache_builder_contract: String,
     chromosomes: Vec<String>,
+}
+
+#[derive(Clone, Default)]
+struct RecoveryIdentity {
+    input_content_sha256: Option<String>,
+    execution_contract_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -396,6 +408,8 @@ struct AnnotationCheckpoint {
     run_id: String,
     name: String,
     input: PathBuf,
+    #[serde(default)]
+    requested_profile: Option<String>,
     source_ids: Vec<String>,
     include_annotated_vcf: bool,
     #[serde(default)]
@@ -404,6 +418,10 @@ struct AnnotationCheckpoint {
     add_local_consequences: bool,
     #[serde(default)]
     confirm_grch38: bool,
+    #[serde(default)]
+    input_content_sha256: Option<String>,
+    #[serde(default)]
+    execution_contract_sha256: Option<String>,
     state: String,
     phase: String,
     detail: String,
@@ -423,6 +441,11 @@ struct AnnotationCheckpoint {
 fn state() -> &'static Mutex<State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(idle_state()))
+}
+
+fn recovery_identity() -> &'static Mutex<RecoveryIdentity> {
+    static IDENTITY: OnceLock<Mutex<RecoveryIdentity>> = OnceLock::new();
+    IDENTITY.get_or_init(|| Mutex::new(RecoveryIdentity::default()))
 }
 
 fn idle_state() -> State {
@@ -554,15 +577,13 @@ pub fn start_recovery_background(
         return Err("an annotation run or batch is already active".into());
     }
     let structured_output = recovery_structured_path(&request);
-    let recovery_name = request.name.clone().or_else(|| {
-        request
-            .partial_vcf
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .map(str::to_owned)
-    });
+    let recovery_name = request
+        .name
+        .clone()
+        .or_else(|| input_display_name(&request.partial_vcf));
     let mut annotation = AnnotationRequest {
         input: request.input,
+        requested_profile: None,
         name: recovery_name,
         output_directory: request.output_directory,
         source_ids: request.source_ids,
@@ -612,6 +633,7 @@ pub fn start_recovery_background(
             &final_directory,
             &request.partial_vcf,
             &structured_output,
+            None,
         );
         finish_background(result, &run_id, &staging_directory, &final_directory, true);
     });
@@ -643,8 +665,13 @@ pub fn resume_background(
     if final_directory.exists() {
         return Err("the completed output directory already exists".into());
     }
+    let expected_recovery_identity = checkpoint
+        .input_content_sha256
+        .clone()
+        .zip(checkpoint.execution_contract_sha256.clone());
     let annotation = AnnotationRequest {
         input: checkpoint.input,
+        requested_profile: checkpoint.requested_profile,
         name: Some(checkpoint.name.clone()),
         output_directory: final_directory.parent().map(Path::to_path_buf),
         source_ids: checkpoint.source_ids,
@@ -656,7 +683,9 @@ pub fn resume_background(
     validate_request(&annotation, &resources)?;
     let partial_vcf = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
-    let recover_partial_output = validate_recovery_files(&partial_vcf, &structured_output).is_ok();
+    let recover_partial_output = checkpoint.schema_version == CHECKPOINT_SCHEMA_VERSION
+        && expected_recovery_identity.is_some()
+        && validate_recovery_files(&partial_vcf, &structured_output).is_ok();
     begin_run_state(
         &annotation,
         &checkpoint.name,
@@ -665,6 +694,9 @@ pub fn resume_background(
         "recovery-scan",
         "Scanning the interrupted fastVEP output",
     )?;
+    if let Some((input_sha256, execution_sha256)) = expected_recovery_identity.as_ref() {
+        store_recovery_identity(input_sha256.clone(), execution_sha256.clone())?;
+    }
     CANCEL.store(false, Ordering::SeqCst);
     PAUSE_REQUESTED.store(false, Ordering::SeqCst);
     let returned_id = run_id.to_owned();
@@ -680,6 +712,7 @@ pub fn resume_background(
                 &final_directory,
                 &partial_vcf,
                 &structured_output,
+                expected_recovery_identity,
             )
         } else {
             let _ = fs::remove_dir_all(&staging);
@@ -740,6 +773,7 @@ pub fn start_batch_background(
         .into_iter()
         .map(|input| AnnotationRequest {
             input,
+            requested_profile: request.requested_profile.clone(),
             name: None,
             output_directory: request.output_directory.clone(),
             source_ids: request.source_ids.clone(),
@@ -904,7 +938,7 @@ pub fn run_blocking(
             "completed" => {
                 return current
                     .output
-                    .ok_or("completed run has no output path".into());
+                    .ok_or("AnnoCAT result has no output path".into());
             }
             "failed" => return Err(current.error.unwrap_or(current.detail)),
             "cancelled" => return Err("annotation was cancelled".into()),
@@ -913,14 +947,20 @@ pub fn run_blocking(
     }
 }
 
-fn validate_request(request: &AnnotationRequest, resources: &Path) -> Result<(), String> {
+pub(crate) fn validate_request(
+    request: &AnnotationRequest,
+    resources: &Path,
+) -> Result<(), String> {
     if !request.input.is_file() {
         return Err(format!("input VCF is missing: {}", request.input.display()));
     }
     validate_source_ids(&request.source_ids)?;
-    let assembly = annocat_core::vcf::declared_assembly(&request.input)?;
-    super::annotation_input::validate_declared_assembly(assembly.as_deref())?;
-    if assembly.is_none() && !request.confirm_grch38 {
+    let input = annocat_core::vcf::inspect_header(&request.input)?;
+    if !input.has_records {
+        return Err("the input VCF contains no variant records".into());
+    }
+    super::annotation_input::validate_declared_assembly(input.assembly.as_deref())?;
+    if input.assembly.is_none() && !request.confirm_grch38 {
         return Err(
             "the VCF header does not identify its genome build; confirm that it uses GRCh38".into(),
         );
@@ -962,6 +1002,9 @@ fn begin_run_state(
     phase: &'static str,
     detail: &str,
 ) -> Result<(), String> {
+    *recovery_identity()
+        .lock()
+        .map_err(|_| "annotation recovery identity lock failed")? = RecoveryIdentity::default();
     let mut current = state().lock().map_err(|_| "annotation state lock failed")?;
     if current.state == "running" {
         return Err("an annotation run is already active".into());
@@ -1107,6 +1150,7 @@ fn execute(
         0,
         0,
         0,
+        None,
         performance.diagnostic_profiling,
     )?;
     performance.record(fastvep_performance);
@@ -1197,7 +1241,7 @@ fn execute_vcf_review(
         current.total_records = canonical.records;
         current.percent = 85.0;
     }
-    set_phase("indexing-evidence", "Creating the report field catalog");
+    set_phase("indexing-evidence", "Preparing result fields");
     let consequences = staging.join("consequences.parquet");
     let evidence = staging.join("evidence.parquet");
     let field_catalog = staging.join("field-catalog.json");
@@ -1207,7 +1251,7 @@ fn execute_vcf_review(
         return fail_staging(staging, error);
     }
 
-    set_phase("publishing", "Verifying the VCF review");
+    set_phase("publishing", "Verifying the AnnoCAT result");
     if let Err(error) = super::results::validate_report_tables_allow_empty_consequences(
         &parquet,
         &consequences,
@@ -1220,7 +1264,7 @@ fn execute_vcf_review(
 
     prepare_report_indexes(run_id, &parquet, &consequences, &evidence)?;
     check_cancel(staging)?;
-    set_phase("publishing", "Publishing the VCF review");
+    set_phase("publishing", "Saving the AnnoCAT result");
 
     let result_bytes = file_bytes(&parquet)?;
     let consequences_bytes = file_bytes(&consequences)?;
@@ -1230,12 +1274,17 @@ fn execute_vcf_review(
         .checked_add(consequences_bytes)
         .and_then(|bytes| bytes.checked_add(evidence_bytes))
         .and_then(|bytes| bytes.checked_add(field_catalog_bytes))
-        .ok_or("canonical result size overflow")?;
+        .ok_or("AnnoCAT result size overflow")?;
     let assembly_source = if request.confirm_grch38 {
         "user-confirmed"
     } else {
         "vcf-header"
     };
+    let input_name = request
+        .input
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("input.vcf");
     let mut manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
@@ -1263,7 +1312,12 @@ fn execute_vcf_review(
         "consequencesFile": "consequences.parquet",
         "evidenceFile": "evidence.parquet",
         "fieldCatalogFile": "field-catalog.json",
-        "input": request.input,
+        "input": input_name,
+        "inputName": input_name,
+        "inputBytes": file_bytes(&request.input)?,
+        "requestedProfile": request.requested_profile.as_deref(),
+        "annotationSelection": "vcf-review",
+        "includeAnnotatedVcf": false,
         "resultSha256": super::fastvep::sha256_file(&parquet)?,
         "consequencesSha256": super::fastvep::sha256_file(&consequences)?,
         "evidenceSha256": super::fastvep::sha256_file(&evidence)?,
@@ -1303,16 +1357,17 @@ fn execute_recovery(
     final_directory: &Path,
     partial_vcf: &Path,
     partial_structured: &Path,
+    expected_recovery_identity: Option<(String, String)>,
 ) -> Result<(u64, u64), String> {
     fs::create_dir_all(staging).map_err(|error| error.to_string())?;
     persist_current_checkpoint(staging, request, name, run_id)?;
     let mut performance = PipelinePerformance::new(run_id);
 
-    set_phase("recovery-scan", "Scanning the interrupted annotated VCF");
+    set_phase("recovery-scan", "Checking the recovered annotated VCF");
     let mut recovered_vcf = crate::annotation_recovery::scan_vcf(partial_vcf, |progress| {
         update_recovery_progress(
             "recovery-scan",
-            "Scanning annotated VCF",
+            "Checking annotated VCF",
             &progress,
             0.0,
             5.0,
@@ -1329,15 +1384,12 @@ fn execute_recovery(
     }
     check_cancel(staging)?;
 
-    set_phase(
-        "recovery-scan",
-        "Scanning the interrupted structured output",
-    );
+    set_phase("recovery-scan", "Checking the recovered annotation data");
     let mut recovered_structured =
         crate::annotation_recovery::scan_ndjson(partial_structured, |progress| {
             update_recovery_progress(
                 "recovery-scan",
-                "Scanning structured output",
+                "Checking annotation data",
                 &progress,
                 5.0,
                 5.0,
@@ -1364,7 +1416,7 @@ fn execute_recovery(
 
     set_phase(
         "recovery-input",
-        "Validating the original and preparing remaining variants",
+        "Checking the original VCF and preparing the remaining variants",
     );
     let remaining_input = staging.join("remaining-input.vcf");
     let projected = crate::annotation_input::stream_variants_after(
@@ -1375,6 +1427,7 @@ fn execute_recovery(
         || CANCEL.load(Ordering::SeqCst),
         update_recovery_input_progress,
     )?;
+    let input_content_sha256 = projected.content_sha256.clone();
     let input_summary = projected.summary;
     if input_summary.records == 0 {
         return Err("original input VCF contains no variant records".into());
@@ -1419,6 +1472,26 @@ fn execute_recovery(
             ),
         );
     }
+    let prepared_provider = compose_provider_set(resources, run_id, &request.source_ids)?;
+    let current_execution_contract = execution_contract_sha256(
+        request,
+        resources,
+        &prepared_provider.1,
+        &input_content_sha256,
+    )?;
+    if let Some((expected_input, expected_execution)) = expected_recovery_identity
+        && (expected_input != input_content_sha256
+            || expected_execution != current_execution_contract)
+    {
+        if let Some(directory) = prepared_provider.0.as_ref() {
+            let _ = fs::remove_dir_all(directory);
+        }
+        return Err(
+            "the input or annotation contract changed after this run was interrupted; restart the annotation from the original VCF"
+                .into(),
+        );
+    }
+    store_recovery_identity(input_content_sha256, current_execution_contract)?;
     if let Ok(mut current) = state().lock() {
         current.records = Some(input_summary.records);
         current.completed_records = recovered_vcf.records;
@@ -1451,6 +1524,7 @@ fn execute_recovery(
             recovered_vcf.records,
             recovered_vcf.valid_bytes,
             input_summary.records,
+            Some(prepared_provider),
             performance.diagnostic_profiling,
         )?;
         performance.record(fastvep_performance);
@@ -1462,8 +1536,7 @@ fn execute_recovery(
         }
         bindings
     } else {
-        let (provider_directory, bindings) =
-            compose_provider_set(resources, run_id, &request.source_ids)?;
+        let (provider_directory, bindings) = prepared_provider;
         if let Some(directory) = provider_directory {
             let _ = fs::remove_dir_all(directory);
         }
@@ -1476,7 +1549,10 @@ fn execute_recovery(
         && recovered_vcf.valid_bytes == recovered_vcf.total_bytes
         && recovered_structured.valid_bytes == recovered_structured.total_bytes;
     if !complete_outputs {
-        set_phase("recovery-merge", "Joining recovered and continued output");
+        set_phase(
+            "recovery-merge",
+            "Combining recovered and new annotation data",
+        );
         let merged_vcf = staging.join("annotated.recovered.vcf");
         let merged_structured = staging.join("fastvep.recovered.ndjson");
         crate::annotation_recovery::copy_prefix(
@@ -1486,7 +1562,7 @@ fn execute_recovery(
             |progress| {
                 update_recovery_progress(
                     "recovery-merge",
-                    "Joining annotated VCF",
+                    "Combining annotated VCF data",
                     &progress,
                     0.0,
                     50.0,
@@ -1537,6 +1613,53 @@ fn execute_recovery(
     )
 }
 
+fn execution_contract_sha256(
+    request: &AnnotationRequest,
+    resources: &Path,
+    source_bindings: &[SourceBinding],
+    input_content_sha256: &str,
+) -> Result<String, String> {
+    let readiness = super::fastvep::readiness();
+    let reference_manifest = super::reference::fasta_path(resources)
+        .parent()
+        .ok_or("GRCh38 reference path has no parent directory")?
+        .join("resource-manifest.json");
+    let transcript_manifest = resources.join("transcript-cache").join("manifest.json");
+    let payload = serde_json::json!({
+        "contract": ANNOTATION_EXECUTION_CONTRACT,
+        "inputContentSha256": input_content_sha256,
+        "requestedProfile": request.requested_profile.as_deref(),
+        "runMode": request.run_mode,
+        "addLocalConsequences": request.add_local_consequences,
+        "confirmGrch38": request.confirm_grch38,
+        "sources": source_bindings,
+        "fastvep": {
+            "version": readiness.version,
+            "sha256": readiness.sha256.unwrap_or_else(|| readiness.expected_sha256.into()),
+        },
+        "referenceManifestSha256": super::fastvep::sha256_file(&reference_manifest)?,
+        "transcriptManifestSha256": super::fastvep::sha256_file(&transcript_manifest)?,
+        "representativeSelectionContract": super::results::REPRESENTATIVE_SELECTION_CONTRACT,
+    });
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&payload).map_err(|error| error.to_string())?)
+    ))
+}
+
+fn store_recovery_identity(
+    input_content_sha256: String,
+    execution_contract_sha256: String,
+) -> Result<(), String> {
+    *recovery_identity()
+        .lock()
+        .map_err(|_| "annotation recovery identity lock failed")? = RecoveryIdentity {
+        input_content_sha256: Some(input_content_sha256),
+        execution_contract_sha256: Some(execution_contract_sha256),
+    };
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_fastvep(
     request: &AnnotationRequest,
@@ -1550,6 +1673,7 @@ fn run_fastvep(
     baseline_records: u64,
     baseline_bytes: u64,
     total_records: u64,
+    prepared_provider: Option<(Option<PathBuf>, Vec<SourceBinding>)>,
     diagnostic_profiling: bool,
 ) -> Result<
     (
@@ -1566,8 +1690,10 @@ fn run_fastvep(
         File::create(staging.join("fastvep.stdout.log")).map_err(|error| error.to_string())?;
     let stderr =
         File::create(staging.join("fastvep.stderr.log")).map_err(|error| error.to_string())?;
-    let (provider_directory, source_bindings) =
-        compose_provider_set(resources, run_id, &request.source_ids)?;
+    let (provider_directory, source_bindings) = match prepared_provider {
+        Some(provider) => provider,
+        None => compose_provider_set(resources, run_id, &request.source_ids)?,
+    };
     set_phase("annotating", "fastVEP is annotating variants");
     let fastvep_started_at = Instant::now();
     let mut command = Command::new(executable);
@@ -1615,13 +1741,33 @@ fn run_fastvep(
         StageMeasurement::child(fastvep_started_at, diagnostic_profiling, &child);
     let stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
     let input_path = input.to_path_buf();
+    let feeder_request = request.clone();
+    let feeder_resources = resources.to_path_buf();
+    let feeder_bindings = source_bindings.clone();
+    let feeder_staging = staging.to_path_buf();
+    let feeder_name = name.to_owned();
+    let feeder_run_id = run_id.to_owned();
     let feeder = std::thread::spawn(move || {
-        crate::annotation_input::stream_variants(
+        let projected = crate::annotation_input::stream_variants(
             &input_path,
             stdin,
             || CANCEL.load(Ordering::SeqCst),
             update_annotation_input_progress,
-        )
+        )?;
+        let execution_contract_sha256 = execution_contract_sha256(
+            &feeder_request,
+            &feeder_resources,
+            &feeder_bindings,
+            &projected.content_sha256,
+        )?;
+        store_recovery_identity(projected.content_sha256.clone(), execution_contract_sha256)?;
+        persist_current_checkpoint(
+            &feeder_staging,
+            &feeder_request,
+            &feeder_name,
+            &feeder_run_id,
+        )?;
+        Ok::<_, String>(projected)
     });
     let mut progress = crate::annotation_progress::VcfTail::default();
     let mut last_checkpoint = Instant::now();
@@ -1663,7 +1809,7 @@ fn run_fastvep(
                 current.throughput_bytes_per_second = 0.0;
                 current.throughput_records_per_second = 0.0;
                 current.eta_seconds = None;
-                current.detail = "fastVEP is finishing annotation output".into();
+                current.detail = "fastVEP is preparing the result".into();
             } else {
                 current.detail = annotation_progress_detail(&current);
             }
@@ -1695,7 +1841,7 @@ fn run_fastvep(
             format!("fastVEP annotation exited with {status}; see fastvep.stderr.log"),
         );
     }
-    let input_summary = input_summary?;
+    let input_summary = input_summary?.summary;
     let input_bytes = fs::metadata(input).map(|value| value.len()).unwrap_or(0);
     let output_bytes = fs::metadata(output)
         .map(|value| value.len())
@@ -1823,7 +1969,7 @@ fn finalize_outputs(
         |records, _writing, output_bytes, bytes_per_second, records_per_second| {
             update_indexing_progress(
                 "indexing-variants",
-                "Building variant table",
+                "Preparing result",
                 records,
                 input_summary.records,
                 0.0,
@@ -1927,7 +2073,7 @@ fn finalize_outputs(
         return fail_staging(
             staging,
             format!(
-                "report record counts do not align: {} input, {} report, {} excluded auxiliary; structured has {} report and {} excluded auxiliary",
+                "result record counts do not align: {} input, {} result, {} excluded auxiliary; structured has {} result and {} excluded auxiliary",
                 input_summary.records,
                 canonical.records,
                 canonical.excluded_auxiliary_records,
@@ -1940,7 +2086,7 @@ fn finalize_outputs(
         crate::terminal_log(
             "annotation",
             format!(
-                "{run_id} excluded {} decoy or viral records from report tables",
+                "{run_id} excluded {} decoy or viral records from result tables",
                 canonical.excluded_auxiliary_records
             ),
         );
@@ -1948,7 +2094,7 @@ fn finalize_outputs(
     check_cancel(staging)?;
     update_indexing_progress(
         "publishing",
-        "Preparing report indexes",
+        "Preparing result indexes",
         input_summary.records,
         input_summary.records,
         90.0,
@@ -1967,7 +2113,7 @@ fn finalize_outputs(
         detail_index_bytes,
     ));
     check_cancel(staging)?;
-    set_phase("publishing", "Publishing result files");
+    set_phase("publishing", "Saving result files");
     let publishing_measurement = StageMeasurement::current(performance.diagnostic_profiling);
     let annotated_vcf = if request.include_annotated_vcf {
         Some((file_bytes(output)?, super::fastvep::sha256_file(output)?))
@@ -1980,8 +2126,25 @@ fn finalize_outputs(
         .checked_add(consequences_bytes)
         .and_then(|bytes| bytes.checked_add(evidence_bytes))
         .and_then(|bytes| bytes.checked_add(field_catalog_bytes))
-        .ok_or("canonical result size overflow")?;
+        .ok_or("AnnoCAT result size overflow")?;
     let readiness = super::fastvep::readiness();
+    let input_name = request
+        .input
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("input.vcf");
+    let annotation_selection = if request.requested_profile.is_some() {
+        "profile"
+    } else if request.source_ids.is_empty() {
+        "core-only"
+    } else {
+        "sources"
+    };
+    let reference_manifest = super::reference::fasta_path(resources)
+        .parent()
+        .ok_or("GRCh38 reference path has no parent directory")?
+        .join("resource-manifest.json");
+    let transcript_manifest = resources.join("transcript-cache").join("manifest.json");
     let sources_without_observed_evidence = request
         .source_ids
         .iter()
@@ -2026,7 +2189,7 @@ fn finalize_outputs(
         "consequencesFile": "consequences.parquet",
         "evidenceFile": "evidence.parquet",
         "fieldCatalogFile": "field-catalog.json",
-        "input": request.input,
+        "input": input_name,
         "resultSha256": super::fastvep::sha256_file(&parquet)?,
         "consequencesSha256": super::fastvep::sha256_file(&consequences)?,
         "evidenceSha256": super::fastvep::sha256_file(&evidence)?,
@@ -2040,13 +2203,35 @@ fn finalize_outputs(
         "inputIdentityVerified": true,
         "observedSourceValueCounts": structured.source_value_counts,
     });
-    manifest
+    let object = manifest
         .as_object_mut()
-        .ok_or("completed manifest is not an object")?
-        .insert(
-            "representativeSelectionContract".into(),
-            super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
-        );
+        .ok_or("completed manifest is not an object")?;
+    object.insert(
+        "representativeSelectionContract".into(),
+        super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
+    );
+    object.insert("inputName".into(), input_name.into());
+    object.insert("inputBytes".into(), file_bytes(&request.input)?.into());
+    if let Some(profile) = request.requested_profile.as_deref() {
+        object.insert("requestedProfile".into(), profile.into());
+    }
+    object.insert("annotationSelection".into(), annotation_selection.into());
+    object.insert(
+        "includeAnnotatedVcf".into(),
+        request.include_annotated_vcf.into(),
+    );
+    object.insert(
+        "annotationExecutionContract".into(),
+        ANNOTATION_EXECUTION_CONTRACT.into(),
+    );
+    object.insert(
+        "referenceManifestSha256".into(),
+        super::fastvep::sha256_file(&reference_manifest)?.into(),
+    );
+    object.insert(
+        "transcriptManifestSha256".into(),
+        super::fastvep::sha256_file(&transcript_manifest)?.into(),
+    );
     if let Some((bytes, sha256)) = annotated_vcf {
         let object = manifest
             .as_object_mut()
@@ -2069,7 +2254,7 @@ fn finalize_outputs(
     )
     .map_err(|error| error.to_string())?;
     fs::rename(staging, final_directory)
-        .map_err(|error| format!("cannot publish completed run: {error}"))?;
+        .map_err(|error| format!("cannot save the AnnoCAT result: {error}"))?;
     performance.record(publishing_measurement.finish_current(
         "publishing",
         input_summary.records,
@@ -2190,12 +2375,7 @@ fn update_indexing_progress(
 }
 
 fn update_annotation_input_progress(progress: crate::annotation_input::Progress) {
-    update_input_projection_progress(
-        "annotating",
-        "Streaming variants to fastVEP",
-        progress,
-        false,
-    );
+    update_input_projection_progress("annotating", "Annotating variants", progress, false);
 }
 
 fn update_recovery_input_progress(progress: crate::annotation_input::Progress) {
@@ -2343,16 +2523,23 @@ fn persist_current_checkpoint(
         .lock()
         .map_err(|_| "annotation state lock failed")?
         .clone();
+    let identity = recovery_identity()
+        .lock()
+        .map_err(|_| "annotation recovery identity lock failed")?
+        .clone();
     let checkpoint = AnnotationCheckpoint {
-        schema_version: 1,
+        schema_version: CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.into(),
         name: name.into(),
         input: request.input.clone(),
+        requested_profile: request.requested_profile.clone(),
         source_ids: request.source_ids.clone(),
         include_annotated_vcf: request.include_annotated_vcf,
         run_mode: request.run_mode,
         add_local_consequences: request.add_local_consequences,
         confirm_grch38: request.confirm_grch38,
+        input_content_sha256: identity.input_content_sha256,
+        execution_contract_sha256: identity.execution_contract_sha256,
         state: current.state.into(),
         phase: current.phase.into(),
         detail: current.detail,
@@ -2392,7 +2579,8 @@ fn read_checkpoint(directory: &Path) -> Option<AnnotationCheckpoint> {
             }
             let checkpoint: AnnotationCheckpoint =
                 serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-            (checkpoint.schema_version == 1).then_some(checkpoint)
+            (matches!(checkpoint.schema_version, 1 | CHECKPOINT_SCHEMA_VERSION))
+                .then_some(checkpoint)
         })
 }
 
@@ -2427,14 +2615,21 @@ fn display_name(request: &AnnotationRequest) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .or_else(|| {
-            request
-                .input
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .map(str::to_owned)
-        })
+        .or_else(|| input_display_name(&request.input))
         .unwrap_or_else(|| "Annotation".into())
+}
+
+fn input_display_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let lowercase = file_name.to_ascii_lowercase();
+    for suffix in [".vcf.gz", ".vcf.bgz", ".vcf"] {
+        if lowercase.ends_with(suffix) && file_name.len() > suffix.len() {
+            return Some(file_name[..file_name.len() - suffix.len()].to_owned());
+        }
+    }
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
 }
 
 fn safe_name(value: &str) -> String {
@@ -2495,6 +2690,12 @@ fn validate_source_ids(source_ids: &[String]) -> Result<(), String> {
         return Err("choose either gnomAD exomes or gnomAD genomes, not both".into());
     }
     Ok(())
+}
+
+pub(crate) fn normalize_source_ids(mut source_ids: Vec<String>) -> Result<Vec<String>, String> {
+    validate_source_ids(&source_ids)?;
+    source_ids.sort_by_key(|source_id| source_order(source_id));
+    Ok(source_ids)
 }
 
 fn source_order(source_id: &str) -> usize {
@@ -2849,6 +3050,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn input_display_names_remove_complete_vcf_suffixes() {
+        for (path, expected) in [
+            ("sample.vcf", "sample"),
+            ("sample.vcf.gz", "sample"),
+            ("sample.vcf.bgz", "sample"),
+            ("sample.VCF.GZ", "sample"),
+        ] {
+            assert_eq!(
+                input_display_name(Path::new(path)).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            input_display_name(Path::new("sample.txt")).as_deref(),
+            Some("sample")
+        );
+    }
+
+    #[test]
     fn stage_performance_reports_rates_and_optional_process_counters() {
         let measurement = StageMeasurement {
             started_at: Instant::now() - Duration::from_millis(100),
@@ -2938,6 +3158,7 @@ mod tests {
         .unwrap();
         let request = AnnotationRequest {
             input,
+            requested_profile: None,
             name: Some("Review fixture".into()),
             output_directory: Some(root.clone()),
             source_ids: Vec::new(),
@@ -2963,7 +3184,12 @@ mod tests {
         assert!(completed.join("detail-row-groups.json").is_file());
 
         let package = root.join("review.zip");
-        crate::report_package::create(&completed, &package).unwrap();
+        crate::report_package::create(
+            &completed,
+            &package,
+            &crate::report_import::CandidateOverlay::empty("run-vcf-review"),
+        )
+        .unwrap();
         let imported = crate::report_library::import(&package, &imported_runs).unwrap();
         let imported_manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(imported.directory.join("manifest.json")).unwrap())
@@ -2991,6 +3217,7 @@ mod tests {
         .unwrap();
         let mut request = AnnotationRequest {
             input,
+            requested_profile: None,
             name: None,
             output_directory: None,
             source_ids: Vec::new(),
@@ -3028,6 +3255,7 @@ mod tests {
         .unwrap();
         let request = AnnotationRequest {
             input,
+            requested_profile: None,
             name: None,
             output_directory: None,
             source_ids: Vec::new(),
@@ -3040,6 +3268,42 @@ mod tests {
             validate_request(&request, &root)
                 .unwrap_err()
                 .contains("does not support GRCh37, b37, or hg19")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn annotation_rejects_a_header_only_vcf_before_engine_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-empty-annotation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("empty.vcf");
+        fs::write(
+            &input,
+            "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+        )
+        .unwrap();
+        let request = AnnotationRequest {
+            input,
+            requested_profile: None,
+            name: None,
+            output_directory: None,
+            source_ids: Vec::new(),
+            include_annotated_vcf: false,
+            run_mode: RunMode::Annotation,
+            add_local_consequences: false,
+            confirm_grch38: true,
+        };
+
+        assert_eq!(
+            validate_request(&request, &root).unwrap_err(),
+            "the input VCF contains no variant records"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -3320,11 +3584,14 @@ mod tests {
             run_id: "run-discard-fixture".into(),
             name: "Discard fixture".into(),
             input: root.join("input.vcf"),
+            requested_profile: None,
             source_ids: Vec::new(),
             include_annotated_vcf: false,
             run_mode: RunMode::Annotation,
             add_local_consequences: false,
             confirm_grch38: true,
+            input_content_sha256: None,
+            execution_contract_sha256: None,
             state: "interrupted".into(),
             phase: "indexing-variants".into(),
             detail: "Interrupted during indexing".into(),

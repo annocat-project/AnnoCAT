@@ -92,9 +92,9 @@ static BATCH_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedBatches>>> = OnceLock:
 
 fn parquet_has_column(path: &Path, name: &str) -> Result<bool, String> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|error| format!("cannot open report table: {error}"))?,
+        File::open(path).map_err(|error| format!("cannot open result table: {error}"))?,
     )
-    .map_err(|error| format!("cannot read report table metadata: {error}"))?;
+    .map_err(|error| format!("cannot read result table metadata: {error}"))?;
     Ok(reader.schema().field_with_name(name).is_ok())
 }
 
@@ -116,16 +116,16 @@ fn cache_index(
 
 fn stamp(path: &Path) -> Result<FileStamp, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|error| format!("cannot open report table: {error}"))?,
+        File::open(path).map_err(|error| format!("cannot open result table: {error}"))?,
     )
-    .map_err(|error| format!("cannot read report table metadata: {error}"))?;
+    .map_err(|error| format!("cannot read result table metadata: {error}"))?;
     let row_groups = builder.metadata().row_groups().len();
     if row_groups > MAX_ROW_GROUPS {
-        return Err("report table has too many row groups".into());
+        return Err("result table has too many row groups".into());
     }
     Ok(FileStamp {
         bytes: fs::metadata(path)
-            .map_err(|error| format!("cannot inspect report table: {error}"))?
+            .map_err(|error| format!("cannot inspect result table: {error}"))?
             .len(),
         rows: builder.metadata().file_metadata().num_rows(),
         row_groups,
@@ -142,7 +142,7 @@ fn projection(
             builder
                 .schema()
                 .index_of(name)
-                .map_err(|_| format!("report table is missing {name}"))
+                .map_err(|_| format!("result table is missing {name}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ProjectionMask::roots(builder.parquet_schema(), indices))
@@ -152,60 +152,60 @@ fn string_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArra
     let index = batch
         .schema()
         .index_of(name)
-        .map_err(|_| format!("report table is missing {name}"))?;
+        .map_err(|_| format!("result table is missing {name}"))?;
     batch
         .column(index)
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| format!("report field {name} has the wrong type"))
+        .ok_or_else(|| format!("result field {name} has the wrong type"))
 }
 
 fn i64_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int64Array, String> {
     let index = batch
         .schema()
         .index_of(name)
-        .map_err(|_| format!("report table is missing {name}"))?;
+        .map_err(|_| format!("result table is missing {name}"))?;
     batch
         .column(index)
         .as_any()
         .downcast_ref::<Int64Array>()
-        .ok_or_else(|| format!("report field {name} has the wrong type"))
+        .ok_or_else(|| format!("result field {name} has the wrong type"))
 }
 
 fn i32_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array, String> {
     let index = batch
         .schema()
         .index_of(name)
-        .map_err(|_| format!("report table is missing {name}"))?;
+        .map_err(|_| format!("result table is missing {name}"))?;
     batch
         .column(index)
         .as_any()
         .downcast_ref::<Int32Array>()
-        .ok_or_else(|| format!("report field {name} has the wrong type"))
+        .ok_or_else(|| format!("result field {name} has the wrong type"))
 }
 
 fn f64_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64Array, String> {
     let index = batch
         .schema()
         .index_of(name)
-        .map_err(|_| format!("report table is missing {name}"))?;
+        .map_err(|_| format!("result table is missing {name}"))?;
     batch
         .column(index)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .ok_or_else(|| format!("report field {name} has the wrong type"))
+        .ok_or_else(|| format!("result field {name} has the wrong type"))
 }
 
 fn bool_array<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a BooleanArray, String> {
     let index = batch
         .schema()
         .index_of(name)
-        .map_err(|_| format!("report table is missing {name}"))?;
+        .map_err(|_| format!("result table is missing {name}"))?;
     batch
         .column(index)
         .as_any()
         .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| format!("report field {name} has the wrong type"))
+        .ok_or_else(|| format!("result field {name} has the wrong type"))
 }
 
 fn string_value(array: &StringArray, row: usize) -> Option<String> {
@@ -315,16 +315,16 @@ impl BoundaryBuilder {
 
 fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|error| format!("cannot open report detail table: {error}"))?,
+        File::open(path).map_err(|error| format!("cannot open result detail table: {error}"))?,
     )
-    .map_err(|error| format!("cannot read report detail metadata: {error}"))?;
+    .map_err(|error| format!("cannot read result detail metadata: {error}"))?;
     let stamp = FileStamp {
         bytes: fs::metadata(path).map_err(|error| error.to_string())?.len(),
         rows: builder.metadata().file_metadata().num_rows(),
         row_groups: builder.metadata().row_groups().len(),
     };
     if stamp.row_groups > MAX_ROW_GROUPS {
-        return Err("report detail table has too many row groups".into());
+        return Err("result detail table has too many row groups".into());
     }
     let ends = row_group_ends(&builder);
     let mask = projection(&builder, &["allele_id"])?;
@@ -332,13 +332,13 @@ fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
         .with_projection(mask)
         .with_batch_size(16_384)
         .build()
-        .map_err(|error| format!("cannot scan report detail table: {error}"))?;
+        .map_err(|error| format!("cannot scan result detail table: {error}"))?;
     let mut groups = Vec::new();
     let mut current = None::<BoundaryBuilder>;
     let mut global_row = 0usize;
     let mut group = 0usize;
     for batch in reader {
-        let batch = batch.map_err(|error| format!("cannot decode report detail table: {error}"))?;
+        let batch = batch.map_err(|error| format!("cannot decode result detail table: {error}"))?;
         let alleles = string_array(&batch, "allele_id")?;
         for row in 0..batch.num_rows() {
             while group < ends.len() && global_row >= ends[group] {
@@ -348,7 +348,7 @@ fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
                 group += 1;
             }
             if group >= stamp.row_groups || alleles.is_null(row) {
-                return Err("report detail row groups are inconsistent".into());
+                return Err("result detail row groups are inconsistent".into());
             }
             let allele = alleles.value(row);
             if current
@@ -371,7 +371,7 @@ fn scan_allele_boundaries(path: &Path) -> Result<AlleleBoundaries, String> {
         groups.push(boundary.finish());
     }
     if global_row as i64 != stamp.rows {
-        return Err("report detail row count changed while indexing".into());
+        return Err("result detail row count changed while indexing".into());
     }
     Ok(AlleleBoundaries { stamp, groups })
 }
@@ -652,9 +652,9 @@ fn projected_reader(
     names: &[&str],
 ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader, String> {
     let builder = ParquetRecordBatchReaderBuilder::try_new(
-        File::open(path).map_err(|error| format!("cannot open report table: {error}"))?,
+        File::open(path).map_err(|error| format!("cannot open result table: {error}"))?,
     )
-    .map_err(|error| format!("cannot read report table metadata: {error}"))?;
+    .map_err(|error| format!("cannot read result table metadata: {error}"))?;
     let mask = projection(&builder, names)?;
     let mut row_groups = Vec::new();
     let mut selectors = Vec::new();
@@ -696,7 +696,7 @@ fn projected_reader(
         .with_projection(mask)
         .with_batch_size(16_384)
         .build()
-        .map_err(|error| format!("cannot read indexed report rows: {error}"))
+        .map_err(|error| format!("cannot read indexed result rows: {error}"))
 }
 
 fn projected_batches(
@@ -904,6 +904,7 @@ fn read_evidence(
     path: &Path,
     groups: Vec<RowGroupRange>,
     allele_id: &str,
+    consequences: &[(String, String)],
 ) -> Result<Vec<Value>, String> {
     const FIELDS: &[&str] = &[
         "allele_id",
@@ -928,9 +929,8 @@ fn read_evidence(
                 continue;
             }
             let strings = |name| string_array(batch, name);
-            if strings("scope")?.value(row) == "selected" {
-                continue;
-            }
+            let scope = strings("scope")?.value(row);
+            let field_path = strings("field_path")?.value(row);
             let value_type = strings("value_type")?.value(row).to_owned();
             let value = match value_type.as_str() {
                 "string" => string_value(strings("string_value")?, row).map(Value::String),
@@ -956,23 +956,146 @@ fn read_evidence(
             .unwrap_or(Value::Null);
             rows.push(json!({
                 "consequenceId": string_value(strings("consequence_id")?, row),
-                "scope": strings("scope")?.value(row),
+                "scope": scope,
                 "sourceId": strings("source_id")?.value(row),
-                "fieldPath": strings("field_path")?.value(row),
+                "fieldPath": field_path,
                 "valueType": value_type,
                 "value": value,
             }));
         }
     }
-    rows.sort_by(|left, right| {
+    let mut rows = resolve_record_evidence(rows, consequences)?;
+    rows.truncate(5001);
+    Ok(rows)
+}
+
+pub(crate) fn resolve_record_evidence(
+    rows: Vec<Value>,
+    consequences: &[(String, String)],
+) -> Result<Vec<Value>, String> {
+    let mut visible = Vec::new();
+    let mut record_lists = Vec::new();
+    for row in rows {
+        if row["scope"] == "source_records" || row["fieldPath"] == "__recordList" {
+            let Some(source_id) = row["sourceId"].as_str() else {
+                continue;
+            };
+            let Some(records) = row.get("value") else {
+                continue;
+            };
+            let records = match records {
+                Value::Array(records) => Value::Array(
+                    records
+                        .iter()
+                        .cloned()
+                        .map(|record| match record {
+                            Value::Object(mut record) => {
+                                record.remove("sourceRecordOrdinal");
+                                Value::Object(record)
+                            }
+                            record => record,
+                        })
+                        .collect(),
+                ),
+                records => records.clone(),
+            };
+            record_lists.push((source_id.to_owned(), records));
+        } else {
+            visible.push(row);
+        }
+    }
+    let record_sources = record_lists
+        .iter()
+        .map(|(source_id, _)| source_id.as_str())
+        .collect::<HashSet<_>>();
+    visible.retain(|row| {
+        let source_id = row["sourceId"].as_str().unwrap_or_default();
+        let scope = row["scope"].as_str().unwrap_or_default();
+        !(record_sources.contains(source_id)
+            && matches!(scope, "selected" | "transcript")
+            && crate::evidence_resolution::bundled_record_field_is_selected(
+                source_id,
+                row["fieldPath"].as_str().unwrap_or_default(),
+            ))
+    });
+    let contexts = consequences
+        .iter()
+        .filter_map(|(consequence_id, value)| {
+            serde_json::from_str::<Value>(value)
+                .ok()?
+                .as_object()
+                .cloned()
+                .map(|value| (consequence_id, value))
+        })
+        .collect::<Vec<_>>();
+    for (source_id, records) in &record_lists {
+        for (consequence_id, consequence) in &contexts {
+            let Some(resolved) = crate::evidence_resolution::resolve_bundled_record_list(
+                source_id,
+                records,
+                consequence,
+            )?
+            else {
+                continue;
+            };
+            for field in resolved.fields.into_iter().filter(|field| {
+                field.scope == crate::evidence_resolution::ResolvedRecordScope::Selected
+            }) {
+                let source_cardinality =
+                    if crate::evidence_resolution::bundled_record_field_is_aligned(
+                        source_id,
+                        &field.field_path,
+                    ) {
+                        "alignedVector"
+                    } else {
+                        "recordScalar"
+                    };
+                let value_type = match &field.value {
+                    Value::String(_) => "string",
+                    Value::Number(value) if value.is_i64() || value.is_u64() => "integer",
+                    Value::Number(_) => "number",
+                    Value::Bool(_) => "boolean",
+                    _ => "json",
+                };
+                visible.push(json!({
+                    "consequenceId": consequence_id,
+                    "scope": "transcript",
+                    "sourceId": source_id,
+                    "fieldPath": field.field_path,
+                    "sourceCardinality": source_cardinality,
+                    "valueType": value_type,
+                    "value": field.value,
+                }));
+            }
+        }
+    }
+    let selected = visible
+        .iter()
+        .filter(|row| row["scope"] == "selected")
+        .map(|row| {
+            (
+                row["sourceId"].as_str().unwrap_or_default().to_owned(),
+                row["fieldPath"].as_str().unwrap_or_default().to_owned(),
+                row["consequenceId"].as_str().map(str::to_owned),
+            )
+        })
+        .collect::<HashSet<_>>();
+    visible.retain(|row| {
+        row["scope"] == "selected"
+            || !selected.contains(&(
+                row["sourceId"].as_str().unwrap_or_default().to_owned(),
+                row["fieldPath"].as_str().unwrap_or_default().to_owned(),
+                row["consequenceId"].as_str().map(str::to_owned),
+            ))
+    });
+    visible.sort_by(|left, right| {
         let key = |value: &Value| {
             ["scope", "sourceId", "fieldPath", "consequenceId"]
                 .map(|field| value[field].as_str().unwrap_or_default().to_owned())
         };
         key(left).cmp(&key(right))
     });
-    rows.truncate(5001);
-    Ok(rows)
+    Ok(visible)
 }
 
 pub(crate) fn lookup(
@@ -1004,18 +1127,20 @@ pub(crate) fn lookup(
     else {
         return Ok(None);
     };
+    let consequences = if consequence_groups.is_empty() {
+        Vec::new()
+    } else {
+        read_consequences(consequences, consequence_groups, allele_id)?
+    };
+    let evidence = if evidence_groups.is_empty() {
+        Vec::new()
+    } else {
+        read_evidence(evidence, evidence_groups, allele_id, &consequences)?
+    };
     Ok(Some(IndexedDetail {
         variant,
-        consequences: if consequence_groups.is_empty() {
-            Vec::new()
-        } else {
-            read_consequences(consequences, consequence_groups, allele_id)?
-        },
-        evidence: if evidence_groups.is_empty() {
-            Vec::new()
-        } else {
-            read_evidence(evidence, evidence_groups, allele_id)?
-        },
+        consequences,
+        evidence,
     }))
 }
 
@@ -1055,5 +1180,78 @@ mod tests {
         }
         assert!(!boundary.should_split("allele-a"));
         assert!(boundary.should_split("allele-b"));
+    }
+
+    #[test]
+    fn detail_resolution_uses_only_existing_consequence_contexts() {
+        let rows = vec![json!({
+            "scope": "source_records",
+            "sourceId": "dbnsfp",
+            "fieldPath": "__recordList",
+            "value": [{
+                "Ensembl_transcriptid": "ENST00000641515;ENST00000335137;ENST00000999999",
+                "Ensembl_proteinid": "ENSP00000493376;ENSP00000334393;ENSP00000999999",
+                "Uniprot_acc": "A0A2U3U0J3;Q8NH21;SOURCE_ONLY",
+                "aaref": "T",
+                "aaalt": "A",
+                "aapos": "162;141;99",
+                "HGVSp_VEP": "p.Thr162Ala;p.Thr141Ala;p.Thr99Ala",
+                "AlphaMissense_score": "0.0539;0.0543;0.9",
+                "REVEL_score": ".;0.053;0.9",
+                "PrimateAI_score": "0.632585585117"
+            }]
+        })];
+        let consequences = [
+            (
+                "first".into(),
+                json!({
+                    "transcript_id": "ENST00000641515",
+                    "protein_id": "ENSP00000493376",
+                    "amino_acids": "T/A",
+                    "protein_start": 162,
+                    "hgvsp": "ENSP00000493376:p.Thr162Ala"
+                })
+                .to_string(),
+            ),
+            (
+                "second".into(),
+                json!({
+                    "transcript_id": "ENST00000335137",
+                    "protein_id": "ENSP00000334393",
+                    "amino_acids": "T/A",
+                    "protein_start": 141,
+                    "hgvsp": "ENSP00000334393:p.Thr141Ala"
+                })
+                .to_string(),
+            ),
+        ];
+
+        let resolved = resolve_record_evidence(rows, &consequences).unwrap();
+        let values = |field: &str| {
+            resolved
+                .iter()
+                .filter(|row| row["fieldPath"] == field)
+                .map(|row| row["value"].as_str().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values("AlphaMissense_score"), vec!["0.0539", "0.0543"]);
+        assert_eq!(values("REVEL_score"), vec!["0.053"]);
+        assert_eq!(
+            values("PrimateAI_score"),
+            vec!["0.632585585117", "0.632585585117"]
+        );
+        assert!(resolved.iter().all(|row| row["value"] != "0.9"));
+        assert!(
+            resolved
+                .iter()
+                .filter(|row| row["fieldPath"] == "AlphaMissense_score")
+                .all(|row| row["sourceCardinality"] == "alignedVector")
+        );
+        assert!(
+            resolved
+                .iter()
+                .filter(|row| row["fieldPath"] == "PrimateAI_score")
+                .all(|row| row["sourceCardinality"] == "recordScalar")
+        );
     }
 }

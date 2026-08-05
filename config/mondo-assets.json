@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "release": "2026-07-06",
+  "releaseUrl": "https://github.com/monarch-initiative/mondo/releases/tag/v2026-07-06",
+  "assets": [
+    {
+      "kind": "condition-ontology",
+      "filename": "mondo.json",
+      "url": "https://github.com/monarch-initiative/mondo/releases/download/v2026-07-06/mondo.json",
+      "bytes": 107273669,
+      "sha256": "80b8658b4ec7da7699f7f8f6460425396e42f1bb7fbead837469ebf1907f7c30"
+    }
+  ]
+}

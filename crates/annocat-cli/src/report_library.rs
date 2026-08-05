@@ -1,3 +1,4 @@
+use duckdb::{Connection, params};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -20,6 +21,12 @@ struct PackageManifest {
     variant_count: u64,
     #[serde(default)]
     report_kind: Option<String>,
+    #[serde(default)]
+    result_kind: Option<String>,
+    #[serde(skip)]
+    report_kind_present: bool,
+    #[serde(skip)]
+    result_kind_present: bool,
     files: Vec<PackageFile>,
 }
 
@@ -39,28 +46,48 @@ pub struct ImportedReport {
     pub name: String,
 }
 
+fn parse_package_manifest(bytes: &[u8]) -> Result<PackageManifest, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("cannot parse validated result manifest: {error}"))?;
+    let Some(object) = value.as_object() else {
+        return Err("validated result manifest must be a JSON object".into());
+    };
+    let report_kind_present = object.contains_key("reportKind");
+    let result_kind_present = object.contains_key("resultKind");
+    let mut manifest: PackageManifest = serde_json::from_value(value)
+        .map_err(|error| format!("cannot parse validated result manifest: {error}"))?;
+    manifest.report_kind_present = report_kind_present;
+    manifest.result_kind_present = result_kind_present;
+    Ok(manifest)
+}
+
 pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     crate::report_import::validate_archive(path)?;
     fs::create_dir_all(runs).map_err(|error| format!("cannot create runs directory: {error}"))?;
     let file = File::open(path)
-        .map_err(|error| format!("cannot reopen report ZIP {}: {error}", path.display()))?;
+        .map_err(|error| format!("cannot reopen AnnoCAT result {}: {error}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| format!("cannot reopen validated report ZIP: {error}"))?;
+        .map_err(|error| format!("cannot reopen the validated AnnoCAT result: {error}"))?;
     let manifest: PackageManifest = {
         let entry = archive
             .by_name("annocat-manifest.json")
-            .map_err(|_| "validated report manifest disappeared")?;
+            .map_err(|_| "validated result manifest disappeared")?;
         let mut bytes = Vec::with_capacity(entry.size() as usize);
         entry
             .take(1024 * 1024 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|error| format!("cannot reread report manifest: {error}"))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("cannot parse validated report manifest: {error}"))?
+            .map_err(|error| format!("cannot reread result manifest: {error}"))?;
+        parse_package_manifest(&bytes)?
     };
-    if manifest.package_format != "annocat-report"
-        || manifest.package_version != 1
-        || !(1..=annocat_core::RESULT_SCHEMA_VERSION as u32).contains(&manifest.schema_version)
+    let result_kind = crate::report_import::package_result_kind(
+        &manifest.package_format,
+        manifest.package_version,
+        manifest.report_kind.as_deref(),
+        manifest.result_kind.as_deref(),
+        manifest.report_kind_present,
+        manifest.result_kind_present,
+    )?;
+    if !(1..=annocat_core::RESULT_SCHEMA_VERSION as u32).contains(&manifest.schema_version)
         || manifest.display_name.trim().is_empty()
         || manifest.display_name.len() > 256
         || manifest.completed_at.is_empty()
@@ -68,13 +95,16 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         || manifest.assembly != "GRCh38"
         || manifest.variant_count == 0
     {
-        return Err("validated report package identity changed".into());
+        return Err("validated result package identity changed".into());
     }
-    let report_kind = manifest.report_kind.as_deref().unwrap_or("annotation");
-    if !matches!(report_kind, "annotation" | "core-consequences" | "vcf-only") {
-        return Err("validated report package has an unsupported report kind".into());
-    }
-    if let Some(existing) = existing_run(runs, &manifest)? {
+    let imported_candidates = read_candidate_snapshot(&mut archive, &manifest)?;
+    if let Some((existing, variants)) = existing_run(runs, &manifest)? {
+        validate_candidate_alleles(&variants, &imported_candidates)?;
+        crate::library_metadata::merge_candidate_snapshot(
+            runs,
+            &imported_candidates,
+            &crate::annotation::current_timestamp(),
+        )?;
         return Ok(existing);
     }
 
@@ -95,9 +125,12 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
 
     let mut roles = BTreeMap::new();
     for declared in &manifest.files {
+        if declared.role == "candidate-bookmarks" {
+            continue;
+        }
         let mut entry = archive
             .by_name(&declared.path)
-            .map_err(|_| format!("validated report file disappeared: {}", declared.path))?;
+            .map_err(|_| format!("validated result file disappeared: {}", declared.path))?;
         let destination = staging.join(&declared.path);
         let mut output = OpenOptions::new()
             .write(true)
@@ -113,7 +146,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
             || !format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(&declared.sha256)
         {
             return Err(format!(
-                "report file changed during import: {}",
+                "result file changed during import: {}",
                 declared.path
             ));
         }
@@ -134,10 +167,26 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         .filter(|role_name| roles.contains_key(**role_name))
         .count();
     if favor_role_count != 0 && favor_role_count != favor_roles.len() {
-        return Err("imported FAVOR enrichment files are incomplete".into());
+        return Err("imported online annotation files are incomplete".into());
+    }
+    let phenotype_roles = [
+        "phenotype-profile",
+        "phenotype-gene-evidence",
+        "phenotype-field-catalog",
+    ];
+    let phenotype_role_count = phenotype_roles
+        .iter()
+        .filter(|role_name| roles.contains_key(**role_name))
+        .count();
+    if phenotype_role_count != 0 && phenotype_role_count != phenotype_roles.len() {
+        return Err("imported phenotype evidence files are incomplete".into());
+    }
+    let has_phenotype_candidates = roles.contains_key("phenotype-candidate-evidence");
+    if has_phenotype_candidates && phenotype_role_count != phenotype_roles.len() {
+        return Err("imported phenotype ranks have no matching profile".into());
     }
     let variant_count = manifest.variant_count;
-    if report_kind == "vcf-only" {
+    if result_kind == "vcf-only" {
         crate::results::validate_report_tables_allow_empty_consequences(
             variants,
             consequences,
@@ -154,6 +203,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
             variant_count,
         )?;
     }
+    validate_candidate_alleles(variants, &imported_candidates)?;
 
     let file_for_role = |role_name: &str| {
         manifest
@@ -176,7 +226,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         "completedAt": manifest.completed_at,
         "assembly": manifest.assembly,
         "variantCount": variant_count,
-        "reportKind": report_kind,
+        "reportKind": result_kind,
         "resultFile": variants_file.path,
         "resultSha256": variants_file.sha256,
         "consequencesFile": consequences_file.path,
@@ -197,14 +247,120 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     if favor_role_count == favor_roles.len() {
         crate::favor::prepare_query_assets(evidence, catalog)?;
     }
-    fs::rename(&staging, &final_directory)
-        .map_err(|error| format!("cannot publish imported report: {error}"))?;
+    crate::library_metadata::write_candidate_snapshot(runs, &imported_candidates)?;
+    if let Err(error) = fs::rename(&staging, &final_directory) {
+        let _ = crate::library_metadata::remove_candidate_snapshot(runs, &manifest.run_id);
+        return Err(format!("cannot publish imported result: {error}"));
+    }
     std::mem::forget(cleanup);
+    if phenotype_role_count == phenotype_roles.len() {
+        let imported = |role_name: &str| {
+            final_directory.join(
+                &manifest
+                    .files
+                    .iter()
+                    .find(|file| file.role == role_name)
+                    .expect("phenotype role was validated")
+                    .path,
+            )
+        };
+        if let Err(error) = crate::phenotype::install_portable_group(
+            runs,
+            &manifest.run_id,
+            &imported("phenotype-profile"),
+            &imported("phenotype-gene-evidence"),
+            &imported("phenotype-field-catalog"),
+            has_phenotype_candidates
+                .then(|| imported("phenotype-candidate-evidence"))
+                .as_deref(),
+        ) {
+            let _ = fs::remove_dir_all(&final_directory);
+            let _ = crate::library_metadata::remove_candidate_snapshot(runs, &manifest.run_id);
+            return Err(format!(
+                "cannot install imported phenotype evidence: {error}"
+            ));
+        }
+    }
     Ok(ImportedReport {
         run_id: manifest.run_id,
         directory: final_directory,
         name,
     })
+}
+
+fn read_candidate_snapshot(
+    archive: &mut zip::ZipArchive<File>,
+    manifest: &PackageManifest,
+) -> Result<crate::report_import::CandidateOverlay, String> {
+    let Some(declared) = manifest
+        .files
+        .iter()
+        .find(|file| file.role == "candidate-bookmarks")
+    else {
+        return Ok(crate::report_import::CandidateOverlay::empty(
+            &manifest.run_id,
+        ));
+    };
+    if declared.bytes == 0 || declared.bytes > crate::report_import::MAX_CANDIDATE_BYTES as u64 {
+        return Err("candidate bookmark data has an invalid size".into());
+    }
+    let mut entry = archive
+        .by_name(&declared.path)
+        .map_err(|_| "validated candidate bookmarks disappeared")?;
+    let mut bytes = Vec::with_capacity(declared.bytes as usize);
+    let mut hasher = Sha256::new();
+    let copied = copy_and_hash(&mut entry, &mut bytes, &mut hasher, declared.bytes)?;
+    if copied != declared.bytes
+        || !format!("{:x}", hasher.finalize()).eq_ignore_ascii_case(&declared.sha256)
+    {
+        return Err("candidate bookmarks changed during import".into());
+    }
+    crate::report_import::validate_candidate_bytes(&bytes, &manifest.run_id)
+}
+
+fn validate_candidate_alleles(
+    variants: &Path,
+    candidates: &crate::report_import::CandidateOverlay,
+) -> Result<(), String> {
+    if candidates.candidates.is_empty() {
+        return Ok(());
+    }
+    let connection = Connection::open_in_memory()
+        .map_err(|error| format!("cannot validate candidate bookmarks: {error}"))?;
+    connection
+        .execute_batch("CREATE TEMP TABLE requested_candidates(allele_id VARCHAR PRIMARY KEY);")
+        .map_err(|error| format!("cannot prepare candidate bookmark validation: {error}"))?;
+    {
+        let mut appender = connection
+            .appender("requested_candidates")
+            .map_err(|error| format!("cannot prepare candidate bookmark validation: {error}"))?;
+        for allele_id in candidates.candidates.keys() {
+            appender
+                .append_row([allele_id.as_str()])
+                .map_err(|error| format!("cannot validate candidate bookmark: {error}"))?;
+        }
+        appender
+            .flush()
+            .map_err(|error| format!("cannot validate candidate bookmarks: {error}"))?;
+    }
+    let missing: u64 = connection
+        .query_row(
+            "SELECT count(*)
+             FROM requested_candidates c
+             WHERE NOT EXISTS (
+               SELECT 1 FROM read_parquet(?) v WHERE v.allele_id=c.allele_id
+             )",
+            params![variants.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("cannot validate candidate bookmarks: {error}"))?;
+    if missing != 0 {
+        return Err(format!(
+            "{missing} candidate bookmark{} do not exist in this AnnoCAT result",
+            if missing == 1 { "" } else { "s" }
+        ));
+    }
+    Ok(())
 }
 
 fn copy_and_hash(
@@ -223,13 +379,13 @@ fn copy_and_hash(
         let capacity = buffer.len().min(remaining as usize);
         let read = input
             .read(&mut buffer[..capacity])
-            .map_err(|error| format!("cannot read report entry: {error}"))?;
+            .map_err(|error| format!("cannot read AnnoCAT result file: {error}"))?;
         if read == 0 {
             break;
         }
         output
             .write_all(&buffer[..read])
-            .map_err(|error| format!("cannot write imported report entry: {error}"))?;
+            .map_err(|error| format!("cannot write imported result file: {error}"))?;
         hasher.update(&buffer[..read]);
         total += read as u64;
     }
@@ -240,10 +396,13 @@ fn role<'a>(roles: &'a BTreeMap<&str, PathBuf>, name: &str) -> Result<&'a Path, 
     roles
         .get(name)
         .map(PathBuf::as_path)
-        .ok_or_else(|| format!("validated report is missing {name}"))
+        .ok_or_else(|| format!("validated AnnoCAT result is missing {name}"))
 }
 
-fn existing_run(runs: &Path, package: &PackageManifest) -> Result<Option<ImportedReport>, String> {
+fn existing_run(
+    runs: &Path,
+    package: &PackageManifest,
+) -> Result<Option<(ImportedReport, PathBuf)>, String> {
     let Ok(entries) = fs::read_dir(runs) else {
         return Ok(None);
     };
@@ -268,19 +427,32 @@ fn existing_run(runs: &Path, package: &PackageManifest) -> Result<Option<Importe
             };
             if existing[key].as_str() != Some(&file.sha256) {
                 return Err(format!(
-                    "run ID {} already exists with different report content",
+                    "result ID {} already exists with different result content",
                     package.run_id
                 ));
             }
         }
-        return Ok(Some(ImportedReport {
-            run_id: package.run_id.clone(),
-            directory: entry.path(),
-            name: existing["name"]
-                .as_str()
-                .unwrap_or(&package.run_id)
-                .to_owned(),
-        }));
+        let result_file = existing["resultFile"]
+            .as_str()
+            .ok_or_else(|| format!("existing result {} has no variant table", package.run_id))?;
+        let variants = entry.path().join(result_file);
+        if !variants.is_file() {
+            return Err(format!(
+                "existing result {} has no readable variant table",
+                package.run_id
+            ));
+        }
+        return Ok(Some((
+            ImportedReport {
+                run_id: package.run_id.clone(),
+                directory: entry.path(),
+                name: existing["name"]
+                    .as_str()
+                    .unwrap_or(&package.run_id)
+                    .to_owned(),
+            },
+            variants,
+        )));
     }
     Ok(None)
 }
@@ -376,8 +548,81 @@ mod tests {
             br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"representativeSelectionContract":"allele-gene-severity-v1","state":"completed","runId":"run-import","name":"Import fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":1,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
         )
         .unwrap();
+        let fingerprint = "a".repeat(64);
+        let short = &fingerprint[..16];
+        let phenotype_root = root.join(".annocat-library").join("run-import");
+        fs::create_dir_all(&phenotype_root).unwrap();
+        let phenotype_evidence = format!("phenotype-gene-evidence.{short}.parquet");
+        let phenotype_catalog = format!("phenotype-field-catalog.{short}.json");
+        let evidence_path = phenotype_root.join(&phenotype_evidence);
+        let escaped_path = evidence_path.to_string_lossy().replace('\'', "''");
+        duckdb::Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (
+                    SELECT 'ENSG1'::VARCHAR AS gene_id, 'GENE1'::VARCHAR AS gene_symbol,
+                           'gene'::VARCHAR AS scope, 'hpo'::VARCHAR AS source_id,
+                           'profileLinked'::VARCHAR AS field_path, 'boolean'::VARCHAR AS value_type,
+                           NULL::VARCHAR AS string_value, NULL::BIGINT AS integer_value,
+                           NULL::DOUBLE AS number_value, true::BOOLEAN AS boolean_value,
+                           NULL::VARCHAR AS json_value
+                ) TO '{escaped_path}' (FORMAT PARQUET)"
+            ))
+            .unwrap();
+        fs::write(
+            phenotype_root.join(&phenotype_catalog),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "geneEvidenceFile": phenotype_evidence,
+                "profileFingerprint": fingerprint,
+                "hpoRelease": "2026-07-24",
+                "mondoRelease": null,
+                "algorithmVersion": "hpo-lin-query-v4",
+                "sources": [{"id": "hpo"}],
+                "fields": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            phenotype_root.join("phenotypes.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 4,
+                "runId": "run-import",
+                "updatedAt": "2026-07-30T00:00:00Z",
+                "observed": [{"id": "HP:0001250", "label": "Seizure"}],
+                "excluded": [],
+                "conditions": [],
+                "limitToLinkedGenes": false,
+                "activeGeneration": {
+                    "fingerprint": fingerprint,
+                    "evidenceFile": phenotype_evidence,
+                    "catalogFile": phenotype_catalog
+                },
+                "ranking": null,
+                "monarchSuggestions": null,
+                "monarchError": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let allele_id = format!(
+            "allele-{}",
+            &format!("{:x}", Sha256::digest(b"GRCh38\x001\x00100\x00A\x00G"))[..24]
+        );
+        let mut candidates = crate::report_import::CandidateOverlay::empty("run-import");
+        candidates.revision = 2;
+        candidates.updated_at = "2026-07-29T00:00:00Z".into();
+        candidates.candidates.insert(
+            allele_id.clone(),
+            crate::report_import::CandidateEntry {
+                allele_id: allele_id.clone(),
+                added_at: "2026-07-29T00:00:00Z".into(),
+                reason: "Imported reason".into(),
+            },
+        );
         let package_path = root.join("Import-fixture--20260716--import.zip");
-        crate::report_package::create(&run, &package_path).unwrap();
+        crate::report_package::create(&run, &package_path, &candidates).unwrap();
         let imported = import(&package_path, &library).unwrap();
         assert_eq!(imported.run_id, "run-import");
         assert!(imported.directory.join("manifest.json").is_file());
@@ -391,9 +636,56 @@ mod tests {
         );
         assert!(package_path.is_file(), "source ZIP must remain untouched");
         assert!(!library.join(".import-run-import.partial").exists());
+        let restored = crate::library_metadata::candidate_snapshot(&library, "run-import").unwrap();
+        assert_eq!(restored.revision, 2);
+        assert_eq!(restored.updated_at, "2026-07-29T00:00:00Z");
+        assert_eq!(restored.candidates[&allele_id].reason, "Imported reason");
+        let restored_profile = crate::phenotype::load(&library, "run-import").unwrap();
+        assert_eq!(restored_profile.observed[0].id, "HP:0001250");
+        assert!(
+            !imported.directory.join("phenotypes.json").exists(),
+            "phenotype state belongs in the result-library overlay"
+        );
+
+        let mut local = restored;
+        local.candidates.get_mut(&allele_id).unwrap().reason = "Local reason".into();
+        crate::library_metadata::write_candidate_snapshot(&library, &local).unwrap();
         let repeated = import(&package_path, &library).unwrap();
         assert_eq!(repeated.directory, imported.directory);
-        assert_eq!(fs::read_dir(&library).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_dir(&library)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name() != ".annocat-library")
+                .count(),
+            1
+        );
+        assert_eq!(
+            crate::library_metadata::candidate_snapshot(&library, "run-import")
+                .unwrap()
+                .candidates[&allele_id]
+                .reason,
+            "Local reason"
+        );
+
+        let invalid_library = root.join("invalid-library");
+        let mut invalid = crate::report_import::CandidateOverlay::empty("run-import");
+        invalid.candidates.insert(
+            "allele-absent".into(),
+            crate::report_import::CandidateEntry {
+                allele_id: "allele-absent".into(),
+                added_at: "2026-07-29T00:00:00Z".into(),
+                reason: "Imported reason".into(),
+            },
+        );
+        let invalid_package = root.join("invalid.zip");
+        crate::report_package::create(&run, &invalid_package, &invalid).unwrap();
+        assert!(import(&invalid_package, &invalid_library).is_err());
+        assert!(
+            !invalid_library
+                .read_dir()
+                .is_ok_and(|mut entries| entries.any(|entry| entry.is_ok()))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

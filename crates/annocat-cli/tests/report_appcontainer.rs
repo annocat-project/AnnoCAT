@@ -67,15 +67,16 @@ fn packaged_report_worker_validates_inside_appcontainer() {
     archive.finish().unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_annocat"))
-        .arg("validate-report")
+        .arg("results")
+        .arg("validate")
         .arg(&archive_path)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success()
         && [
-            "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x80070002)",
-            "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x80070005)",
+            "cannot create the AnnoCAT result AppContainer profile (HRESULT 0x80070002)",
+            "cannot create the AnnoCAT result AppContainer profile (HRESULT 0x80070005)",
         ]
         .iter()
         .any(|message| stderr.contains(message))
@@ -92,7 +93,7 @@ fn packaged_report_worker_validates_inside_appcontainer() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("Valid AnnoCAT report: appcontainer-fixture (schema 1, 5 files")
+            .contains("Valid AnnoCAT result: appcontainer-fixture (schema 1, 5 files")
     );
     std::fs::remove_dir_all(root).unwrap();
 }

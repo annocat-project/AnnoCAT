@@ -11,7 +11,7 @@ pub fn validate_report(path: &Path) -> Result<String, String> {
         .arg(path)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("cannot run report validation worker: {error}"))?;
+        .map_err(|error| format!("cannot run the result validation worker: {error}"))?;
     worker_output(output.status.success(), &output.stdout, &output.stderr)
 }
 
@@ -24,14 +24,14 @@ fn worker_output(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<String, 
     if !success {
         let message = String::from_utf8_lossy(stderr).trim().to_owned();
         return Err(if message.is_empty() {
-            "report validation worker failed without an error message".into()
+            "result validation worker failed without an error message".into()
         } else {
             message
         });
     }
     String::from_utf8(stdout.to_vec())
         .map(|value| value.trim().to_owned())
-        .map_err(|_| "report validation worker returned non-UTF-8 output".into())
+        .map_err(|_| "result validation worker returned non-UTF-8 output".into())
 }
 
 #[cfg(windows)]
@@ -41,7 +41,7 @@ pub fn require_appcontainer() -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn require_appcontainer() -> Result<(), String> {
-    Err("sandboxed report import is currently available only on Windows".into())
+    Err("sandboxed result import is currently available only on Windows".into())
 }
 
 #[cfg(windows)]
@@ -98,18 +98,18 @@ mod appcontainer {
             .join("annocat-report-worker.exe");
         if !trusted_executable.is_file() {
             return Err(format!(
-                "AnnoCAT report worker is missing: {}",
+                "AnnoCAT result worker is missing: {}",
                 trusted_executable.display()
             ));
         }
         let archive = File::open(path)
-            .map_err(|error| format!("cannot open report archive {}: {error}", path.display()))?;
+            .map_err(|error| format!("cannot open result archive {}: {error}", path.display()))?;
         let archive_handle = archive.as_raw_handle() as HANDLE;
         if unsafe { SetHandleInformation(archive_handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
             == 0
         {
             return Err(format!(
-                "cannot prepare the report archive for sandboxed validation: {}",
+                "cannot prepare the result archive for sandboxed validation: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -174,7 +174,7 @@ mod appcontainer {
         }
         if created == 0 {
             return Err(format!(
-                "cannot start AppContainer report worker {}: {}",
+                "cannot start AppContainer result validation worker {}: {}",
                 executable.0.display(),
                 std::io::Error::last_os_error()
             ));
@@ -183,12 +183,15 @@ mod appcontainer {
         pipe.close_parent_write();
         if !process_is_appcontainer(process_handles.0.hProcess)? {
             unsafe { TerminateProcess(process_handles.0.hProcess, 1) };
-            return Err("Windows created the report worker without AppContainer isolation".into());
+            return Err(
+                "Windows created the result validation worker without AppContainer isolation"
+                    .into(),
+            );
         }
         if unsafe { ResumeThread(process_handles.0.hThread) } == u32::MAX {
             unsafe { TerminateProcess(process_handles.0.hProcess, 1) };
             return Err(format!(
-                "cannot resume AppContainer report worker: {}",
+                "cannot resume AppContainer result validation worker: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -198,25 +201,25 @@ mod appcontainer {
         if waited != WAIT_OBJECT_0 {
             unsafe { TerminateProcess(process_handles.0.hProcess, 1) };
             return Err(format!(
-                "cannot wait for AppContainer report worker: {}",
+                "cannot wait for AppContainer result validation worker: {}",
                 std::io::Error::last_os_error()
             ));
         }
         let mut exit_code = 1_u32;
         if unsafe { GetExitCodeProcess(process_handles.0.hProcess, &mut exit_code) } == 0 {
             return Err(format!(
-                "cannot read AppContainer report worker status: {}",
+                "cannot read AppContainer result validation worker status: {}",
                 std::io::Error::last_os_error()
             ));
         }
-        let output = reader
-            .join()
-            .map_err(|_| "AppContainer report worker output reader panicked".to_string())??;
+        let output = reader.join().map_err(|_| {
+            "AppContainer result validation worker output reader panicked".to_string()
+        })??;
         if exit_code == 0 {
             worker_output(true, &output, &[])
         } else if output.is_empty() {
             Err(format!(
-                "report validation worker exited with status 0x{exit_code:08x}"
+                "result validation worker exited with status 0x{exit_code:08x}"
             ))
         } else {
             worker_output(false, &[], &output)
@@ -227,7 +230,10 @@ mod appcontainer {
         if process_is_appcontainer(unsafe { GetCurrentProcess() })? {
             Ok(())
         } else {
-            Err("report worker refused to parse untrusted data outside AppContainer".into())
+            Err(
+                "result validation worker refused to parse untrusted data outside AppContainer"
+                    .into(),
+            )
         }
     }
 
@@ -235,7 +241,7 @@ mod appcontainer {
         let mut token = null_mut();
         if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
             return Err(format!(
-                "cannot inspect report worker token: {}",
+                "cannot inspect result validation worker token: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -266,9 +272,9 @@ mod appcontainer {
         fn open_or_create() -> Result<Self, String> {
             let name = wide(std::ffi::OsStr::new(PROFILE_NAME));
             let mut sid = null_mut();
-            let display = wide(std::ffi::OsStr::new("AnnoCAT report validator"));
+            let display = wide(std::ffi::OsStr::new("AnnoCAT result validator"));
             let description = wide(std::ffi::OsStr::new(
-                "Networkless sandbox for validating untrusted AnnoCAT reports",
+                "Networkless sandbox for validating untrusted AnnoCAT results",
             ));
             let created = unsafe {
                 CreateAppContainerProfile(
@@ -285,19 +291,19 @@ mod appcontainer {
                     unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
                 if retry < 0 {
                     return Err(format!(
-                        "cannot resolve the existing AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
+                        "cannot resolve the existing AnnoCAT result AppContainer profile (HRESULT 0x{:08x})",
                         retry as u32
                     ));
                 }
             } else if created < 0 {
                 return Err(format!(
-                    "cannot create the AnnoCAT report AppContainer profile (HRESULT 0x{:08x})",
+                    "cannot create the AnnoCAT result AppContainer profile (HRESULT 0x{:08x})",
                     created as u32
                 ));
             }
             if sid.is_null() {
                 return Err(
-                    "Windows returned no SID for the AnnoCAT report AppContainer profile".into(),
+                    "Windows returned no SID for the AnnoCAT result AppContainer profile".into(),
                 );
             }
             Ok(Self(sid))
@@ -307,7 +313,7 @@ mod appcontainer {
             let mut sid_text = null_mut();
             if unsafe { ConvertSidToStringSidW(self.0, &mut sid_text) } == 0 {
                 return Err(format!(
-                    "cannot resolve report AppContainer identity: {}",
+                    "cannot resolve result AppContainer identity: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -316,14 +322,14 @@ mod appcontainer {
             let result = unsafe { GetAppContainerFolderPath(sid_text.0, &mut folder_text) };
             if result < 0 {
                 return Err(format!(
-                    "cannot locate report AppContainer profile (HRESULT 0x{:08x})",
+                    "cannot locate result AppContainer profile (HRESULT 0x{:08x})",
                     result as u32
                 ));
             }
             let folder_text = TaskWideString(folder_text);
             let folder = wide_path(folder_text.0);
             std::fs::create_dir_all(&folder).map_err(|error| {
-                format!("cannot initialize report AppContainer profile: {error}")
+                format!("cannot initialize result AppContainer profile: {error}")
             })?;
             let target = folder.join("annocat-report-worker.exe");
             let temporary = folder.join(format!(
@@ -331,17 +337,21 @@ mod appcontainer {
                 std::process::id()
             ));
             if temporary.exists() {
-                std::fs::remove_file(&temporary)
-                    .map_err(|error| format!("cannot replace temporary report worker: {error}"))?;
+                std::fs::remove_file(&temporary).map_err(|error| {
+                    format!("cannot replace the temporary result validation worker: {error}")
+                })?;
             }
-            std::fs::copy(source, &temporary)
-                .map_err(|error| format!("cannot stage sandboxed report worker: {error}"))?;
+            std::fs::copy(source, &temporary).map_err(|error| {
+                format!("cannot stage the sandboxed result validation worker: {error}")
+            })?;
             if target.exists() {
-                std::fs::remove_file(&target)
-                    .map_err(|error| format!("cannot update sandboxed report worker: {error}"))?;
+                std::fs::remove_file(&target).map_err(|error| {
+                    format!("cannot update the sandboxed result validation worker: {error}")
+                })?;
             }
-            std::fs::rename(&temporary, &target)
-                .map_err(|error| format!("cannot publish sandboxed report worker: {error}"))?;
+            std::fs::rename(&temporary, &target).map_err(|error| {
+                format!("cannot publish the sandboxed result validation worker: {error}")
+            })?;
             Ok(StagedWorker(target))
         }
     }
@@ -368,7 +378,7 @@ mod appcontainer {
             let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
             if handle.is_null() {
                 return Err(format!(
-                    "cannot create report sandbox launch lock: {}",
+                    "cannot create result sandbox launch lock: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -376,7 +386,7 @@ mod appcontainer {
             let waited = unsafe { WaitForSingleObject(mutex.0, INFINITE) };
             if waited != WAIT_OBJECT_0 && waited != 0x0000_0080 {
                 return Err(format!(
-                    "cannot acquire report sandbox launch lock: {}",
+                    "cannot acquire result sandbox launch lock: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -480,7 +490,7 @@ mod appcontainer {
             let handle = unsafe { CreateJobObjectW(null(), null()) };
             if handle.is_null() {
                 return Err(format!(
-                    "cannot create report worker Job Object: {}",
+                    "cannot create result validation worker Job Object: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -501,7 +511,7 @@ mod appcontainer {
             } == 0
             {
                 return Err(format!(
-                    "cannot configure report worker Job Object: {}",
+                    "cannot configure result validation worker Job Object: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -531,7 +541,7 @@ mod appcontainer {
             let mut write = null_mut();
             if unsafe { CreatePipe(&mut read, &mut write, &security, 0) } == 0 {
                 return Err(format!(
-                    "cannot create report worker output pipe: {}",
+                    "cannot create result validation worker output pipe: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -541,7 +551,7 @@ mod appcontainer {
                     CloseHandle(write);
                 }
                 return Err(format!(
-                    "cannot secure report worker output pipe: {}",
+                    "cannot secure result validation worker output pipe: {}",
                     std::io::Error::last_os_error()
                 ));
             }
@@ -557,8 +567,9 @@ mod appcontainer {
             std::thread::spawn(move || {
                 let mut file = unsafe { File::from_raw_handle(read as _) };
                 let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)
-                    .map_err(|error| format!("cannot read report worker output: {error}"))?;
+                file.read_to_end(&mut bytes).map_err(|error| {
+                    format!("cannot read result validation worker output: {error}")
+                })?;
                 Ok(bytes)
             })
         }
@@ -634,7 +645,9 @@ mod appcontainer {
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("SystemRoot"))
         {
-            return Err("Windows did not provide SystemRoot for the report worker".into());
+            return Err(
+                "Windows did not provide SystemRoot for the result validation worker".into(),
+            );
         }
         entries.sort_by_key(|(name, _)| name.to_ascii_uppercase());
         let mut block = Vec::new();

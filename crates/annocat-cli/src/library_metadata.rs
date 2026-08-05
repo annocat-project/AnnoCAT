@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -9,8 +8,9 @@ use std::sync::{
 
 const MAX_NAME_BYTES: usize = 256;
 const MAX_NOTES_BYTES: usize = 1_000_000;
-const MAX_CANDIDATES: usize = 10_000;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub use crate::report_import::{CandidateEntry, CandidateOverlay};
 
 fn atomic_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -26,24 +26,6 @@ struct LocalMetadata {
     renamed_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CandidateOverlay {
-    schema_version: u16,
-    run_id: String,
-    revision: u64,
-    updated_at: String,
-    candidates: BTreeMap<String, CandidateEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CandidateEntry {
-    pub allele_id: String,
-    pub added_at: String,
-    pub reason: String,
-}
-
 pub fn display_name(runs: &Path, run_id: &str) -> Option<String> {
     let metadata: LocalMetadata =
         serde_json::from_slice(&fs::read(metadata_path(runs, run_id)).ok()?).ok()?;
@@ -54,10 +36,10 @@ pub fn rename(runs: &Path, run_id: &str, name: &str) -> Result<String, String> {
     validate_run_id(run_id)?;
     let name = name.trim();
     if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
-        return Err("report name must be 1–256 characters without control characters".into());
+        return Err("result name must be 1–256 characters without control characters".into());
     }
     for entry in fs::read_dir(runs)
-        .map_err(|error| format!("cannot inspect report names: {error}"))?
+        .map_err(|error| format!("cannot inspect result names: {error}"))?
         .flatten()
     {
         if !entry.file_type().is_ok_and(|kind| kind.is_dir())
@@ -83,7 +65,7 @@ pub fn rename(runs: &Path, run_id: &str, name: &str) -> Result<String, String> {
             .as_deref()
             .is_some_and(|other| other.eq_ignore_ascii_case(name))
         {
-            return Err("another report already uses that name".into());
+            return Err("another result already uses that name".into());
         }
     }
     let value = LocalMetadata {
@@ -105,17 +87,17 @@ pub fn notes(runs: &Path, run_id: &str) -> Result<String, String> {
     if !path.exists() {
         return Ok(String::new());
     }
-    let bytes = fs::read(&path).map_err(|error| format!("cannot read case notes: {error}"))?;
+    let bytes = fs::read(&path).map_err(|error| format!("cannot read notes: {error}"))?;
     if bytes.len() > MAX_NOTES_BYTES {
-        return Err("case notes exceed the 1 MB limit".into());
+        return Err("notes exceed the 1 MB limit".into());
     }
-    String::from_utf8(bytes).map_err(|_| "case notes are not valid UTF-8".into())
+    String::from_utf8(bytes).map_err(|_| "notes are not valid UTF-8".into())
 }
 
 pub fn save_notes(runs: &Path, run_id: &str, notes: &str) -> Result<(), String> {
     validate_run_id(run_id)?;
     if notes.len() > MAX_NOTES_BYTES {
-        return Err("case notes exceed the 1 MB limit".into());
+        return Err("notes exceed the 1 MB limit".into());
     }
     atomic_write(&notes_path(runs, run_id), notes.as_bytes())
 }
@@ -141,8 +123,11 @@ pub fn update_candidates(
         validate_allele_id(allele_id)?;
     }
     let mut overlay = read_candidates(runs, run_id)?;
-    if add && overlay.candidates.len().saturating_add(allele_ids.len()) > MAX_CANDIDATES {
-        return Err("a report can contain at most 10,000 manually curated candidates".into());
+    if add
+        && overlay.candidates.len().saturating_add(allele_ids.len())
+            > crate::report_import::MAX_CANDIDATES
+    {
+        return Err("an AnnoCAT result can contain at most 10,000 candidates".into());
     }
     let now = super::annotation::current_timestamp();
     for allele_id in allele_ids {
@@ -161,41 +146,92 @@ pub fn update_candidates(
     }
     overlay.revision = overlay.revision.saturating_add(1);
     overlay.updated_at = now;
-    atomic_write(
-        &candidates_path(runs, run_id),
-        &serde_json::to_vec_pretty(&overlay).map_err(|error| error.to_string())?,
-    )?;
+    write_candidate_snapshot(runs, &overlay)?;
     Ok(overlay.candidates.into_values().collect())
 }
 
-fn read_candidates(runs: &Path, run_id: &str) -> Result<CandidateOverlay, String> {
+pub fn candidate_snapshot(runs: &Path, run_id: &str) -> Result<CandidateOverlay, String> {
     validate_run_id(run_id)?;
     let path = candidates_path(runs, run_id);
     if !path.exists() {
-        return Ok(CandidateOverlay {
-            schema_version: 1,
-            run_id: run_id.into(),
-            revision: 0,
-            updated_at: String::new(),
-            candidates: BTreeMap::new(),
-        });
+        return Ok(CandidateOverlay::empty(run_id));
     }
     let bytes = fs::read(&path).map_err(|error| format!("cannot read candidates: {error}"))?;
-    if bytes.len() > 4_000_000 {
-        return Err("candidate overlay exceeds its 4 MB limit".into());
+    crate::report_import::validate_candidate_bytes(&bytes, run_id)
+}
+
+pub fn write_candidate_snapshot(runs: &Path, overlay: &CandidateOverlay) -> Result<(), String> {
+    let bytes = candidate_snapshot_bytes(overlay)?;
+    atomic_write(&candidates_path(runs, &overlay.run_id), &bytes)
+}
+
+pub fn merge_candidate_snapshot(
+    runs: &Path,
+    imported: &CandidateOverlay,
+    updated_at: &str,
+) -> Result<bool, String> {
+    crate::report_import::validate_candidate_overlay(imported, &imported.run_id)?;
+    let mut local = candidate_snapshot(runs, &imported.run_id)?;
+    let original_count = local.candidates.len();
+    for (allele_id, entry) in &imported.candidates {
+        local
+            .candidates
+            .entry(allele_id.clone())
+            .or_insert_with(|| entry.clone());
     }
-    let overlay: CandidateOverlay = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid candidate overlay: {error}"))?;
-    if overlay.schema_version != 1
-        || overlay.run_id != run_id
-        || overlay.candidates.len() > MAX_CANDIDATES
-        || overlay.candidates.iter().any(|(id, entry)| {
-            id != &entry.allele_id || validate_allele_id(&entry.allele_id).is_err()
-        })
+    if local.candidates.len() == original_count {
+        return Ok(false);
+    }
+    local.revision = local.revision.saturating_add(1);
+    local.updated_at = updated_at.into();
+    write_candidate_snapshot(runs, &local)?;
+    Ok(true)
+}
+
+pub fn remove_candidate_snapshot(runs: &Path, run_id: &str) -> Result<(), String> {
+    validate_run_id(run_id)?;
+    let path = candidates_path(runs, run_id);
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("cannot remove candidate bookmarks: {error}"))?;
+    }
+    if let Some(parent) = path.parent() {
+        if parent
+            .read_dir()
+            .is_ok_and(|mut entries| entries.next().is_none())
+        {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    Ok(())
+}
+
+pub fn remove_result_metadata(runs: &Path, run_id: &str) -> Result<(), String> {
+    validate_run_id(run_id)?;
+    let directory = library_directory(runs, run_id);
+    if directory.exists() {
+        fs::remove_dir_all(&directory)
+            .map_err(|error| format!("cannot remove local result metadata: {error}"))?;
+    }
+    let library = runs.join(".annocat-library");
+    if library
+        .read_dir()
+        .is_ok_and(|mut entries| entries.next().is_none())
     {
-        return Err("candidate overlay identity or contents are invalid".into());
+        let _ = fs::remove_dir(library);
     }
-    Ok(overlay)
+    Ok(())
+}
+
+fn candidate_snapshot_bytes(overlay: &CandidateOverlay) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec_pretty(overlay)
+        .map_err(|error| format!("cannot serialize candidate bookmarks: {error}"))?;
+    crate::report_import::validate_candidate_bytes(&bytes, &overlay.run_id)?;
+    Ok(bytes)
+}
+
+fn read_candidates(runs: &Path, run_id: &str) -> Result<CandidateOverlay, String> {
+    candidate_snapshot(runs, run_id)
 }
 
 fn library_directory(runs: &Path, run_id: &str) -> PathBuf {
@@ -396,6 +432,64 @@ mod tests {
                 .unwrap()
                 .flatten()
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".partial"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_candidates_merge_without_replacing_local_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-candidate-merge-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut local = CandidateOverlay::empty("run-merge");
+        local.revision = 3;
+        local.candidates.insert(
+            "allele-local".into(),
+            CandidateEntry {
+                allele_id: "allele-local".into(),
+                added_at: "local-time".into(),
+                reason: "Local reason".into(),
+            },
+        );
+        write_candidate_snapshot(&root, &local).unwrap();
+
+        let mut imported = CandidateOverlay::empty("run-merge");
+        imported.candidates.insert(
+            "allele-local".into(),
+            CandidateEntry {
+                allele_id: "allele-local".into(),
+                added_at: "import-time".into(),
+                reason: "Imported reason".into(),
+            },
+        );
+        imported.candidates.insert(
+            "allele-imported".into(),
+            CandidateEntry {
+                allele_id: "allele-imported".into(),
+                added_at: "import-time".into(),
+                reason: "Imported reason".into(),
+            },
+        );
+        assert!(merge_candidate_snapshot(&root, &imported, "merge-time").unwrap());
+        let merged = candidate_snapshot(&root, "run-merge").unwrap();
+        assert_eq!(merged.revision, 4);
+        assert_eq!(merged.updated_at, "merge-time");
+        assert_eq!(merged.candidates["allele-local"].reason, "Local reason");
+        assert_eq!(
+            merged.candidates["allele-imported"].reason,
+            "Imported reason"
+        );
+
+        let before = fs::read(candidates_path(&root, "run-merge")).unwrap();
+        assert!(!merge_candidate_snapshot(&root, &imported, "later").unwrap());
+        assert_eq!(
+            fs::read(candidates_path(&root, "run-merge")).unwrap(),
+            before
         );
         fs::remove_dir_all(root).unwrap();
     }

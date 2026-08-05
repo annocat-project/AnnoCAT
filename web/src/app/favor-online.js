@@ -11,7 +11,7 @@ const FIELD_DETAILS = {
   siftcat: ['SIFT summary', 'FAVOR SIFT missense-effect summary. The standard response does not identify the contributing transcript.'],
   polyphencat: ['PolyPhen-2 summary', 'FAVOR PolyPhen-2 missense-effect summary. The standard response does not identify the contributing transcript.'],
   metasvmpred: ['MetaSVM summary', 'FAVOR MetaSVM missense-effect summary. The standard response does not identify the contributing transcript.'],
-  gnomadaf: ['gnomAD allele frequency', 'Overall allele frequency from the gnomAD data represented by FAVOR.'],
+  gnomadaf: ['gnomAD genome + exome AF', 'Overall allele frequency from gnomAD v4.1.1 genome and exome data represented by FAVOR.'],
   bravoaf: ['TOPMed BRAVO allele frequency', 'Overall allele frequency from TOPMed BRAVO represented by FAVOR.'],
   tgall: ['1000 Genomes allele frequency', 'Overall allele frequency from the 1000 Genomes data represented by FAVOR.'],
   apcconservation: ['Conservation aPC', 'FAVOR annotation principal-component score summarizing conservation features.'],
@@ -23,23 +23,23 @@ const FIELD_DETAILS = {
   codingcaddphred: ['CADD PHRED score', "CADD PHRED score from FAVOR's selected coding annotation record."],
   codingrevelscore: ['REVEL score', "REVEL missense score from FAVOR's selected coding annotation record."],
   codingalphamissensescore: ['AlphaMissense score', "AlphaMissense score from FAVOR's selected coding annotation record."],
-  codingalphamissensepred: ['AlphaMissense prediction', "Source-native AlphaMissense category from FAVOR's selected coding annotation record."],
+  codingalphamissensepred: ['AlphaMissense prediction', "AlphaMissense category reported by FAVOR for its selected coding record."],
   codingsiftscore: ['SIFT score', "SIFT missense-effect score from FAVOR's selected coding annotation record."],
-  codingsiftpred: ['SIFT prediction', "Source-native SIFT category from FAVOR's selected coding annotation record."],
+  codingsiftpred: ['SIFT prediction', "SIFT category reported by FAVOR for its selected coding record."],
   codingpolyphen2hvarscore: ['PolyPhen-2 HVAR score', "PolyPhen-2 HumVar score from FAVOR's selected coding annotation record."],
-  codingpolyphen2hvarpred: ['PolyPhen-2 HVAR prediction', "Source-native PolyPhen-2 HumVar category from FAVOR's selected coding annotation record."],
+  codingpolyphen2hvarpred: ['PolyPhen-2 HVAR prediction', "PolyPhen-2 HumVar category reported by FAVOR for its selected coding record."],
   codingmetasvmscore: ['MetaSVM score', "MetaSVM ensemble score from FAVOR's selected coding annotation record."],
-  codingmetasvmpred: ['MetaSVM prediction', "Source-native MetaSVM category from FAVOR's selected coding annotation record."],
+  codingmetasvmpred: ['MetaSVM prediction', "MetaSVM category reported by FAVOR for its selected coding record."],
   codingbayesdelnoafscore: ['BayesDel no-AF score', "BayesDel score without allele frequency from FAVOR's selected coding annotation record."],
   codingvest4score: ['VEST4 score', "VEST4 missense score from FAVOR's selected coding annotation record."],
   codingmutpred2score: ['MutPred2 score', "MutPred2 missense score from FAVOR's selected coding annotation record."],
   codingmutpred2pred: ['MutPred2 interpretation', "ClinGen-calibrated MutPred2 category returned by dbNSFP for FAVOR's selected coding annotation record."],
   codingprimateaiscore: ['PrimateAI score', "PrimateAI missense score from FAVOR's selected coding annotation record."],
-  codingprimateaipred: ['PrimateAI prediction', "Source-native PrimateAI category from FAVOR's selected coding annotation record."],
+  codingprimateaipred: ['PrimateAI prediction', "PrimateAI category reported by FAVOR for its selected coding record."],
   codingmpcscore: ['MPC score', "Missense badness, PolyPhen-2, and regional constraint score from FAVOR's selected coding annotation record."],
   codingvarityrscore: ['VARITY_R score', "VARITY rare-variant model score from FAVOR's selected coding annotation record."],
   codingesm1bscore: ['ESM1b score', "ESM1b protein language-model score from FAVOR's selected coding annotation record."],
-  codingesm1bpred: ['ESM1b prediction', "Source-native ESM1b category from FAVOR's selected coding annotation record."],
+  codingesm1bpred: ['ESM1b prediction', "ESM1b category reported by FAVOR for its selected coding record."],
   codinggerprs: ['GERP++ RS', "GERP++ rejected-substitution conservation score returned with FAVOR's coding record."],
   codingphylop100way: ['phyloP 100-way score', "phyloP 100-way vertebrate conservation score returned with FAVOR's coding record."]
 };
@@ -56,7 +56,7 @@ export function favorFieldPresentation(path, leaf) {
   const field = String(leaf || path || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
   return FIELD_DETAILS[field] || [
     readableFieldName(leaf || path),
-    'Fixed FAVOR annotation stored with this report.'
+    'FAVOR annotation stored with this AnnoCAT result.'
   ];
 }
 
@@ -79,7 +79,7 @@ export function createFavorOnline({
     enabled: true,
     maxVariants: 10000,
     name: 'FAVOR',
-    purpose: 'Online GRCh38 annotation for selected or filtered result sets.'
+    purpose: 'Online GRCh38 annotations for selected or matching variants.'
   };
   let runStatus = null;
   let activeRunId = null;
@@ -97,8 +97,8 @@ export function createFavorOnline({
           <small class="fui-badge">Online service</small>
           <span class="source-state fui-badge">${state}</span>
         </h2>
-        <p class="source-card-description fui-card__description">${escapeHtml(service.purpose || 'Online GRCh38 annotation for selected or filtered result sets.')}</p>
-        <p class="source-card-storage fui-card__metadata">Curated standard and coding fields &middot; Up to ${Number(service.maxVariants || 10000).toLocaleString()} variants per operation</p>
+        <p class="source-card-description fui-card__description">${escapeHtml(service.purpose || 'Online GRCh38 annotations for selected or matching variants.')}</p>
+        <p class="source-card-storage fui-card__metadata">Curated standard and coding fields &middot; Up to ${Number(service.maxVariants || 10000).toLocaleString()} variants per request</p>
       </div>
       <div class="source-card-meta">
         <div class="source-actions">
@@ -140,9 +140,9 @@ export function createFavorOnline({
   }
 
   function statusCopy() {
-    if (!activeRunId) return 'Open a completed GRCh38 report to add FAVOR annotations.';
-    if (!service.enabled) return 'Enable FAVOR in Data sources to use online enrichment.';
-    if (!runStatus?.hasData) return 'This report does not contain FAVOR annotations yet.';
+    if (!activeRunId) return 'Open a completed GRCh38 result to add online annotations.';
+    if (!service.enabled) return 'Enable FAVOR in Data sources to use online annotations.';
+    if (!runStatus?.hasData) return 'This result does not contain FAVOR annotations.';
     return reportCoverage(runStatus);
   }
 
@@ -163,16 +163,16 @@ export function createFavorOnline({
     panel.innerHTML = `<div class="fui-popover__header fui-popover__header--borderless favor-popover__header">
         <div>
           <h2 class="fui-subtitle">Online annotations</h2>
-          <p class="fui-text--secondary">Add clinical evidence, population frequencies, prediction scores, and conservation summaries. Up to ${maximum.toLocaleString()} variants per request.</p>
+          <p class="fui-text--secondary">Add clinical evidence, population frequencies, prediction scores, and conservation summaries. Each request accepts up to ${maximum.toLocaleString()} variants.</p>
         </div>
         <button type="button" class="fui-button fui-button--icon favor-popover__help" data-favor-summary aria-label="About online annotation fields" title="About online annotation fields"><span aria-hidden="true">?</span></button>
       </div>
       <div class="fui-popover__content favor-popover__content">
         <p class="favor-popover__status">${escapeHtml(feedback || statusCopy())}</p>
-        ${currentTooLarge ? `<p class="fui-status-message fui-status-message--info">Current results exceed ${maximum.toLocaleString()} variants. Narrow the table with search or filters before enrichment.</p>` : ''}
+        ${currentTooLarge ? `<p class="fui-status-message fui-status-message--info">Matching variants exceed ${maximum.toLocaleString()}. Use Search or Filters to reduce the number.</p>` : ''}
         <div class="favor-popover__actions">
           <button type="button" class="fui-button" data-favor-enrich="selected" title="${escapeHtml(selectedTitle)}" ${selectedUnavailable ? 'disabled' : ''}>${prototypeIcon('check')}<span>Get selected${counts.selected ? ` (${counts.selected.toLocaleString()})` : ''}</span></button>
-          <button type="button" class="fui-button fui-button--primary" data-favor-enrich="current" ${busy || !service.enabled || !activeRunId || counts.current === 0 || counts.current === null && counts.loaded === 0 || currentTooLarge ? 'disabled' : ''}>${prototypeIcon('download')}<span>${busy ? 'Getting annotations...' : `Get current results${counts.current ? ` (${counts.current.toLocaleString()})` : ''}`}</span></button>
+          <button type="button" class="fui-button fui-button--primary" data-favor-enrich="current" ${busy || !service.enabled || !activeRunId || counts.current === 0 || counts.current === null && counts.loaded === 0 || currentTooLarge ? 'disabled' : ''}>${prototypeIcon('download')}<span>${busy ? 'Getting annotations…' : `Get matching variants${counts.current ? ` (${counts.current.toLocaleString()})` : ''}`}</span></button>
         </div>
       </div>`;
     panel.querySelectorAll('[data-favor-enrich]').forEach(button => {
@@ -206,7 +206,7 @@ export function createFavorOnline({
             <div><dt>Population frequencies</dt><dd>gnomAD, TOPMed BRAVO, and 1000 Genomes allele frequencies</dd></div>
             <div><dt>Conservation</dt><dd>phyloP 100-way, GERP++ RS, and conservation aPC, with epigenetics and protein-function aPC context</dd></div>
           </dl>
-          <p class="fui-text--secondary favor-summary-note">Coding fields are available only for coding variants. Missing annotations remain missing rather than being stored as zero.</p>
+          <p class="fui-text--secondary favor-summary-note">Coding fields are available only for coding variants. AnnoCAT displays annotations that FAVOR does not return as Not reported and does not store them as zero.</p>
           <a class="fui-link" href="https://favor-beta.genohub.org/docs/data" target="_blank" rel="noopener noreferrer">Explore FAVOR's full annotation catalog</a>
         </div>
         <footer class="fui-dialog__footer"><div class="fui-dialog__actions"><button type="submit" value="close" class="fui-button">Close</button></div></footer>
@@ -220,7 +220,7 @@ export function createFavorOnline({
     if (dialog) return dialog;
     document.body.insertAdjacentHTML('beforeend', `<dialog id="favor-consent-dialog" class="favor-consent-dialog fui-dialog" tabindex="-1" aria-labelledby="favor-consent-title">
       <form method="dialog" class="fui-dialog__surface">
-        <header class="fui-dialog__header"><div><p class="kicker">Online enrichment</p><h2 id="favor-consent-title">Continue with FAVOR enrichment?</h2></div></header>
+        <header class="fui-dialog__header"><div><p class="kicker">Online annotations</p><h2 id="favor-consent-title">Send variant coordinates to FAVOR?</h2></div></header>
         <div class="fui-dialog__content"><p class="fui-dialog__description" data-favor-consent-copy></p><label class="fui-checkbox-field favor-consent-dialog__preference"><input class="fui-checkbox" type="checkbox" data-favor-consent-remember><span>Don't show this again</span></label></div>
         <footer class="fui-dialog__footer"><div class="fui-dialog__actions"><button type="submit" value="cancel" class="fui-button">Cancel</button><button type="submit" value="confirm" class="fui-button fui-button--primary">Continue</button></div></footer>
       </form>
@@ -253,8 +253,8 @@ export function createFavorOnline({
     let count = scope === 'selected' ? counts.selected : counts.current;
     const maximum = Number(service.maxVariants || 10000);
     busy = true;
-    feedback = count === null ? 'Counting current results...' : `Preparing ${count.toLocaleString()} variants...`;
-    setResultStatus(count === null ? 'Counting matching variants...' : `Preparing ${count.toLocaleString()} variants for online annotations...`, { busy: true });
+    feedback = count === null ? 'Counting matching variants…' : `Preparing ${count.toLocaleString()} variants…`;
+    setResultStatus(count === null ? 'Counting matching variants…' : `Preparing ${count.toLocaleString()} variants for online annotations…`, { busy: true });
     renderPopover();
     try {
       if (count === null) count = await resolveCurrentTotal();
@@ -264,7 +264,7 @@ export function createFavorOnline({
         return;
       }
       if (count > maximum) {
-        feedback = `Current results exceed ${maximum.toLocaleString()} variants. Narrow the table with search or filters before enrichment.`;
+        feedback = `Matching variants exceed ${maximum.toLocaleString()}. Use Search or Filters to reduce the number.`;
         setResultStatus(feedback);
         return;
       }
@@ -277,8 +277,8 @@ export function createFavorOnline({
         ? await collectSelectedAlleles()
         : await collectFilteredAlleles();
       if (alleleIds.length !== count) throw new Error(`Expected ${count.toLocaleString()} variants but loaded ${alleleIds.length.toLocaleString()}.`);
-      feedback = `Adding FAVOR annotations for ${count.toLocaleString()} variants...`;
-      setResultStatus(`Getting online annotations for ${count.toLocaleString()} variants...`, { busy: true });
+      feedback = `Adding FAVOR annotations for ${count.toLocaleString()} variants…`;
+      setResultStatus(`Getting online annotations for ${count.toLocaleString()} variants…`, { busy: true });
       renderPopover();
       const response = await fetch(`/api/runs/${encodeURIComponent(activeRunId)}/favor/enrich`, {
         method: 'POST',
@@ -289,7 +289,7 @@ export function createFavorOnline({
         body: JSON.stringify({ alleleIds, consent: true })
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'FAVOR enrichment could not be completed');
+      if (!response.ok) throw new Error(result.error || 'AnnoCAT did not get FAVOR annotations');
       const requested = Number(result.requested || count);
       const completed = reportCoverage({ ...result, totalCached: result.totalCached ?? requested });
       await updateForRun(getState().currentResultRun);
@@ -300,7 +300,7 @@ export function createFavorOnline({
       });
         feedback = completed;
       } catch (error) {
-        feedback = `${completed} Reload the report to display the new fields (${error.message}).`;
+        feedback = `${completed} Reload the result to display the new fields (${error.message}).`;
       }
       const resultParts = [`${Number(result.found || 0).toLocaleString()} found`];
       if (result.codingFound) resultParts.push(`${Number(result.codingFound).toLocaleString()} with coding predictors`);
@@ -309,7 +309,7 @@ export function createFavorOnline({
       if (result.errors) resultParts.push(`${Number(result.errors).toLocaleString()} errors`);
       setResultStatus(`Online annotations: ${resultParts.join(' / ')}`, { tone: 'success' });
     } catch (error) {
-      const failure = `FAVOR enrichment could not be completed: ${error.message}`;
+      const failure = `AnnoCAT did not get FAVOR annotations: ${error.message}`;
       await updateForRun(getState().currentResultRun).catch(() => {});
       feedback = failure;
       setResultStatus('Online annotation failed', { tone: 'error' });
@@ -350,9 +350,9 @@ export function createFavorOnline({
       const available = Boolean(activeRunId && service.enabled);
       button.disabled = !available;
       button.title = !activeRunId
-        ? 'Open a completed report to use FAVOR'
+        ? 'Open a completed result to use FAVOR'
         : service.enabled
-          ? 'Add FAVOR annotations to selected or filtered variants'
+          ? 'Add FAVOR annotations to selected or matching variants'
           : 'Enable FAVOR in Data sources';
     }
     renderPopover();
@@ -383,7 +383,7 @@ export function createFavorOnline({
     });
     const response = await fetch('/api/services/favor');
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || 'FAVOR service configuration is unavailable');
+    if (!response.ok) throw new Error(result.error || 'FAVOR service configuration is not available');
     service = { ...service, ...result };
     renderServiceCard();
     updateControls();

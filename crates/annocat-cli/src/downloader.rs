@@ -35,7 +35,6 @@ static JOBS: OnceLock<Mutex<HashMap<&'static str, JobState>>> = OnceLock::new();
 static QUEUE: OnceLock<Mutex<VecDeque<QueuedJob>>> = OnceLock::new();
 static CANCELLED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
 static DISCARDED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-static PAUSED_HOLDS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
 static SCHEDULER: Mutex<()> = Mutex::new(());
 
 fn jobs() -> &'static Mutex<HashMap<&'static str, JobState>> {
@@ -52,14 +51,6 @@ fn cancelled() -> &'static Mutex<HashSet<&'static str>> {
 
 fn discarded() -> &'static Mutex<HashSet<&'static str>> {
     DISCARDED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn paused_holds() -> &'static Mutex<HashSet<&'static str>> {
-    PAUSED_HOLDS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn queue_is_held() -> bool {
-    paused_holds().lock().is_ok_and(|holds| !holds.is_empty())
 }
 
 fn active_count() -> usize {
@@ -86,9 +77,6 @@ pub fn start_background(release: ResourceRelease, root: PathBuf) -> Result<(), S
         .map_err(|_| "download state lock failed")?
         .get(release.resource_id)
         .is_some_and(|state| state.state == "paused");
-    if resuming && let Ok(mut holds) = paused_holds().lock() {
-        holds.remove(release.resource_id);
-    }
     let already_running = jobs()
         .lock()
         .map_err(|_| "download state lock failed")?
@@ -191,9 +179,6 @@ fn spawn_job(release: ResourceRelease, root: PathBuf) {
                         .lock()
                         .is_ok_and(|mut requests| requests.remove(release.resource_id));
                     if should_discard {
-                        if let Ok(mut holds) = paused_holds().lock() {
-                            holds.remove(release.resource_id);
-                        }
                         remove_download_files(&root, &release);
                         crate::terminal_log(
                             "resources",
@@ -240,9 +225,6 @@ pub fn cancel_resource(resource_id: &str, root: &Path) -> bool {
             .map(|release| release.resource_id)
             && let Ok(mut requests) = cancelled().lock()
         {
-            if let Ok(mut holds) = paused_holds().lock() {
-                holds.insert(id);
-            }
             requests.insert(id);
         }
         return true;
@@ -275,9 +257,6 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
         if let Some(id) = annocat_core::source_catalog::download_release(resource_id)
             .map(|release| release.resource_id)
         {
-            if let Ok(mut holds) = paused_holds().lock() {
-                holds.remove(id);
-            }
             if let Ok(mut requests) = discarded().lock() {
                 requests.insert(id);
             }
@@ -308,9 +287,6 @@ pub fn discard_resource(resource_id: &str, root: &Path) -> bool {
                     error: None,
                 },
             );
-        }
-        if let Ok(mut holds) = paused_holds().lock() {
-            holds.remove(release.resource_id);
         }
         fill_download_slots(root);
         return true;
@@ -432,6 +408,13 @@ pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
             .is_ok_and(|requests| requests.contains(release.resource_id))
     {
         "cancelling"
+    } else if belongs_to_resource
+        && state.state == "running"
+        && cancelled()
+            .lock()
+            .is_ok_and(|requests| requests.contains(release.resource_id))
+    {
+        "pausing"
     } else if belongs_to_resource && state.state == "running" && state.phase == "validating" {
         "validating"
     } else if belongs_to_resource && state.state == "cancelled" && partial_bytes == 0 {
@@ -469,7 +452,11 @@ pub fn status(release: &ResourceRelease, root: &Path) -> DownloadStatus {
     };
     DownloadStatus {
         state: effective_state.into(),
-        phase: state.phase.into(),
+        phase: if matches!(effective_state, "pausing" | "cancelling") {
+            effective_state.into()
+        } else {
+            state.phase.into()
+        },
         downloaded_bytes: downloaded,
         expected_bytes: expected,
         percent,
@@ -483,9 +470,6 @@ fn fill_download_slots(root: &Path) {
     let Ok(scheduler) = SCHEDULER.lock() else {
         return;
     };
-    if queue_is_held() {
-        return;
-    }
     let mut launches = Vec::new();
     while active_count() < MAX_CONCURRENT_DOWNLOADS {
         let next = queue()
@@ -577,6 +561,7 @@ pub fn print_download_plan(release: &ResourceRelease, root: &Path) -> Result<(),
     Ok(())
 }
 
+#[cfg(test)]
 pub fn download_release(release: &ResourceRelease, root: &Path) -> Result<(), String> {
     download_release_controlled(release, root, false)
 }
@@ -1246,11 +1231,38 @@ mod tests {
     }
 
     #[test]
-    fn paused_download_holds_scheduler_until_resume_or_delete() {
-        let resource_id = "dbnsfp";
-        paused_holds().lock().unwrap().insert(resource_id);
-        assert!(queue_is_held());
-        paused_holds().lock().unwrap().remove(resource_id);
-        assert!(!queue_is_held());
+    fn requested_pause_is_visible_before_the_worker_stops() {
+        const RESOURCE_ID: &str = "pause-status-fixture";
+        let release = ResourceRelease {
+            resource_id: RESOURCE_ID,
+            version: "1",
+            filename: "pause-status-fixture.gz",
+            url: "http://127.0.0.1/unused",
+            download_bytes: Some(100),
+            range_resume: true,
+            size_checked_at: "test",
+            archive_format: "gzip",
+            publisher_md5: None,
+            publisher_sha256: None,
+        };
+        jobs().lock().unwrap().insert(
+            RESOURCE_ID,
+            JobState {
+                state: "running",
+                phase: "downloading",
+                downloaded: 25,
+                started_at: Instant::now(),
+                started_bytes: 0,
+                error: None,
+            },
+        );
+        cancelled().lock().unwrap().insert(RESOURCE_ID);
+
+        let status = status(&release, Path::new(""));
+
+        assert_eq!(status.state, "pausing");
+        assert_eq!(status.phase, "pausing");
+        cancelled().lock().unwrap().remove(RESOURCE_ID);
+        jobs().lock().unwrap().remove(RESOURCE_ID);
     }
 }
