@@ -1,5 +1,5 @@
 import { createPhenotypeFeature, profileEvidenceDependencyIndexes, summarizeProfileEvidenceRow } from './app/phenotypes.js';
-import { createVariantPresentation } from './app/variant-presentation.js';
+import { createVariantPresentation, evidenceColumnPolicy } from './app/variant-presentation.js';
 import { createResultFilters } from './app/result-filters.js';
 import { createFavorOnline, favorFieldPresentation } from './app/favor-online.js';
 import { installFluentComponentSystem, openFluentDialog, retainFluentModalFocus } from './app/ui-components.js';
@@ -63,7 +63,7 @@ function resultFieldIdentity(field){return`${field.scope||''}\u001f${field.sourc
 function fieldSourceIs(field,id){const source=String(field?.sourceId||'').toLowerCase();return source===id||source.startsWith(`${id}-`)||source.startsWith(`${id}@`)}
 function profileEvidenceField(field){return field?.columnPresentation==='profileEvidence'||fieldSourceIs(field,'hpo')&&field?.fieldPath==='phenotypeRelevance'}
 function selectableEvidenceField(field,index){
-  if(field?.selectable===false)return false;
+  if(!evidenceColumnPolicy(field).selectable)return false;
   if(field?.selectable===undefined&&field?.storageRelation==='geneEvidence'&&resultFieldCatalog.some(candidate=>candidate!==field&&candidate.sourceId===field.sourceId&&profileEvidenceField(candidate)))return false;
   if(field.scope!=='transcript')return true;
   return!resultFieldCatalog.some((candidate,candidateIndex)=>candidateIndex!==index&&candidate.scope==='allele'&&candidate.sourceId===field.sourceId&&candidate.fieldPath===field.fieldPath)
@@ -104,6 +104,12 @@ function recommendedEvidenceIndexes(){
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='gnomadaf'
   );
   pick(
+    field=>fieldSourceIs(field,'phylop')&&['score','value'].includes(leaf(field)),
+    field=>fieldSourceIs(field,'dbnsfp')&&leaf(field).includes('phylop'),
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingphylop100way',
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='apcconservation'
+  );
+  pick(
     field=>fieldSourceIs(field,'cadd')&&leaf(field)==='phred',
     field=>fieldSourceIs(field,'dbnsfp')&&leaf(field)==='cadd_phred',
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingcaddphred',
@@ -121,12 +127,9 @@ function recommendedEvidenceIndexes(){
     field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='alphamissense'
   );
   pick(
-    field=>fieldSourceIs(field,'phylop')&&['score','value'].includes(leaf(field)),
-    field=>fieldSourceIs(field,'dbnsfp')&&leaf(field).includes('phylop'),
-    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='codingphylop100way',
-    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='apcconservation'
+    field=>evidenceColumnPolicy(field).recommended,
+    field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='spliceaidsmax'
   );
-  pick(field=>fieldSourceIs(field,'favor-online')&&leaf(field)==='spliceaidsmax');
   return selected.slice(0,32)
 }
 function resultColumnOrderToken(key){if(!key.startsWith('evidence:'))return`core:${key}`;const field=resultFieldCatalog[Number(key.slice(9))];return field?`evidence:${resultFieldIdentity(field)}`:key}

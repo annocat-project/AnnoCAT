@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const CACHE_PREFIX: &str = ".annocat-evidence-";
-const CACHE_VERSION: i32 = 1;
+const CACHE_VERSION: i32 = 2;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,6 +150,7 @@ pub(crate) struct ResolvedRecordList {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestedResolutionKind {
     AlignedTranscriptVector,
+    DerivedMaximum,
     LegacyAllele,
     SelectedFeature,
 }
@@ -1085,6 +1086,7 @@ fn input_fingerprint(evidence: &Path) -> Result<String, String> {
 fn kind_tag(kind: RequestedResolutionKind) -> &'static str {
     match kind {
         RequestedResolutionKind::AlignedTranscriptVector => "vector",
+        RequestedResolutionKind::DerivedMaximum => "maximum",
         RequestedResolutionKind::LegacyAllele => "allele",
         RequestedResolutionKind::SelectedFeature => "selected",
     }
@@ -1235,10 +1237,12 @@ pub(crate) fn prepare(
         .parent()
         .ok_or("evidence table has no parent directory")?
         .join("consequences.parquet");
-    if fields
-        .iter()
-        .any(|field| field.kind == RequestedResolutionKind::SelectedFeature)
-        && !consequences.is_file()
+    if fields.iter().any(|field| {
+        matches!(
+            field.kind,
+            RequestedResolutionKind::SelectedFeature | RequestedResolutionKind::DerivedMaximum
+        )
+    }) && !consequences.is_file()
     {
         return Err("AnnoCAT result is missing consequences.parquet".into());
     }
@@ -1274,8 +1278,7 @@ fn build_cache(
     evidence: &Path,
     field: &RequestedField,
 ) -> Result<(), String> {
-    let partial = path.with_extension("parquet.partial");
-    let _ = fs::remove_file(&partial);
+    let partial = crate::library_metadata::unique_temporary_path(path)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
         .execute_batch(
@@ -1287,6 +1290,9 @@ fn build_cache(
     let query = match field.kind {
         RequestedResolutionKind::AlignedTranscriptVector => {
             aligned_query(fingerprint, variants, evidence, field)?
+        }
+        RequestedResolutionKind::DerivedMaximum => {
+            derived_spliceai_maximum_query(fingerprint, variants, consequences, evidence, field)?
         }
         RequestedResolutionKind::LegacyAllele => legacy_allele_query(fingerprint, evidence, field),
         RequestedResolutionKind::SelectedFeature => {
@@ -1305,11 +1311,9 @@ fn build_cache(
         let _ = fs::remove_file(&partial);
         return Err("requested evidence cache failed validation".into());
     }
-    if let Err(error) = crate::library_metadata::publish_atomic_file(&partial, path) {
-        let _ = fs::remove_file(&partial);
-        return Err(error);
-    }
-    Ok(())
+    crate::library_metadata::publish_cache_file(&partial, path, |destination| {
+        cache_is_valid(destination, fingerprint, field)
+    })
 }
 
 fn cache_projection(
@@ -1667,20 +1671,28 @@ fn selected_feature_query(
 ) -> Result<String, String> {
     let mode = match field.biological_scope.as_str() {
         "gene" => "gene",
-        "feature"
-            if annocat_core::source_catalog::feature_identity(&field.source_id) == Some("gene") =>
+        "feature" | "unresolved_feature"
+            if source_feature_identity(&field.source_id) == Some("gene") =>
         {
             "gene"
         }
-        "feature" => "feature",
+        "feature" | "unresolved_feature" => "feature",
         _ => "transcript",
+    };
+    let identity_fields = if mode == "gene" {
+        "('gene', 'genesymbol', 'gene_symbol', 'geneid', 'gene_id')"
+    } else {
+        "('transcriptid', 'transcript_id')"
     };
     let match_rank = match mode {
         "gene" => {
             "CASE
-               WHEN selected_gene<>'' AND candidate_gene=selected_gene
+               WHEN candidate_gene<>''
+                 AND (candidate_gene=selected_gene_id OR candidate_gene=selected_gene_symbol)
                  AND selected_transcript<>'' AND candidate_transcript=selected_transcript THEN 0
-               WHEN selected_gene<>'' AND candidate_gene=selected_gene THEN 1
+               WHEN candidate_gene<>''
+                 AND (candidate_gene=selected_gene_id OR candidate_gene=selected_gene_symbol)
+                 THEN 1
                ELSE 99
              END"
         }
@@ -1729,19 +1741,38 @@ fn selected_feature_query(
                  END AS comparison_value
           FROM read_parquet({evidence})
           WHERE scope={scope} AND source_id={source} AND field_path={field_path}
-            AND consequence_id IS NOT NULL
             AND coalesce(string_value, cast(integer_value AS VARCHAR),
                          cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
                          json_value) IS NOT NULL
+        ), source_identity AS MATERIALIZED (
+          SELECT allele_id,
+                 CASE WHEN count(DISTINCT identity_value)=1
+                      THEN min(identity_value) END AS source_identity
+          FROM (
+            SELECT allele_id,
+                   trim(coalesce(string_value, cast(integer_value AS VARCHAR),
+                                 cast(number_value AS VARCHAR))) AS identity_value
+            FROM read_parquet({evidence})
+            WHERE scope={scope} AND source_id={source}
+              AND lower(field_path) IN {identity_fields}
+          ) identities
+          WHERE identity_value<>''
+          GROUP BY allele_id
         ), joined AS MATERIALIZED (
           SELECT raw.*,
-                 c.ordinal,
-                 trim(coalesce(c.transcript_id, '')) AS candidate_transcript,
-                 trim(coalesce(c.gene_id, '')) AS candidate_gene,
+                 coalesce(c.ordinal, 2147483647) AS ordinal,
+                 trim(coalesce(c.transcript_id,
+                   CASE WHEN {mode}<>'gene' THEN si.source_identity END, ''))
+                   AS candidate_transcript,
+                 trim(coalesce(c.gene_id, c.gene_symbol,
+                   CASE WHEN {mode}='gene' THEN si.source_identity END, ''))
+                   AS candidate_gene,
                  trim(coalesce(v.transcript_id, '')) AS selected_transcript,
-                 trim(coalesce(v.gene_id, '')) AS selected_gene
+                 trim(coalesce(v.gene_id, '')) AS selected_gene_id,
+                 trim(coalesce(v.gene_symbol, '')) AS selected_gene_symbol
           FROM raw
-          JOIN read_parquet({consequences}) c USING (allele_id, consequence_id)
+          LEFT JOIN read_parquet({consequences}) c USING (allele_id, consequence_id)
+          LEFT JOIN source_identity si USING (allele_id)
           JOIN {variants} v USING (allele_id)
         ), measured AS (
           SELECT *,
@@ -1793,6 +1824,8 @@ fn selected_feature_query(
         scope = sql_literal(&field.scope),
         source = sql_literal(&field.source_id),
         field_path = sql_literal(&field.field_path),
+        identity_fields = identity_fields,
+        mode = sql_literal(mode),
         rank_one_kind = sql_literal(rank_one_kind),
         success_kind = sql_literal(success_kind),
     );
@@ -1803,6 +1836,115 @@ fn selected_feature_query(
         "legacy report",
         &body,
     ))
+}
+
+fn derived_spliceai_maximum_query(
+    fingerprint: &str,
+    variants: &Path,
+    consequences: &Path,
+    evidence: &Path,
+    field: &RequestedField,
+) -> Result<String, String> {
+    if !field.source_id.eq_ignore_ascii_case("spliceai")
+        || !field.field_path.eq_ignore_ascii_case("maxDeltaScore")
+    {
+        return Err("unsupported derived evidence field".into());
+    }
+    let variants = crate::results::resolved_variants_relation(variants)?;
+    let body = format!(
+        r#"
+        WITH components AS MATERIALIZED (
+          SELECT allele_id, consequence_id,
+                 regexp_replace(lower(field_path), '[^a-z0-9]', '', 'g') AS component,
+                 coalesce(number_value, cast(integer_value AS DOUBLE),
+                          try_cast(string_value AS DOUBLE)) AS candidate_value
+          FROM read_parquet({evidence})
+          WHERE source_id={source}
+            AND regexp_replace(lower(field_path), '[^a-z0-9]', '', 'g')
+                IN ('dsag', 'dsal', 'dsdg', 'dsdl')
+        ), source_identity AS MATERIALIZED (
+          SELECT allele_id,
+                 CASE WHEN count(DISTINCT identity_value)=1
+                      THEN min(identity_value) END AS source_gene
+          FROM (
+            SELECT allele_id,
+                   trim(coalesce(string_value, cast(integer_value AS VARCHAR),
+                                 cast(number_value AS VARCHAR))) AS identity_value
+            FROM read_parquet({evidence})
+            WHERE source_id={source}
+              AND regexp_replace(lower(field_path), '[^a-z0-9]', '', 'g')
+                  IN ('gene', 'genesymbol', 'geneid')
+          ) identities
+          WHERE identity_value<>''
+          GROUP BY allele_id
+        ), joined AS MATERIALIZED (
+          SELECT components.*,
+                 trim(coalesce(c.gene_id, c.gene_symbol, si.source_gene, '')) AS candidate_gene,
+                 trim(coalesce(v.gene_id, '')) AS selected_gene_id,
+                 trim(coalesce(v.gene_symbol, '')) AS selected_gene_symbol
+          FROM components
+          LEFT JOIN read_parquet({consequences}) c USING (allele_id, consequence_id)
+          LEFT JOIN source_identity si USING (allele_id)
+          JOIN {variants} v USING (allele_id)
+          WHERE candidate_value BETWEEN 0.0 AND 1.0
+        ), ranked AS (
+          SELECT *,
+                 CASE
+                   WHEN candidate_gene<>''
+                     AND (upper(candidate_gene)=upper(selected_gene_id)
+                          OR upper(candidate_gene)=upper(selected_gene_symbol)) THEN 0
+                   ELSE 99
+                 END AS match_rank
+          FROM joined
+        ), chosen AS (
+          SELECT *, min(match_rank) OVER (PARTITION BY allele_id, component) AS best_rank
+          FROM ranked
+        ), resolved_components AS (
+          SELECT allele_id, component,
+                 count(*) FILTER (WHERE match_rank=best_rank) AS reported_value_count,
+                 count(DISTINCT candidate_value) FILTER (WHERE match_rank=best_rank)
+                   AS distinct_value_count,
+                 first(candidate_value) FILTER (WHERE match_rank=best_rank) AS candidate_value
+          FROM chosen
+          WHERE best_rank<99
+          GROUP BY allele_id, component
+        ), maxima AS (
+          SELECT allele_id, max(candidate_value) AS candidate_value,
+                 sum(reported_value_count) AS reported_value_count
+          FROM resolved_components
+          WHERE distinct_value_count=1
+          GROUP BY allele_id
+        )
+        SELECT allele_id,
+               NULL::INTEGER AS selected_index,
+               NULL::INTEGER AS source_canonical_index,
+               reported_value_count,
+               1 AS distinct_value_count,
+               'derived_maximum' AS resolution_kind,
+               cast(candidate_value AS VARCHAR) AS resolved_string
+        FROM maxima
+        "#,
+        evidence = sql_literal(&evidence.to_string_lossy()),
+        consequences = sql_literal(&consequences.to_string_lossy()),
+        variants = variants,
+        source = sql_literal(&field.source_id),
+    );
+    Ok(cache_projection(
+        fingerprint,
+        &field.source_id,
+        &field.field_path,
+        "legacy report",
+        &body,
+    ))
+}
+
+fn source_feature_identity(source_id: &str) -> Option<&'static str> {
+    annocat_core::source_catalog::catalog()
+        .sources
+        .iter()
+        .find(|source| source.id.eq_ignore_ascii_case(source_id))?
+        .feature_identity
+        .as_deref()
 }
 
 #[cfg(test)]

@@ -1434,6 +1434,7 @@ fn parse_structured_record(
     let mut conflicting_allele_evidence = BTreeSet::<(String, String, String)>::new();
     let mut record_lists = BTreeMap::<(String, String), Value>::new();
     let mut conflicting_record_lists = BTreeSet::<(String, String)>::new();
+    let mut deferred_scoped_evidence = Vec::<(String, String, String, Value)>::new();
     for (key, value) in &extra_fields {
         if !TOP_LEVEL_FIELDS.contains(&key.as_str()) {
             let source_id = structured_source_alias(source_aliases, key).unwrap_or(key);
@@ -1456,13 +1457,12 @@ fn parse_structured_record(
                 if let Some(scope) = source_evidence_scope(source_id)
                     && scope != SourceEvidenceScope::Allele
                 {
-                    let context = EvidenceContext {
-                        allele_id: &id,
-                        consequence_id: None,
-                        scope: scope.unresolved_scope(),
-                        source_id,
-                    };
-                    append_evidence_tree(&mut evidence, &mut catalog, &context, "", value)?;
+                    deferred_scoped_evidence.push((
+                        id,
+                        (*alternate).to_owned(),
+                        source_id.to_owned(),
+                        value.clone(),
+                    ));
                     continue;
                 }
                 merge_allele_evidence(
@@ -1751,8 +1751,7 @@ fn parse_structured_record(
                 );
                 continue;
             }
-            let declared_scope = source_evidence_scope(source_id);
-            if declared_scope == Some(SourceEvidenceScope::Allele) {
+            if source_evidence_scope(source_id) == Some(SourceEvidenceScope::Allele) {
                 merge_allele_evidence(
                     &mut allele_evidence,
                     &mut conflicting_allele_evidence,
@@ -1762,63 +1761,29 @@ fn parse_structured_record(
                 );
                 continue;
             }
-            let linked_index = match declared_scope {
-                Some(SourceEvidenceScope::Transcript) => explicit_source_transcript(value)
-                    .and_then(|transcript| {
-                        matching_transcript_consequence(
-                            &structured_consequences,
-                            &alternate,
-                            transcript,
-                        )
-                    }),
-                Some(SourceEvidenceScope::Gene) => explicit_source_gene(value).and_then(|gene| {
-                    matching_gene_consequence(&structured_consequences, &alternate, gene)
-                }),
-                Some(SourceEvidenceScope::Feature)
-                    if annocat_core::source_catalog::feature_identity(source_id)
-                        == Some("gene") =>
-                {
-                    explicit_source_gene(value).and_then(|gene| {
-                        matching_gene_consequence(&structured_consequences, &alternate, gene)
-                    })
-                }
-                Some(SourceEvidenceScope::Feature) => {
-                    explicit_source_transcript(value).and_then(|transcript| {
-                        matching_transcript_consequence(
-                            &structured_consequences,
-                            &alternate,
-                            transcript,
-                        )
-                    })
-                }
-                Some(SourceEvidenceScope::Allele) => unreachable!(),
-                None => None,
-            };
-            let linked_consequence = linked_index.map(|index| format!("local:{index}"));
-            let scope = linked_index
-                .map(|index| structured_consequences[index].0)
-                .unwrap_or_else(|| {
-                    declared_scope
-                        .map(SourceEvidenceScope::unresolved_scope)
-                        .unwrap_or("unresolved_feature")
-                });
-            let identity = (
-                id.clone(),
-                source_id.clone(),
-                scope.to_owned(),
-                linked_consequence.clone(),
-            );
-            if !linked_evidence_written.insert(identity) {
-                continue;
-            }
-            let context = EvidenceContext {
-                allele_id: &id,
-                consequence_id: linked_consequence.as_deref(),
-                scope,
+            append_scoped_source_evidence(
+                &mut evidence,
+                &mut catalog,
+                &mut linked_evidence_written,
+                &structured_consequences,
+                &id,
+                &alternate,
                 source_id,
-            };
-            append_evidence_tree(&mut evidence, &mut catalog, &context, "", value)?;
+                value,
+            )?;
         }
+    }
+    for (id, alternate, source_id, value) in deferred_scoped_evidence {
+        append_scoped_source_evidence(
+            &mut evidence,
+            &mut catalog,
+            &mut linked_evidence_written,
+            &structured_consequences,
+            &id,
+            &alternate,
+            &source_id,
+            &value,
+        )?;
     }
     let selected_consequences = consequence_indices
         .into_iter()
@@ -3702,6 +3667,7 @@ struct SelectedEvidenceColumn {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvidenceResolutionStrategy {
     Allele,
+    DerivedMaximum,
     GeneDirect,
     MaterializedSelected,
     LegacyAlleleRecovery,
@@ -3714,6 +3680,7 @@ fn uses_resolution_sidecar(strategy: EvidenceResolutionStrategy) -> bool {
     matches!(
         strategy,
         EvidenceResolutionStrategy::AlignedTranscriptVector
+            | EvidenceResolutionStrategy::DerivedMaximum
             | EvidenceResolutionStrategy::LegacyAlleleRecovery
             | EvidenceResolutionStrategy::SelectedConsequence
     )
@@ -3724,6 +3691,7 @@ fn resolution_kind_condition(strategy: EvidenceResolutionStrategy, alias: &str) 
         EvidenceResolutionStrategy::AlignedTranscriptVector => {
             "('exact_transcript', 'stable_id_match', 'policy_selected')"
         }
+        EvidenceResolutionStrategy::DerivedMaximum => "('derived_maximum')",
         EvidenceResolutionStrategy::LegacyAlleleRecovery => {
             "('direct_allele', 'legacy_allele_scope_recovered')"
         }
@@ -3743,6 +3711,7 @@ fn resolved_value_is_usable(strategy: EvidenceResolutionStrategy, kind: &str) ->
                 "exact_transcript" | "stable_id_match" | "policy_selected"
             )
         }
+        EvidenceResolutionStrategy::DerivedMaximum => kind == "derived_maximum",
         EvidenceResolutionStrategy::LegacyAlleleRecovery => {
             matches!(kind, "direct_allele" | "legacy_allele_scope_recovered")
         }
@@ -4649,6 +4618,9 @@ fn prepare_requested_evidence_resolution(
         .into_iter()
         .filter_map(|field| {
             let kind = match field.resolution {
+                EvidenceResolutionStrategy::DerivedMaximum => {
+                    crate::evidence_resolution::RequestedResolutionKind::DerivedMaximum
+                }
                 EvidenceResolutionStrategy::SelectedConsequence => {
                     crate::evidence_resolution::RequestedResolutionKind::SelectedFeature
                 }
@@ -5190,16 +5162,8 @@ fn selected_evidence_columns(
     catalog: &Path,
     indices: &[usize],
 ) -> Result<Vec<SelectedEvidenceColumn>, String> {
-    let metadata =
-        fs::metadata(catalog).map_err(|error| format!("field catalog is missing: {error}"))?;
-    if metadata.len() == 0 || metadata.len() > 5 * 1024 * 1024 {
-        return Err("field catalog has an invalid size".into());
-    }
     let current_selection_contract = report_uses_current_selection_contract(catalog)?;
-    let catalog: Value = serde_json::from_slice(
-        &fs::read(catalog).map_err(|error| format!("cannot read field catalog: {error}"))?,
-    )
-    .map_err(|error| format!("invalid field catalog: {error}"))?;
+    let catalog = query_field_catalog(catalog)?;
     let fields = catalog["fields"]
         .as_array()
         .ok_or("field catalog has no fields array")?;
@@ -5250,7 +5214,9 @@ fn selected_evidence_columns(
                                 == Some(contract_id)
                     });
             let resolution_policy = field["resolutionPolicy"].as_str();
-            let resolution = if resolution_policy == Some("geneDirect")
+            let resolution = if resolution_policy == Some("derivedSpliceAiMaximum") {
+                EvidenceResolutionStrategy::DerivedMaximum
+            } else if resolution_policy == Some("geneDirect")
                 || field["storageRelation"].as_str() == Some("geneEvidence")
             {
                 EvidenceResolutionStrategy::GeneDirect
@@ -5307,6 +5273,71 @@ fn selected_evidence_columns(
             })
         })
         .collect()
+}
+
+fn query_field_catalog(catalog: &Path) -> Result<Value, String> {
+    let metadata =
+        fs::metadata(catalog).map_err(|error| format!("field catalog is missing: {error}"))?;
+    if metadata.len() == 0 || metadata.len() > 5 * 1024 * 1024 {
+        return Err("field catalog has an invalid size".into());
+    }
+    let mut catalog: Value = serde_json::from_slice(
+        &fs::read(catalog).map_err(|error| format!("cannot read field catalog: {error}"))?,
+    )
+    .map_err(|error| format!("invalid field catalog: {error}"))?;
+    append_legacy_spliceai_maximum(&mut catalog)?;
+    Ok(catalog)
+}
+
+pub(crate) fn field_catalog_json(catalog: &Path) -> Result<String, String> {
+    serde_json::to_string(&query_field_catalog(catalog)?).map_err(|error| error.to_string())
+}
+
+fn append_legacy_spliceai_maximum(catalog: &mut Value) -> Result<(), String> {
+    let fields = catalog["fields"]
+        .as_array_mut()
+        .ok_or("field catalog has no fields array")?;
+    let components = ["dsag", "dsal", "dsdg", "dsdl"];
+    let mut present = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut has_maximum = HashSet::<String>::new();
+    for field in fields.iter() {
+        let Some(source_id) = field["sourceId"].as_str() else {
+            continue;
+        };
+        if !source_id.eq_ignore_ascii_case("spliceai") {
+            continue;
+        }
+        let Some(field_path) = field["fieldPath"].as_str() else {
+            continue;
+        };
+        let normalized = normalized_evidence_key(field_path);
+        if normalized == "maxdeltascore" {
+            has_maximum.insert(source_id.to_owned());
+        } else if components.contains(&normalized.as_str()) {
+            present
+                .entry(source_id.to_owned())
+                .or_default()
+                .insert(normalized);
+        }
+    }
+    for (source_id, available) in present {
+        if available.len() != components.len() || has_maximum.contains(&source_id) {
+            continue;
+        }
+        fields.push(json!({
+            "scope": "selected",
+            "sourceId": source_id,
+            "fieldPath": "maxDeltaScore",
+            "valueType": "number",
+            "observedTypes": ["number"],
+            "occurrences": 0,
+            "biologicalScope": "gene",
+            "physicalScope": "selected",
+            "storageEncoding": "derivedScalar",
+            "resolutionPolicy": "derivedSpliceAiMaximum"
+        }));
+    }
+    Ok(())
 }
 
 fn query_projection_field_is_eligible(field: &SelectedEvidenceColumn) -> bool {
@@ -5422,8 +5453,7 @@ fn build_query_projection(
         return Err("field catalog has no direct evidence fields".into());
     }
 
-    let partial = destination.with_extension("parquet.partial");
-    let _ = fs::remove_file(&partial);
+    let partial = crate::library_metadata::unique_temporary_path(destination)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
         .execute_batch(
@@ -5467,11 +5497,7 @@ fn build_query_projection(
         let _ = fs::remove_file(&partial);
         return Err("query projection failed validation".into());
     }
-    if let Err(error) = crate::library_metadata::publish_atomic_file(&partial, destination) {
-        let _ = fs::remove_file(&partial);
-        return Err(error);
-    }
-    Ok(())
+    crate::library_metadata::publish_cache_file(&partial, destination, query_projection_is_valid)
 }
 
 fn prepare_query_projection(
@@ -6946,6 +6972,21 @@ fn append_evidence_tree(
             };
             rows += append_evidence_tree(batch, catalog, context, &child_path, child)?;
         }
+        if path.is_empty()
+            && context.source_id.eq_ignore_ascii_case("spliceai")
+            && !object
+                .keys()
+                .any(|key| normalized_evidence_key(key) == "maxdeltascore")
+            && let Some(maximum) = spliceai_maximum_delta(object)
+        {
+            rows += append_evidence_tree(
+                batch,
+                catalog,
+                context,
+                "maxDeltaScore",
+                &Value::from(maximum),
+            )?;
+        }
         return Ok(rows);
     }
     if value.is_null() {
@@ -7001,6 +7042,32 @@ fn append_evidence_tree(
     entry.types.insert(value_type);
     entry.occurrences += 1;
     Ok(1)
+}
+
+fn normalized_evidence_key(value: &str) -> String {
+    value
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect()
+}
+
+fn spliceai_maximum_delta(object: &Map<String, Value>) -> Option<f64> {
+    object
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                normalized_evidence_key(key).as_str(),
+                "dsag" | "dsal" | "dsdg" | "dsdl"
+            )
+        })
+        .filter_map(|(_, value)| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .filter(|value| (0.0..=1.0).contains(value))
+        .reduce(f64::max)
 }
 
 fn optional_json_string(object: &Map<String, Value>, name: &str) -> Option<String> {
@@ -7277,6 +7344,66 @@ fn matching_gene_consequence(
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     best_structured_consequence_index(consequences, &matches)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_scoped_source_evidence(
+    evidence: &mut EvidenceBatch,
+    catalog: &mut BTreeMap<(String, String, String), CatalogEntry>,
+    linked_evidence_written: &mut BTreeSet<(String, String, String, Option<String>)>,
+    consequences: &[(&str, Map<String, Value>)],
+    allele_id: &str,
+    alternate: &str,
+    source_id: &str,
+    value: &Value,
+) -> Result<(), String> {
+    let declared_scope = source_evidence_scope(source_id);
+    let linked_index = match declared_scope {
+        Some(SourceEvidenceScope::Transcript) => {
+            explicit_source_transcript(value).and_then(|transcript| {
+                matching_transcript_consequence(consequences, alternate, transcript)
+            })
+        }
+        Some(SourceEvidenceScope::Gene) => explicit_source_gene(value)
+            .and_then(|gene| matching_gene_consequence(consequences, alternate, gene)),
+        Some(SourceEvidenceScope::Feature)
+            if annocat_core::source_catalog::feature_identity(source_id) == Some("gene") =>
+        {
+            explicit_source_gene(value)
+                .and_then(|gene| matching_gene_consequence(consequences, alternate, gene))
+        }
+        Some(SourceEvidenceScope::Feature) => {
+            explicit_source_transcript(value).and_then(|transcript| {
+                matching_transcript_consequence(consequences, alternate, transcript)
+            })
+        }
+        Some(SourceEvidenceScope::Allele) => None,
+        None => None,
+    };
+    let linked_consequence = linked_index.map(|index| format!("local:{index}"));
+    let scope = linked_index
+        .map(|index| consequences[index].0)
+        .unwrap_or_else(|| {
+            declared_scope
+                .map(SourceEvidenceScope::unresolved_scope)
+                .unwrap_or("unresolved_feature")
+        });
+    if !linked_evidence_written.insert((
+        allele_id.to_owned(),
+        source_id.to_owned(),
+        scope.to_owned(),
+        linked_consequence.clone(),
+    )) {
+        return Ok(());
+    }
+    let context = EvidenceContext {
+        allele_id,
+        consequence_id: linked_consequence.as_deref(),
+        scope,
+        source_id,
+    };
+    append_evidence_tree(evidence, catalog, &context, "", value)?;
+    Ok(())
 }
 
 fn consequence_impact(term: &str) -> &'static str {
@@ -7979,10 +8106,9 @@ fn build_representative_override(
     fingerprint: &str,
     destination: &Path,
 ) -> Result<(), String> {
-    let partial = destination.with_extension("parquet.partial");
-    let _ = fs::remove_file(&partial);
-    let temporary = destination.with_extension("duckdb-tmp");
-    let _ = fs::remove_dir_all(&temporary);
+    let partial = crate::library_metadata::unique_temporary_path(destination)?;
+    let temporary =
+        crate::library_metadata::unique_temporary_path(&destination.with_extension("duckdb-tmp"))?;
     fs::create_dir_all(&temporary)
         .map_err(|error| format!("cannot create representative cache workspace: {error}"))?;
     let _temporary = TemporaryDirectory(temporary.clone());
@@ -8103,11 +8229,9 @@ fn build_representative_override(
         let _ = fs::remove_file(&partial);
         return Err("representative repair failed validation".into());
     }
-    if let Err(error) = crate::library_metadata::publish_atomic_file(&partial, destination) {
-        let _ = fs::remove_file(&partial);
-        return Err(error);
-    }
-    Ok(())
+    crate::library_metadata::publish_cache_file(&partial, destination, |path| {
+        representative_override_is_valid(path, fingerprint)
+    })
 }
 
 pub(crate) fn legacy_representative_override(variants: &Path) -> Result<Option<PathBuf>, String> {
@@ -8941,7 +9065,11 @@ mod tests {
                     },
                     "spliceai": {
                         "gene": "GENE2",
-                        "dsAg": 0.8
+                        "dsAg": 0.8,
+                        "dsAl": 0.1,
+                        "dsDg": 0.2,
+                        "dsDl": 0.3,
+                        "dpAg": -49
                     }
                 }],
                 "transcript_consequences": [{
@@ -8949,7 +9077,7 @@ mod tests {
                     "transcript_id": "ENST1",
                     "gene_id": "ENSG1",
                     "gene_symbol": "GENE1",
-                    "mane_select": "NM_1",
+                    "canonical": 1,
                     "consequence_terms": ["missense_variant"],
                     "impact": "MODERATE"
                 }, {
@@ -8957,7 +9085,7 @@ mod tests {
                     "transcript_id": "ENST2",
                     "gene_id": "ENSG2",
                     "gene_symbol": "GENE2",
-                    "canonical": 1,
+                    "mane_select": "NM_2",
                     "consequence_terms": ["missense_variant"],
                     "impact": "MODERATE"
                 }]
@@ -9011,6 +9139,32 @@ mod tests {
             parsed.evidence.consequence_id[spliceai].as_deref(),
             Some("local:1")
         );
+        let maximum = parsed
+            .evidence
+            .field_path
+            .iter()
+            .enumerate()
+            .find_map(|(index, field)| {
+                (parsed.evidence.source_id[index] == "spliceai"
+                    && field == "maxDeltaScore"
+                    && parsed.evidence.scope[index] == "selected")
+                    .then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.number_value[maximum], Some(0.8));
+        let position = parsed
+            .evidence
+            .field_path
+            .iter()
+            .enumerate()
+            .find_map(|(index, field)| {
+                (parsed.evidence.source_id[index] == "spliceai"
+                    && field == "dpAg"
+                    && parsed.evidence.scope[index] == "transcript")
+                    .then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.integer_value[position], Some(-49));
         assert!(
             parsed
                 .consequences
@@ -9020,6 +9174,224 @@ mod tests {
                     && !value.contains("revel")
                     && !value.contains("spliceai"))
         );
+    }
+
+    #[test]
+    fn structured_top_level_spliceai_links_to_its_gene() {
+        let record = StructuredRecord {
+            line_number: 1,
+            line: json!({
+                "allele_string": "A/G",
+                "start": 100,
+                "seq_region_name": "1",
+                "spliceAI": {
+                    "gene": "GENE2",
+                    "dsAg": 0.1,
+                    "dsAl": 0.7,
+                    "dsDg": 0.2,
+                    "dsDl": 0.3,
+                    "dpAg": -49
+                },
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "transcript_id": "ENST1",
+                    "gene_symbol": "GENE1",
+                    "canonical": 1,
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }, {
+                    "variant_allele": "G",
+                    "transcript_id": "ENST2",
+                    "gene_symbol": "GENE2",
+                    "mane_select": "NM_2",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }]
+            })
+            .to_string(),
+            canonical_alleles: BTreeMap::new(),
+        };
+        let aliases = structured_source_aliases(&["spliceai".into()]).unwrap();
+        let parsed = parse_structured_record(&record, &aliases).unwrap();
+        for field in ["dsAg", "dsAl", "dsDg", "dsDl", "dpAg", "maxDeltaScore"] {
+            let index = parsed
+                .evidence
+                .field_path
+                .iter()
+                .enumerate()
+                .find_map(|(index, candidate)| {
+                    (parsed.evidence.source_id[index] == "spliceai"
+                        && candidate == field
+                        && parsed.evidence.scope[index] == "transcript")
+                        .then_some(index)
+                })
+                .unwrap();
+            assert_eq!(
+                parsed.evidence.consequence_id[index].as_deref(),
+                Some("local:1")
+            );
+        }
+        let selected_maximum = parsed
+            .evidence
+            .field_path
+            .iter()
+            .enumerate()
+            .find_map(|(index, field)| {
+                (parsed.evidence.source_id[index] == "spliceai"
+                    && field == "maxDeltaScore"
+                    && parsed.evidence.scope[index] == "selected")
+                    .then_some(index)
+            })
+            .unwrap();
+        assert_eq!(parsed.evidence.number_value[selected_maximum], Some(0.7));
+    }
+
+    #[test]
+    fn legacy_top_level_spliceai_columns_resolve_by_gene() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-legacy-spliceai-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("fastvep.ndjson");
+        fs::write(
+            &input,
+            concat!(
+                r#"{"allele_string":"A/G","start":100,"seq_region_name":"1","spliceai":{"gene":"GENE2","dsAg":0.1,"dsAl":0.7,"dsDg":0.2,"dsDl":0.3,"dpAg":-49},"transcript_consequences":[{"variant_allele":"G","transcript_id":"ENST2","gene_id":"ENSG2","gene_symbol":"GENE2","mane_select":"NM_2","consequence_terms":["missense_variant"],"impact":"MODERATE"}]}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        convert_structured(
+            &input,
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+
+        let legacy_evidence = root.join("legacy-evidence.parquet");
+        Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (
+                   SELECT * REPLACE (
+                     CASE WHEN source_id='spliceai' THEN 'unresolved_feature' ELSE scope END AS scope,
+                     CASE WHEN source_id='spliceai' THEN NULL ELSE consequence_id END AS consequence_id
+                   )
+                   FROM read_parquet('{}')
+                   WHERE NOT (source_id='spliceai' AND scope='selected')
+                     AND NOT (source_id='spliceai' AND field_path='maxDeltaScore')
+                 ) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 4096)",
+                evidence.to_string_lossy().replace('\'', "''"),
+                legacy_evidence.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        let mut catalog_value: Value =
+            serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        catalog_value["fields"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|field| {
+                field["sourceId"] != "spliceai" || field["fieldPath"] != "maxDeltaScore"
+            });
+        for field in catalog_value["fields"].as_array_mut().unwrap() {
+            if field["sourceId"] == "spliceai" {
+                field["scope"] = Value::String("unresolved_feature".into());
+                field["biologicalScope"] = Value::String("feature".into());
+                field["physicalScope"] = Value::String("unresolved_feature".into());
+                field["resolutionPolicy"] = Value::String("unresolved".into());
+                field.as_object_mut().unwrap().remove("selectionOrigin");
+            }
+        }
+        fs::write(&catalog, serde_json::to_vec(&catalog_value).unwrap()).unwrap();
+        let query_catalog = query_field_catalog(&catalog).unwrap();
+        let query_fields = query_catalog["fields"].as_array().unwrap();
+        let score_index = query_fields
+            .iter()
+            .position(|field| field["sourceId"] == "spliceai" && field["fieldPath"] == "dsAl")
+            .unwrap();
+        let position_index = query_fields
+            .iter()
+            .position(|field| field["sourceId"] == "spliceai" && field["fieldPath"] == "dpAg")
+            .unwrap();
+        let maximum_index = query_fields
+            .iter()
+            .position(|field| {
+                field["sourceId"] == "spliceai" && field["fieldPath"] == "maxDeltaScore"
+            })
+            .unwrap();
+        assert_eq!(
+            query_fields[maximum_index]["resolutionPolicy"],
+            "derivedSpliceAiMaximum"
+        );
+        let stored_catalog: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        assert!(
+            stored_catalog["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|field| {
+                    field["sourceId"] != "spliceai" || field["fieldPath"] != "maxDeltaScore"
+                })
+        );
+
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|UPLOADED_ALLELE|CANONICAL|MANE_SELECT\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t100\t.\tA\tG\t50\tPASS\tCSQ=G|missense_variant|MODERATE|GENE2|ENSG2|ENST2|A/G|YES|ENST2\n",
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        let page: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&legacy_evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    evidence_columns: vec![score_index, position_index, maximum_index],
+                    sort_evidence: Some(maximum_index),
+                    direction: "desc".into(),
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            page["rows"][0]["evidence"][score_index.to_string()],
+            "0.7",
+            "{page}"
+        );
+        assert_eq!(
+            page["rows"][0]["evidence"][position_index.to_string()],
+            "-49"
+        );
+        assert_eq!(
+            page["rows"][0]["evidence"][maximum_index.to_string()],
+            "0.7"
+        );
+        assert_eq!(
+            page["rows"][0]["evidenceResolution"][score_index.to_string()]["kind"],
+            "exact_gene"
+        );
+        assert_eq!(
+            page["rows"][0]["evidenceResolution"][maximum_index.to_string()]["kind"],
+            "derived_maximum"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9940,11 +10312,11 @@ mod tests {
             ]
         );
         let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
-        assert_eq!(catalog_value["fields"].as_array().unwrap().len(), 7);
+        assert_eq!(catalog_value["fields"].as_array().unwrap().len(), 8);
         let id = allele_id("1", 65565, "A", "G");
         let detail: Value =
             serde_json::from_str(&detail_json(&consequences, &evidence, &id).unwrap()).unwrap();
-        assert_eq!(detail["evidence"].as_array().unwrap().len(), 7);
+        assert_eq!(detail["evidence"].as_array().unwrap().len(), 8);
         let revel_index = catalog_value["fields"]
             .as_array()
             .unwrap()
@@ -10005,7 +10377,7 @@ mod tests {
         assert_eq!(indexed_detail["variant"]["geneSymbol"], "OR4F5");
         assert_eq!(indexed_detail["variant"]["alternateCount"], 1);
         assert_eq!(indexed_detail["consequences"].as_array().unwrap().len(), 1);
-        assert_eq!(indexed_detail["evidence"].as_array().unwrap().len(), 7);
+        assert_eq!(indexed_detail["evidence"].as_array().unwrap().len(), 8);
         let query_evidence = root.join("query-evidence");
         fs::create_dir(&query_evidence).unwrap();
         fs::copy(&evidence, query_evidence.join("canonical.parquet")).unwrap();
@@ -10023,7 +10395,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(composite_detail["evidence"].as_array().unwrap().len(), 14);
+        assert_eq!(composite_detail["evidence"].as_array().unwrap().len(), 16);
         let legacy = root.join("legacy");
         fs::create_dir(&legacy).unwrap();
         let legacy_variants = legacy.join("variants.parquet");
@@ -10083,7 +10455,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fallback_detail["consequences"].as_array().unwrap().len(), 1);
-        assert_eq!(fallback_detail["evidence"].as_array().unwrap().len(), 7);
+        assert_eq!(fallback_detail["evidence"].as_array().unwrap().len(), 8);
         fs::write(&detail_index, b"not a valid index").unwrap();
         assert!(
             complete_detail_json_at(

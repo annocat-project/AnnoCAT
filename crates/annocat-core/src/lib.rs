@@ -190,9 +190,10 @@ mod tests {
     #[test]
     fn comprehensive_profile_has_requested_genome_wide_sources() {
         let profile = source_catalog::profile("wgs").unwrap();
-        for source_id in ["dbsnp", "cadd", "phylop", "gnomad", "spliceai"] {
+        for source_id in ["dbsnp", "cadd", "phylop", "gnomad-genomes", "spliceai"] {
             assert!(profile.source_ids.iter().any(|id| id == source_id));
         }
+        assert!(!profile.source_ids.iter().any(|id| id == "gnomad"));
         assert!(!profile.source_ids.iter().any(|id| id == "revel"));
         assert!(!profile.source_ids.iter().any(|id| id == "fastvep"));
     }

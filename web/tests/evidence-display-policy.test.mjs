@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import {createVariantPresentation} from '../src/app/variant-presentation.js';
+import {createVariantPresentation,evidenceColumnPolicy} from '../src/app/variant-presentation.js';
 import {favorFieldPresentation} from '../src/app/favor-online.js';
 
 globalThis.localStorage={getItem:()=>null,setItem:()=>{}};
+
+test('SpliceAI recommends only the maximum score and hides its duplicate gene field',()=>{
+  assert.deepEqual(evidenceColumnPolicy({sourceId:'spliceai',fieldPath:'maxDeltaScore'}),{selectable:true,recommended:true});
+  for(const fieldPath of ['dsAg','dsAl','dsDg','dsDl','dpAg','dpAl','dpDg','dpDl']){
+    assert.deepEqual(evidenceColumnPolicy({sourceId:'spliceai',fieldPath}),{selectable:true,recommended:false});
+  }
+  assert.deepEqual(evidenceColumnPolicy({sourceId:'spliceai',fieldPath:'gene'}),{selectable:false,recommended:false});
+});
 
 const evidenceCalibrations=JSON.parse(readFileSync(new URL('../../config/evidence-calibrations.json',import.meta.url),'utf8'));
 let useCalibratedEvidenceColors=true;
@@ -129,6 +137,17 @@ test('pathogenic calibrated ranges always use adverse pills',()=>{
     assert.equal(result.tone,'adverse');
     assert.equal(result.presentation,'pill');
   }
+});
+
+test('SpliceAI scores and signed positions use different guidance',()=>{
+  const position=presenter.evidencePresentation(item('spliceai','dpAg','-49'));
+  assert.match(position.tooltip,/Signed offset in bases/);
+  assert.match(position.tooltip,/Negative values are upstream/);
+  assert.doesNotMatch(position.tooltip,/ranges from 0 to 1/);
+  assert.equal(position.tone,'neutral');
+
+  const score=presenter.evidencePresentation(item('spliceai','dsAg','0.82'));
+  assert.match(score.tooltip,/delta score from 0 to 1/);
 });
 
 test('FAVOR MutPred2 uses calibrated bands but is excluded from summary votes',()=>{

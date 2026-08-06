@@ -1533,18 +1533,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let response = portable_paths()
             .and_then(|paths| completed_run_query_inputs(&paths.runs, run_id))
             .and_then(|(_, catalog)| catalog.ok_or("field catalog is missing".into()))
-            .and_then(|catalog| {
-                let metadata = std::fs::metadata(&catalog)
-                    .map_err(|error| format!("field catalog is missing: {error}"))?;
-                if metadata.len() == 0 || metadata.len() > 5 * 1024 * 1024 {
-                    return Err("field catalog has an invalid size".into());
-                }
-                let body = std::fs::read_to_string(catalog)
-                    .map_err(|error| format!("cannot read field catalog: {error}"))?;
-                serde_json::from_str::<serde_json::Value>(&body)
-                    .map_err(|error| format!("invalid field catalog: {error}"))?;
-                Ok(body)
-            });
+            .and_then(|catalog| results::field_catalog_json(&catalog));
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
             Err(error) => (
@@ -4519,7 +4508,11 @@ mod profile_status_tests {
         assert!(html.contains("class=\"about-section\""));
         assert!(!html.contains("class=\"privacy\""));
         assert!(html.contains(">Apache-2.0</a>"));
-        assert!(html.contains("AnnoCAT is an application for annotating and reviewing genomic variants."));
+        assert!(
+            html.contains(
+                "AnnoCAT is an application for annotating and reviewing genomic variants."
+            )
+        );
         assert!(html.contains("Research use only"));
         assert!(html.contains("Do not use AnnoCAT for diagnosis or patient-care decisions."));
         assert!(manifest.contains("license = \"Apache-2.0\""));

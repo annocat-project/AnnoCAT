@@ -250,7 +250,7 @@
       "id": "wgs",
       "name": "Comprehensive",
       "purpose": "Broad clinical, population, prediction, conservation, and splicing annotation",
-      "sourceIds": ["dbnsfp", "clinvar", "dbsnp", "gnomad", "cadd", "phylop", "spliceai"]
+      "sourceIds": ["dbnsfp", "clinvar", "dbsnp", "gnomad-genomes", "cadd", "phylop", "spliceai"]
     },
     {
       "id": "standard",

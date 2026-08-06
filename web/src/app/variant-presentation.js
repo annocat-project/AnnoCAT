@@ -4,6 +4,16 @@ export function applyGenericEvidenceCellPresentation(cell, html) {
   return true;
 }
 
+export function evidenceColumnPolicy(field) {
+  const source=String(field?.sourceId||'').toLowerCase();
+  const leaf=String(field?.fieldPath||'').split(/[.\[\]]/).filter(Boolean).pop()?.replace(/[^a-z0-9]/gi,'').toLowerCase()||'';
+  if(source==='spliceai'||source.startsWith('spliceai-')||source.startsWith('spliceai@')){
+    if(leaf==='gene')return{selectable:false,recommended:false};
+    if(leaf==='maxdeltascore')return{selectable:true,recommended:true}
+  }
+  return{selectable:field?.selectable!==false,recommended:false}
+}
+
 export function createVariantPresentation({
   $,columns,escapeHtml,prototypeIcon,resultFieldIdentity,fieldSourceIs,resourceTitle,
   coreColumnPresentation,displayColumns,moveResultColumn,decodeEvidenceValue,resultColumnRawValue,
@@ -37,7 +47,7 @@ function calibrationSourceVerified(match){return(match?.calibrationVerificationS
 function nativeSourceVerified(match){return(match?.nativeVerificationStatus||match?.verificationStatus)==='approved'}
 
 function evidenceReadingGuide(source,field){
-  const id=String(source||'').toLowerCase(),key=String(field||''),lower=key.toLowerCase();
+  const id=String(source||'').toLowerCase(),key=String(field||''),lower=key.toLowerCase(),normalized=lower.replace(/[^a-z0-9]/g,'');
   const predictor=calibratedPredictorDefinition({sourceId:source,fieldPath:field});
   const category=categoricalPredictionDefinition({sourceId:source,fieldPath:field});
   if(category)return category.note||'Prediction reported by dbNSFP.';
@@ -67,7 +77,9 @@ function evidenceReadingGuide(source,field){
   if((lower.includes('cadd')||id.includes('cadd'))&&lower.includes('phred'))return'Higher scores suggest a more deleterious effect. Scores of 10 and 20 approximate the top 10% and 1%.';
   if(lower.includes('primateai_score')||id.includes('primateai')&&lower.includes('score'))return'The original PrimateAI score ranges from 0 to 1. Higher scores suggest a damaging protein effect.';
   if(lower.includes('primateai_pred')||id.includes('primateai')&&lower.includes('pred'))return'dbNSFP uses 0.803 as the cutoff between D and T.';
-  if(id.includes('spliceai')||lower.startsWith('ds_'))return'This splice-effect component ranges from 0 to 1. The registered summary uses the maximum of the four delta scores.';
+  if(id.includes('spliceai')&&['dpag','dpal','dpdg','dpdl'].includes(normalized))return'Signed offset in bases from the variant. Negative values are upstream; positive values are downstream.';
+  if(id.includes('spliceai')&&normalized==='maxdeltascore')return'Maximum of the four SpliceAI delta scores. The score ranges from 0 to 1.';
+  if((id.includes('spliceai')&&['dsag','dsal','dsdg','dsdl'].includes(normalized))||lower.startsWith('ds_'))return'SpliceAI delta score from 0 to 1.';
   if(id.includes('phylop')||lower.includes('phylop'))return'Positive values indicate conservation. Negative values indicate accelerated change.';
   if(id.includes('gerp')||lower.includes('gerp'))return'Higher positive values indicate stronger constraint. Values above 2 often indicate conservation.';
   if(lower==='af'||lower.includes('allele_frequency'))return'Lower population frequencies are rarer. Rarity alone does not indicate pathogenicity.';
@@ -520,6 +532,7 @@ function numericEvidenceValues(value){
   return values.map(value=>Number(String(value).trim())).filter(value=>Number.isFinite(value))
 }
 function spliceAiMaximumDeltaItem(items){
+  if(items.some(item=>fieldSourceIs(item,'spliceai')&&evidenceFieldLeaf(item).toLowerCase().replace(/[^a-z0-9]/g,'')==='maxdeltascore'))return null;
   const components=items.filter(item=>fieldSourceIs(item,'spliceai')&&['dsag','dsal','dsdg','dsdl'].includes(evidenceFieldLeaf(item).toLowerCase().replace(/[^a-z0-9]/g,''))),scores=components.flatMap(item=>numericEvidenceValues(item.value)).filter(value=>value>=0&&value<=1);
   if(!scores.length)return null;
   const source=components[0];

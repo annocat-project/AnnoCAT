@@ -279,14 +279,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("local metadata path has no parent")?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create local metadata directory: {error}"))?;
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.partial",
-        path.file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("metadata"),
-        std::process::id(),
-        ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary = unique_temporary_path(path)?;
     fs::write(&temporary, bytes)
         .map_err(|error| format!("cannot write local metadata: {error}"))?;
     if let Err(error) = replace_file(&temporary, path) {
@@ -294,6 +287,18 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         return Err(error);
     }
     Ok(())
+}
+
+pub(crate) fn unique_temporary_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or("local metadata path has no parent")?;
+    Ok(parent.join(format!(
+        ".{}.{}.{}.partial",
+        path.file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("metadata"),
+        std::process::id(),
+        ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )))
 }
 
 pub(crate) fn publish_atomic_file(source: &Path, destination: &Path) -> Result<(), String> {
@@ -304,6 +309,27 @@ pub(crate) fn publish_atomic_file(source: &Path, destination: &Path) -> Result<(
         return Err("atomic file publication requires paths in the same directory".into());
     }
     replace_file(source, destination)
+}
+
+pub(crate) fn publish_cache_file(
+    source: &Path,
+    destination: &Path,
+    is_valid: impl Fn(&Path) -> bool,
+) -> Result<(), String> {
+    match publish_atomic_file(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            for _ in 0..5 {
+                if is_valid(destination) {
+                    let _ = fs::remove_file(source);
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let _ = fs::remove_file(source);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -433,6 +459,27 @@ mod tests {
                 .flatten()
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".partial"))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_publish_accepts_a_valid_concurrent_winner() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-cache-publish-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("cache.parquet");
+        fs::write(&destination, b"winner").unwrap();
+        let missing_source = root.join("loser.partial");
+        publish_cache_file(&missing_source, &destination, |path| {
+            fs::read(path).is_ok_and(|bytes| bytes == b"winner")
+        })
+        .unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
