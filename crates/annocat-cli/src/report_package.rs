@@ -29,6 +29,26 @@ struct RunManifest {
     fastvep_version: Option<String>,
     fastvep_sha256: Option<String>,
     source_ids: Vec<String>,
+    #[serde(default)]
+    sources: Vec<crate::report_import::PackageSourceBinding>,
+    #[serde(default)]
+    observed_source_ids: Vec<String>,
+    #[serde(default)]
+    sources_without_observed_evidence: Vec<String>,
+    #[serde(default)]
+    annotation_selection: Option<String>,
+    #[serde(default)]
+    requested_profile: Option<String>,
+    #[serde(default)]
+    reference_manifest_sha256: Option<String>,
+    #[serde(default)]
+    transcript_manifest_sha256: Option<String>,
+    #[serde(default)]
+    input_name: Option<String>,
+    #[serde(default)]
+    input_bytes: Option<u64>,
+    #[serde(default)]
+    input_content_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +154,36 @@ pub fn create_with_display_name(
     {
         source_ids.push("hpo".into());
     }
+    let annotation_engine =
+        (result_kind != "vcf-only").then(|| crate::report_import::PackageAnnotationEngine {
+            name: "fastVEP".into(),
+            version: manifest.fastvep_version,
+            sha256: manifest.fastvep_sha256,
+        });
+    let annotation_provenance =
+        (result_kind != "vcf-only").then(|| crate::report_import::PackageAnnotationProvenance {
+            source_ids: source_ids.clone(),
+            sources: manifest.sources,
+            observed_source_ids: manifest.observed_source_ids,
+            sources_without_observed_evidence: manifest.sources_without_observed_evidence,
+            annotation_selection: manifest.annotation_selection,
+            requested_profile: manifest.requested_profile,
+            reference_manifest_sha256: manifest.reference_manifest_sha256,
+            transcript_manifest_sha256: manifest.transcript_manifest_sha256,
+        });
+    if let Some(provenance) = annotation_provenance.as_ref() {
+        crate::report_import::validate_annotation_provenance(provenance, &source_ids)?;
+    }
+    crate::report_import::validate_input_identity(
+        manifest.input_name.as_deref(),
+        manifest.input_bytes,
+        manifest.input_content_sha256.as_deref(),
+    )?;
+    let input_identity = manifest
+        .input_name
+        .zip(manifest.input_bytes)
+        .zip(manifest.input_content_sha256)
+        .map(|((name, bytes), sha256)| (name, bytes, sha256));
     let mut file_declarations = entries
         .iter()
         .map(|(name, role, _, bytes, sha256)| {
@@ -161,12 +211,12 @@ pub fn create_with_display_name(
         "variantCount": manifest.variant_count,
         "resultKind": result_kind,
         "createdBy": {"application": "AnnoCAT", "version": env!("CARGO_PKG_VERSION")},
-        "annotationEngine": (result_kind != "vcf-only").then(|| serde_json::json!({
-            "name": "fastVEP",
-            "version": manifest.fastvep_version,
-            "sha256": manifest.fastvep_sha256
-        })),
+        "annotationEngine": annotation_engine,
         "sourceIds": source_ids,
+        "annotationProvenance": annotation_provenance,
+        "inputName": input_identity.as_ref().map(|identity| &identity.0),
+        "inputBytes": input_identity.as_ref().map(|identity| identity.1),
+        "inputContentSha256": input_identity.as_ref().map(|identity| &identity.2),
         "files": file_declarations
     }))
     .map_err(|error| format!("cannot serialize result manifest: {error}"))?;
@@ -336,9 +386,47 @@ mod tests {
         ] {
             fs::write(run.join(name), bytes).unwrap();
         }
+        let sha256 = "a".repeat(64);
         fs::write(
             run.join("manifest.json"),
-            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"representativeSelectionContract":"allele-gene-severity-v1","state":"completed","runId":"run-package","name":"Package fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":2,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "canonicalSchemaVersion": 1,
+                "representativeSelectionContract": "allele-gene-severity-v1",
+                "state": "completed",
+                "runId": "run-package",
+                "name": "Package fixture",
+                "completedAt": "2026-07-16T00:00:00Z",
+                "assembly": "GRCh38",
+                "variantCount": 2,
+                "resultFile": "variants.parquet",
+                "consequencesFile": "consequences.parquet",
+                "evidenceFile": "evidence.parquet",
+                "fieldCatalogFile": "field-catalog.json",
+                "fastvepVersion": "0.2.0",
+                "fastvepSha256": sha256,
+                "sourceIds": ["clinvar"],
+                "sources": [{
+                    "resourceId": "clinvar",
+                    "release": "2026-07-15",
+                    "assembly": "GRCh38",
+                    "selectedSchema": "clinvar-20260715",
+                    "cacheFormat": "osa2",
+                    "osaSchemaVersion": 2,
+                    "cacheBuilderContract": "fastvep-osa-v2-multivalue-v1",
+                    "chromosomes": ["all"]
+                }],
+                "observedSourceIds": ["clinvar", "vep"],
+                "sourcesWithoutObservedEvidence": [],
+                "annotationSelection": "profile",
+                "requestedProfile": "wgs",
+                "referenceManifestSha256": "b".repeat(64),
+                "transcriptManifestSha256": "c".repeat(64)
+                ,"inputName": "sample.vcf.gz"
+                ,"inputBytes": 1234
+                ,"inputContentSha256": "d".repeat(64)
+            }))
+            .unwrap(),
         )
         .unwrap();
         let destination = root.join("shared.zip");
@@ -367,7 +455,36 @@ mod tests {
         let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         assert_eq!(manifest["packageFormat"], "annocat-result");
         assert_eq!(manifest["resultKind"], "annotation");
+        assert_eq!(
+            manifest["annotationProvenance"]["sources"][0]["resourceId"],
+            "clinvar"
+        );
+        assert_eq!(manifest["annotationProvenance"]["requestedProfile"], "wgs");
+        assert_eq!(manifest["inputName"], "sample.vcf.gz");
+        assert_eq!(manifest["inputBytes"], 1234);
+        assert_eq!(manifest["inputContentSha256"], "d".repeat(64));
         assert!(manifest.get("reportKind").is_none());
+
+        let mut incomplete: serde_json::Value =
+            serde_json::from_slice(&fs::read(run.join("manifest.json")).unwrap()).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("inputContentSha256");
+        fs::write(
+            run.join("manifest.json"),
+            serde_json::to_vec(&incomplete).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            create(
+                &run,
+                &root.join("incomplete.zip"),
+                &crate::report_import::CandidateOverlay::empty("run-package"),
+            )
+            .unwrap_err()
+            .contains("input identity is incomplete")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

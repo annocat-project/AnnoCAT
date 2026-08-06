@@ -2,7 +2,7 @@ use super::checkpoint::{
     CHECKPOINT_SCHEMA_VERSION, CacheFormat, CheckpointState, PreparationCheckpoint,
     PreparationIdentity, RestartDecision, ShardPaths, read_checkpoint, write_checkpoint,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -12,6 +12,16 @@ pub(crate) enum VerifiedCacheCompatibility {
     Missing,
     Ready,
     RebuildRequired,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourceVerification {
+    pub source_id: String,
+    pub shard_count: usize,
+    pub hashed_file_count: usize,
+    pub structurally_verified_shard_count: usize,
+    pub verified_bytes: u64,
 }
 
 pub(crate) fn verified_cache_compatibility(
@@ -24,17 +34,7 @@ pub(crate) fn verified_cache_compatibility(
     let Ok(checkpoint) = read_checkpoint(&paths.verification()) else {
         return VerifiedCacheCompatibility::RebuildRequired;
     };
-    if checkpoint.state != CheckpointState::Verified {
-        return VerifiedCacheCompatibility::RebuildRequired;
-    }
-    let Ok(format) = checkpoint.identity.cache_format() else {
-        return VerifiedCacheCompatibility::RebuildRequired;
-    };
-    if required_nonempty_file(&paths.final_data(format)).is_err()
-        || paths
-            .final_index(format)
-            .is_some_and(|path| required_nonempty_file(&path).is_err())
-    {
+    if verified_cache_files(&paths.final_directory, &checkpoint).is_err() {
         return VerifiedCacheCompatibility::RebuildRequired;
     }
     if paths.cache_contract().is_file() {
@@ -136,16 +136,135 @@ fn verified_shard_format(directory: &Path, resource_id: &str) -> Option<CacheFor
     {
         return None;
     }
-    let format = checkpoint.identity.cache_format().ok()?;
-    required_nonempty_file(&directory.join(format.data_file_name())).ok()?;
-    if let Some(index) = format.index_file_name() {
-        required_nonempty_file(&directory.join(index)).ok()?;
-    }
+    let format = verified_cache_files(directory, &checkpoint).ok()?;
     let contract = crate::cache_contract::read(&directory.join("cache-contract-v2.json")).ok()?;
     (contract.cache_contract.osa_schema_version == format.schema_version()
         && contract.cache_contract.reader_compatibility == format.reader_compatibility()
         && contract.cache_contract.builder_contract == format.builder_contract())
     .then_some(format)
+}
+
+pub(crate) fn verified_cache_files(
+    directory: &Path,
+    checkpoint: &PreparationCheckpoint,
+) -> Result<CacheFormat, String> {
+    if checkpoint.state != CheckpointState::Verified {
+        return Err("cache checkpoint is not verified".into());
+    }
+    let format = checkpoint.identity.cache_format()?;
+    let data = directory.join(format.data_file_name());
+    let data_bytes = required_nonempty_file(&data)?;
+    if data_bytes != checkpoint.prepared_bytes {
+        return Err(format!(
+            "prepared data size differs from verified.json ({data_bytes} != {})",
+            checkpoint.prepared_bytes
+        ));
+    }
+    match format.index_file_name() {
+        Some(name) => {
+            let index_bytes = required_nonempty_file(&directory.join(name))?;
+            if index_bytes != checkpoint.prepared_index_bytes {
+                return Err(format!(
+                    "prepared index size differs from verified.json ({index_bytes} != {})",
+                    checkpoint.prepared_index_bytes
+                ));
+            }
+        }
+        None if checkpoint.prepared_index_bytes != 0 => {
+            return Err("OSA2 verified.json declares an external index".into());
+        }
+        None if directory.join("source.osa.idx").exists() => {
+            return Err("OSA2 cache has an unexpected external index".into());
+        }
+        None => {}
+    }
+    Ok(format)
+}
+
+pub(crate) fn verify_source_cache(
+    fastvep_executable: &Path,
+    resource_root: &Path,
+    resource_id: &str,
+    chromosomes: &[String],
+    mut progress: impl FnMut(&str),
+) -> Result<SourceVerification, String> {
+    let mut result = SourceVerification {
+        source_id: resource_id.into(),
+        shard_count: 0,
+        hashed_file_count: 0,
+        structurally_verified_shard_count: 0,
+        verified_bytes: 0,
+    };
+    for chromosome in chromosomes {
+        progress(chromosome);
+        let paths = ShardPaths::new(resource_root, chromosome)?;
+        let checkpoint = read_checkpoint(&paths.verification())
+            .map_err(|error| format!("{resource_id} chromosome {chromosome}: {error}"))?;
+        if checkpoint.identity.resource_id != resource_id
+            || checkpoint.identity.chromosome != *chromosome
+            || verified_cache_compatibility(&paths, &checkpoint.identity)
+                != VerifiedCacheCompatibility::Ready
+        {
+            return Err(format!(
+                "{resource_id} chromosome {chromosome}: cache identity or contract is not ready"
+            ));
+        }
+        let format = verified_cache_files(&paths.final_directory, &checkpoint)
+            .map_err(|error| format!("{resource_id} chromosome {chromosome}: {error}"))?;
+        let data = paths.final_data(format);
+        let mut needs_structural_verification = checkpoint.prepared_sha256.is_none();
+        if let Some(expected) = checkpoint.prepared_sha256.as_deref() {
+            verify_file_hash(&data, expected, resource_id, chromosome)?;
+            result.hashed_file_count += 1;
+        }
+        result.verified_bytes = result
+            .verified_bytes
+            .saturating_add(checkpoint.prepared_bytes);
+        if let Some(index) = paths.final_index(format) {
+            if let Some(expected) = checkpoint.prepared_index_sha256.as_deref() {
+                verify_file_hash(&index, expected, resource_id, chromosome)?;
+                result.hashed_file_count += 1;
+            } else {
+                needs_structural_verification = true;
+            }
+            result.verified_bytes = result
+                .verified_bytes
+                .saturating_add(checkpoint.prepared_index_bytes);
+        } else if checkpoint.prepared_index_sha256.is_some() {
+            return Err(format!(
+                "{resource_id} chromosome {chromosome}: OSA2 checkpoint contains an index hash"
+            ));
+        }
+        if needs_structural_verification {
+            verify_osa(fastvep_executable, &data, &checkpoint.identity)
+                .map_err(|error| format!("{resource_id} chromosome {chromosome}: {error}"))?;
+            result.structurally_verified_shard_count += 1;
+        }
+        result.shard_count += 1;
+    }
+    if result.shard_count == 0 {
+        return Err(format!("{resource_id} has no installed cache shards"));
+    }
+    Ok(result)
+}
+
+fn verify_file_hash(
+    path: &Path,
+    expected: &str,
+    resource_id: &str,
+    chromosome: &str,
+) -> Result<(), String> {
+    let actual = crate::fastvep::sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{resource_id} chromosome {chromosome}: SHA-256 mismatch for {}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("prepared cache")
+        ))
+    }
 }
 
 fn select_cache_format(
@@ -198,6 +317,8 @@ pub fn initialize_partial(paths: &ShardPaths, identity: PreparationIdentity) -> 
             parsed_records: 0,
             prepared_bytes: 0,
             prepared_index_bytes: 0,
+            prepared_sha256: None,
+            prepared_index_sha256: None,
         },
     )?;
     crate::cache_contract::write_atomic(&paths.partial_cache_contract(), &manifest)
@@ -234,6 +355,11 @@ pub fn promote_verified(
         parsed_records,
         prepared_bytes: osa_bytes,
         prepared_index_bytes: index_bytes,
+        prepared_sha256: Some(crate::fastvep::sha256_file(&paths.partial_data(format))?),
+        prepared_index_sha256: paths
+            .partial_index(format)
+            .map(|path| crate::fastvep::sha256_file(&path))
+            .transpose()?,
     };
     write_checkpoint(&paths.partial_directory.join("verified.json"), &verified)?;
     crate::cache_contract::write_atomic(

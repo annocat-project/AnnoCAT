@@ -391,7 +391,7 @@ mod worker;
 
 #[cfg(test)]
 use settings::AppConfig;
-use settings::{config_file, load_config, save_config};
+use settings::{load_config, resolve_directories, save_config, stored_directory};
 
 pub(crate) fn terminal_log(component: &str, message: impl AsRef<str>) {
     terminal::log(component, message);
@@ -2877,21 +2877,24 @@ fn portable_home() -> Result<std::path::PathBuf, String> {
 fn save_resource_directory(path: &std::path::Path) -> Result<(), String> {
     let home = portable_home()?;
     let mut config = load_config(&home)?;
-    config.resource_directory = Some(path.to_path_buf());
+    config.resource_directory = stored_directory(&home, path, &home.join("resources"))?;
     save_config(&home, &config)
 }
 
 fn save_downloads_directory(path: &std::path::Path) -> Result<(), String> {
     let home = portable_home()?;
     let mut config = load_config(&home)?;
-    config.downloads_directory = Some(path.to_path_buf());
+    let mut defaults = config.clone();
+    defaults.downloads_directory = None;
+    let default = resolve_directories(&home, &defaults)?.downloads_directory;
+    config.downloads_directory = stored_directory(&home, path, &default)?;
     save_config(&home, &config)
 }
 
 fn save_results_directory(path: &std::path::Path) -> Result<(), String> {
     let home = portable_home()?;
     let mut config = load_config(&home)?;
-    config.results_directory = Some(path.to_path_buf());
+    config.results_directory = stored_directory(&home, path, &home.join("runs"))?;
     save_config(&home, &config)
 }
 
@@ -3080,19 +3083,13 @@ fn remove_managed_resource_files(resource_id: &str) -> Result<(), String> {
 fn portable_paths() -> Result<PortablePaths, String> {
     let home = portable_home()?;
     let config = load_config(&home)?;
-    let resource_directory = config.resource_directory.unwrap_or_else(|| home.clone());
-    let downloads = config
-        .downloads_directory
-        .unwrap_or_else(|| resource_directory.join("downloads"));
-    let runs = config
-        .results_directory
-        .unwrap_or_else(|| home.join("runs"));
+    let directories = resolve_directories(&home, &config)?;
     Ok(PortablePaths {
-        resources: resource_directory.join("resources"),
-        downloads,
-        runs,
+        resources: directories.resource_directory.clone(),
+        downloads: directories.downloads_directory,
+        runs: directories.results_directory,
         config: home.join("config"),
-        resource_directory,
+        resource_directory: directories.resource_directory,
         home,
     })
 }
@@ -3111,9 +3108,6 @@ fn ensure_portable_layout() -> Result<(), String> {
                 path.display()
             )
         })?;
-    }
-    if !config_file(&paths.home).exists() {
-        save_resource_directory(&paths.resource_directory)?;
     }
     Ok(())
 }

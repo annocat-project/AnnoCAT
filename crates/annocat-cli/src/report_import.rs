@@ -11,6 +11,8 @@ const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 128;
 const MAX_ENTRY_NAME_BYTES: usize = 240;
 const MAX_COMPRESSION_RATIO: u64 = 10_000;
+const MAX_PROVENANCE_ITEMS: usize = 128;
+const MAX_PROVENANCE_TEXT_BYTES: usize = 256;
 pub const MAX_CANDIDATE_BYTES: usize = 4_000_000;
 pub const MAX_CANDIDATES: usize = 10_000;
 const MAX_PHENOTYPE_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -40,6 +42,18 @@ struct ReportManifest {
     report_kind_present: bool,
     #[serde(skip)]
     result_kind_present: bool,
+    #[serde(default)]
+    annotation_engine: Option<PackageAnnotationEngine>,
+    #[serde(default)]
+    source_ids: Vec<String>,
+    #[serde(default)]
+    annotation_provenance: Option<PackageAnnotationProvenance>,
+    #[serde(default)]
+    input_name: Option<String>,
+    #[serde(default)]
+    input_bytes: Option<u64>,
+    #[serde(default)]
+    input_content_sha256: Option<String>,
     files: Vec<ManifestFile>,
 }
 
@@ -50,6 +64,50 @@ struct ManifestFile {
     role: String,
     bytes: u64,
     sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackageAnnotationEngine {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) version: Option<String>,
+    #[serde(default)]
+    pub(crate) sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackageSourceBinding {
+    pub(crate) resource_id: String,
+    pub(crate) release: String,
+    pub(crate) assembly: String,
+    pub(crate) selected_schema: String,
+    pub(crate) cache_format: String,
+    pub(crate) osa_schema_version: u16,
+    pub(crate) cache_builder_contract: String,
+    pub(crate) chromosomes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PackageAnnotationProvenance {
+    #[serde(default)]
+    pub(crate) source_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) sources: Vec<PackageSourceBinding>,
+    #[serde(default)]
+    pub(crate) observed_source_ids: Vec<String>,
+    #[serde(default)]
+    pub(crate) sources_without_observed_evidence: Vec<String>,
+    #[serde(default)]
+    pub(crate) annotation_selection: Option<String>,
+    #[serde(default)]
+    pub(crate) requested_profile: Option<String>,
+    #[serde(default)]
+    pub(crate) reference_manifest_sha256: Option<String>,
+    #[serde(default)]
+    pub(crate) transcript_manifest_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +325,18 @@ fn validate_manifest(
         result_kind,
         "annotation" | "core-consequences" | "vcf-only"
     ));
+    validate_source_id_list(&manifest.source_ids, "source IDs")?;
+    if let Some(engine) = manifest.annotation_engine.as_ref() {
+        validate_annotation_engine(engine)?;
+    }
+    if let Some(provenance) = manifest.annotation_provenance.as_ref() {
+        validate_annotation_provenance(provenance, &manifest.source_ids)?;
+    }
+    validate_input_identity(
+        manifest.input_name.as_deref(),
+        manifest.input_bytes,
+        manifest.input_content_sha256.as_deref(),
+    )?;
     validate_identifier(&manifest.run_id, "run ID")?;
     if manifest.display_name.trim().is_empty()
         || manifest.display_name.len() > 256
@@ -331,6 +401,157 @@ fn validate_manifest(
             .is_none_or(|file| file.path != "phenotypes.json")
     {
         return Err("result phenotype profile has an invalid filename".into());
+    }
+    Ok(())
+}
+
+fn validate_annotation_engine(engine: &PackageAnnotationEngine) -> Result<(), String> {
+    if engine.name != "fastVEP" {
+        return Err("result annotation engine is invalid".into());
+    }
+    if let Some(version) = engine.version.as_deref() {
+        validate_portable_text(version, "annotation engine version")?;
+    }
+    if let Some(sha256) = engine.sha256.as_deref() {
+        validate_sha256(sha256, "annotation engine")?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_input_identity(
+    name: Option<&str>,
+    bytes: Option<u64>,
+    sha256: Option<&str>,
+) -> Result<(), String> {
+    match (name, bytes, sha256) {
+        (None, None, None) => Ok(()),
+        (Some(name), Some(bytes), Some(sha256)) if bytes > 0 => {
+            safe_top_level_name(name)?;
+            validate_sha256(sha256, "input content")
+        }
+        _ => Err("result input identity is incomplete".into()),
+    }
+}
+
+pub(crate) fn validate_annotation_provenance(
+    provenance: &PackageAnnotationProvenance,
+    expected_source_ids: &[String],
+) -> Result<(), String> {
+    validate_source_id_list(&provenance.source_ids, "provenance source IDs")?;
+    let expected = expected_source_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let actual = provenance
+        .source_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err("result provenance source IDs do not match sourceIds".into());
+    }
+    if provenance.sources.len() > MAX_PROVENANCE_ITEMS {
+        return Err("result provenance has too many source bindings".into());
+    }
+    let mut bound_sources = BTreeSet::new();
+    for binding in &provenance.sources {
+        validate_identifier(&binding.resource_id, "source binding ID")?;
+        if !actual.contains(binding.resource_id.as_str())
+            || !bound_sources.insert(binding.resource_id.as_str())
+        {
+            return Err("result provenance has an invalid source binding".into());
+        }
+        validate_portable_text(&binding.release, "source release")?;
+        if binding.assembly != "GRCh38" {
+            return Err("result provenance source assembly is invalid".into());
+        }
+        validate_portable_text(&binding.selected_schema, "selected source schema")?;
+        if !matches!(binding.cache_format.as_str(), "osa" | "osa2")
+            || !matches!(binding.osa_schema_version, 1 | 2)
+        {
+            return Err("result provenance cache format is invalid".into());
+        }
+        validate_portable_text(
+            &binding.cache_builder_contract,
+            "source cache builder contract",
+        )?;
+        if binding.chromosomes.is_empty() || binding.chromosomes.len() > 64 {
+            return Err("result provenance chromosome list is invalid".into());
+        }
+        let mut chromosomes = BTreeSet::new();
+        for chromosome in &binding.chromosomes {
+            validate_identifier(chromosome, "source chromosome")?;
+            if !chromosomes.insert(chromosome.as_str()) {
+                return Err("result provenance has duplicate source chromosomes".into());
+            }
+        }
+    }
+    validate_source_id_list(&provenance.observed_source_ids, "observed source IDs")?;
+    validate_source_id_list(
+        &provenance.sources_without_observed_evidence,
+        "sources without observed evidence",
+    )?;
+    if provenance
+        .sources_without_observed_evidence
+        .iter()
+        .any(|source| !actual.contains(source.as_str()))
+    {
+        return Err("result provenance names an unrequested source without evidence".into());
+    }
+    if let Some(selection) = provenance.annotation_selection.as_deref() {
+        if !matches!(
+            selection,
+            "profile" | "core-only" | "sources" | "vcf-review"
+        ) {
+            return Err("result provenance annotation selection is invalid".into());
+        }
+    }
+    if let Some(profile) = provenance.requested_profile.as_deref() {
+        validate_identifier(profile, "requested profile")?;
+    }
+    if let Some(sha256) = provenance.reference_manifest_sha256.as_deref() {
+        validate_sha256(sha256, "reference manifest")?;
+    }
+    if let Some(sha256) = provenance.transcript_manifest_sha256.as_deref() {
+        validate_sha256(sha256, "transcript manifest")?;
+    }
+    Ok(())
+}
+
+fn validate_source_id_list(values: &[String], label: &str) -> Result<(), String> {
+    if values.len() > MAX_PROVENANCE_ITEMS {
+        return Err(format!("result {label} exceed the supported count"));
+    }
+    let mut unique = BTreeSet::new();
+    for value in values {
+        validate_identifier(value, label)?;
+        if !unique.insert(value.as_str()) {
+            return Err(format!("result {label} contain duplicates"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_portable_text(value: &str, label: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let drive_path = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if value.is_empty()
+        || value.len() > MAX_PROVENANCE_TEXT_BYTES
+        || !value.is_ascii()
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains('/')
+        || value.contains('\\')
+        || drive_path
+        || value.to_ascii_lowercase().starts_with("file:")
+    {
+        return Err(format!("result {label} is invalid or path-like"));
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<(), String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("result {label} SHA-256 is invalid"));
     }
     Ok(())
 }
@@ -682,6 +903,19 @@ mod tests {
     }
 
     #[test]
+    fn input_identity_is_optional_but_cannot_contain_a_path() {
+        assert!(validate_input_identity(None, None, None).is_ok());
+        assert!(
+            validate_input_identity(Some("sample.vcf.gz"), Some(42), Some(&"a".repeat(64))).is_ok()
+        );
+        assert!(
+            validate_input_identity(Some(r"D:\sample.vcf.gz"), Some(42), Some(&"a".repeat(64)))
+                .is_err()
+        );
+        assert!(validate_input_identity(Some("sample.vcf.gz"), Some(42), None).is_err());
+    }
+
+    #[test]
     fn phenotype_archive_group_must_be_complete() {
         let path = fixture_archive(&[(
             "phenotypes.json",
@@ -751,5 +985,36 @@ mod tests {
             validate_candidate_bytes(&serde_json::to_vec(&candidates).unwrap(), "run-fixture")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn annotation_provenance_is_path_free_and_matches_source_ids() {
+        let source_ids = vec!["clinvar".to_string()];
+        let mut provenance = PackageAnnotationProvenance {
+            source_ids: source_ids.clone(),
+            sources: vec![PackageSourceBinding {
+                resource_id: "clinvar".into(),
+                release: "2026-07-15".into(),
+                assembly: "GRCh38".into(),
+                selected_schema: "clinvar-20260715:0123456789abcdef".into(),
+                cache_format: "osa2".into(),
+                osa_schema_version: 2,
+                cache_builder_contract: "fastvep-osa-v2-multivalue-v1".into(),
+                chromosomes: vec!["all".into()],
+            }],
+            observed_source_ids: vec!["clinvar".into(), "vep".into()],
+            sources_without_observed_evidence: Vec::new(),
+            annotation_selection: Some("profile".into()),
+            requested_profile: Some("wgs".into()),
+            reference_manifest_sha256: Some("a".repeat(64)),
+            transcript_manifest_sha256: Some("b".repeat(64)),
+        };
+        validate_annotation_provenance(&provenance, &source_ids).unwrap();
+
+        provenance.sources[0].release = r"D:\resources\clinvar".into();
+        assert!(validate_annotation_provenance(&provenance, &source_ids).is_err());
+        provenance.sources[0].release = "2026-07-15".into();
+        provenance.source_ids = vec!["dbsnp".into()];
+        assert!(validate_annotation_provenance(&provenance, &source_ids).is_err());
     }
 }

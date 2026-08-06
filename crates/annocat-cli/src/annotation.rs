@@ -683,9 +683,8 @@ pub fn resume_background(
     validate_request(&annotation, &resources)?;
     let partial_vcf = staging.join("annotated.vcf");
     let structured_output = staging.join("fastvep.ndjson");
-    let recover_partial_output = checkpoint.schema_version == CHECKPOINT_SCHEMA_VERSION
-        && expected_recovery_identity.is_some()
-        && validate_recovery_files(&partial_vcf, &structured_output).is_ok();
+    let recover_partial_output =
+        recoverable_outputs_exist(checkpoint.schema_version, &partial_vcf, &structured_output);
     begin_run_state(
         &annotation,
         &checkpoint.name,
@@ -1285,6 +1284,10 @@ fn execute_vcf_review(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("input.vcf");
+    let input_content_sha256 = canonical
+        .input_content_sha256
+        .as_deref()
+        .ok_or("VCF review input identity was not recorded")?;
     let mut manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": super::results::SCHEMA_VERSION,
@@ -1328,13 +1331,14 @@ fn execute_vcf_review(
         "sourcesWithoutObservedEvidence": [],
         "inputIdentityPreserved": true,
     });
-    manifest
+    let object = manifest
         .as_object_mut()
-        .ok_or("completed manifest is not an object")?
-        .insert(
-            "representativeSelectionContract".into(),
-            super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
-        );
+        .ok_or("completed manifest is not an object")?;
+    object.insert(
+        "representativeSelectionContract".into(),
+        super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
+    );
+    object.insert("inputContentSha256".into(), input_content_sha256.into());
     let _ = fs::remove_file(staging.join("annotation-state.json"));
     let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
@@ -2133,6 +2137,12 @@ fn finalize_outputs(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("input.vcf");
+    let input_content_sha256 = recovery_identity()
+        .lock()
+        .map_err(|_| "annotation recovery identity lock failed")?
+        .input_content_sha256
+        .clone()
+        .ok_or("annotation input identity was not recorded")?;
     let annotation_selection = if request.requested_profile.is_some() {
         "profile"
     } else if request.source_ids.is_empty() {
@@ -2148,7 +2158,12 @@ fn finalize_outputs(
     let sources_without_observed_evidence = request
         .source_ids
         .iter()
-        .filter(|source| !structured.sources.contains(source))
+        .filter(|source| {
+            !structured
+                .sources
+                .iter()
+                .any(|observed| observed.eq_ignore_ascii_case(source))
+        })
         .cloned()
         .collect::<Vec<_>>();
     if !sources_without_observed_evidence.is_empty() {
@@ -2212,6 +2227,7 @@ fn finalize_outputs(
     );
     object.insert("inputName".into(), input_name.into());
     object.insert("inputBytes".into(), file_bytes(&request.input)?.into());
+    object.insert("inputContentSha256".into(), input_content_sha256.into());
     if let Some(profile) = request.requested_profile.as_deref() {
         object.insert("requestedProfile".into(), profile.into());
     }
@@ -2495,6 +2511,15 @@ fn validate_recovery_files(partial_vcf: &Path, structured_output: &Path) -> Resu
         ));
     }
     Ok(())
+}
+
+fn recoverable_outputs_exist(
+    checkpoint_schema_version: u16,
+    partial_vcf: &Path,
+    structured_output: &Path,
+) -> bool {
+    checkpoint_schema_version == CHECKPOINT_SCHEMA_VERSION
+        && validate_recovery_files(partial_vcf, structured_output).is_ok()
 }
 
 fn recovery_outputs_exist(directory: &Path) -> bool {
@@ -2866,7 +2891,6 @@ fn compose_source_provider(
                 entry.chromosome
             ));
         }
-        require_nonempty(&osa, source_id)?;
         let destination_relative = PathBuf::from(source_id)
             .join("shards")
             .join(format!("chr{}", entry.chromosome))
@@ -2878,7 +2902,6 @@ fn compose_source_provider(
             .map_err(|error| format!("cannot link verified {source_id} shard: {error}"))?;
         if let Some(index_name) = format.index_file_name() {
             let index = shard_directory.join(index_name);
-            require_nonempty(&index, source_id)?;
             fs::hard_link(&index, destination_osa.parent().unwrap().join(index_name))
                 .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
         }
@@ -2944,13 +2967,11 @@ fn compose_single_provider(
     }
     let (format, builder_contract) = provider_cache_contract(&shard, &checkpoint, source_id)?;
     let osa = shard.join(format.data_file_name());
-    require_nonempty(&osa, source_id)?;
     let destination_osa = destination.join(format!("{source_id}.{}", format.builder_argument()));
     fs::hard_link(&osa, &destination_osa)
         .map_err(|error| format!("cannot link verified {source_id} provider: {error}"))?;
     if let Some(index_name) = format.index_file_name() {
         let index = shard.join(index_name);
-        require_nonempty(&index, source_id)?;
         fs::hard_link(&index, destination.join(format!("{source_id}.osa.idx")))
             .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
     }
@@ -2971,7 +2992,8 @@ fn provider_cache_contract(
     checkpoint: &super::preparation::PreparationCheckpoint,
     source_id: &str,
 ) -> Result<(super::preparation::CacheFormat, String), String> {
-    let format = checkpoint.identity.cache_format()?;
+    let format = super::preparation::verified_cache_files(shard_directory, checkpoint)
+        .map_err(|error| format!("{source_id} cache files are invalid: {error}"))?;
     let contract_path = shard_directory.join("cache-contract-v2.json");
     if !contract_path.is_file() {
         return Err(format!(
@@ -3002,17 +3024,6 @@ fn provider_cache_contract(
         ));
     }
     Ok((format, manifest.cache_contract.builder_contract))
-}
-
-fn require_nonempty(path: &Path, source_id: &str) -> Result<(), String> {
-    if path.is_file() && fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
-        Ok(())
-    } else {
-        Err(format!(
-            "verified {source_id} file is missing: {}",
-            path.display()
-        ))
-    }
 }
 
 pub(crate) fn current_timestamp() -> String {
@@ -3363,6 +3374,8 @@ mod tests {
                 parsed_records: 1,
                 prepared_bytes: 11,
                 prepared_index_bytes: 13,
+                prepared_sha256: None,
+                prepared_index_sha256: None,
             })
             .unwrap(),
         )
@@ -3412,6 +3425,8 @@ mod tests {
                 parsed_records: 1,
                 prepared_bytes: 16,
                 prepared_index_bytes: 11,
+                prepared_sha256: None,
+                prepared_index_sha256: None,
             })
             .unwrap(),
         )
@@ -3477,6 +3492,8 @@ mod tests {
                     parsed_records: 1,
                     prepared_bytes: 12,
                     prepared_index_bytes: 0,
+                    prepared_sha256: None,
+                    prepared_index_sha256: None,
                 })
                 .unwrap(),
             )
@@ -3617,6 +3634,36 @@ mod tests {
 
         assert!(!interrupted.exists());
         assert!(unrelated.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_checkpoint_recovers_outputs_before_input_hash_finishes() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-early-resume-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let partial_vcf = root.join("annotated.vcf");
+        let structured_output = root.join("fastvep.ndjson");
+        fs::write(&partial_vcf, b"partial VCF").unwrap();
+        fs::write(&structured_output, b"partial structured output").unwrap();
+
+        assert!(recoverable_outputs_exist(
+            CHECKPOINT_SCHEMA_VERSION,
+            &partial_vcf,
+            &structured_output
+        ));
+        assert!(!recoverable_outputs_exist(
+            CHECKPOINT_SCHEMA_VERSION - 1,
+            &partial_vcf,
+            &structured_output
+        ));
+
         fs::remove_dir_all(root).unwrap();
     }
 }

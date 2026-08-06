@@ -110,6 +110,10 @@ pub struct PreparationCheckpoint {
     pub parsed_records: u64,
     pub prepared_bytes: u64,
     pub prepared_index_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_index_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -27,6 +27,18 @@ struct PackageManifest {
     report_kind_present: bool,
     #[serde(skip)]
     result_kind_present: bool,
+    #[serde(default)]
+    annotation_engine: Option<crate::report_import::PackageAnnotationEngine>,
+    #[serde(default)]
+    source_ids: Vec<String>,
+    #[serde(default)]
+    annotation_provenance: Option<crate::report_import::PackageAnnotationProvenance>,
+    #[serde(default)]
+    input_name: Option<String>,
+    #[serde(default)]
+    input_bytes: Option<u64>,
+    #[serde(default)]
+    input_content_sha256: Option<String>,
     files: Vec<PackageFile>,
 }
 
@@ -216,7 +228,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     let consequences_file = file_for_role("consequences");
     let evidence_file = file_for_role("evidence");
     let catalog_file = file_for_role("field-catalog");
-    let local_manifest = serde_json::json!({
+    let mut local_manifest = serde_json::json!({
         "schemaVersion": 1,
         "canonicalSchemaVersion": manifest.schema_version,
         "representativeSelectionContract": manifest.representative_selection_contract,
@@ -236,9 +248,66 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
         "fieldCatalogFile": catalog_file.path,
         "fieldCatalogSha256": catalog_file.sha256,
         "canonicalResultBytes": manifest.files.iter().map(|file| file.bytes).sum::<u64>(),
-        "importedFrom": path,
+        "sourceIds": manifest.source_ids,
         "importedAt": crate::annotation::current_timestamp()
     });
+    let object = local_manifest
+        .as_object_mut()
+        .ok_or("imported result manifest is not an object")?;
+    if let (Some(name), Some(bytes), Some(sha256)) = (
+        manifest.input_name.as_ref(),
+        manifest.input_bytes,
+        manifest.input_content_sha256.as_ref(),
+    ) {
+        object.insert("input".into(), name.clone().into());
+        object.insert("inputName".into(), name.clone().into());
+        object.insert("inputBytes".into(), bytes.into());
+        object.insert("inputContentSha256".into(), sha256.clone().into());
+    }
+    if let Some(engine) = manifest.annotation_engine.as_ref() {
+        if let Some(version) = engine.version.as_ref() {
+            object.insert("fastvepVersion".into(), version.clone().into());
+        }
+        if let Some(sha256) = engine.sha256.as_ref() {
+            object.insert("fastvepSha256".into(), sha256.clone().into());
+        }
+    }
+    if let Some(provenance) = manifest.annotation_provenance.as_ref() {
+        object.insert(
+            "sources".into(),
+            serde_json::to_value(&provenance.sources)
+                .map_err(|error| format!("cannot restore source provenance: {error}"))?,
+        );
+        object.insert(
+            "observedSourceIds".into(),
+            serde_json::to_value(&provenance.observed_source_ids)
+                .map_err(|error| format!("cannot restore observed sources: {error}"))?,
+        );
+        object.insert(
+            "sourcesWithoutObservedEvidence".into(),
+            serde_json::to_value(&provenance.sources_without_observed_evidence)
+                .map_err(|error| format!("cannot restore missing source evidence: {error}"))?,
+        );
+        for (key, value) in [
+            (
+                "annotationSelection",
+                provenance.annotation_selection.as_ref(),
+            ),
+            ("requestedProfile", provenance.requested_profile.as_ref()),
+            (
+                "referenceManifestSha256",
+                provenance.reference_manifest_sha256.as_ref(),
+            ),
+            (
+                "transcriptManifestSha256",
+                provenance.transcript_manifest_sha256.as_ref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.into(), value.clone().into());
+            }
+        }
+    }
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&local_manifest).map_err(|error| error.to_string())?,
@@ -500,6 +569,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_package_metadata_defaults_without_provenance() {
+        let manifest = parse_package_manifest(
+            br#"{"packageFormat":"annocat-report","packageVersion":1,"schemaVersion":1,"runId":"run-legacy","displayName":"Legacy result","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":1,"files":[]}"#,
+        )
+        .unwrap();
+        assert!(manifest.source_ids.is_empty());
+        assert!(manifest.annotation_engine.is_none());
+        assert!(manifest.annotation_provenance.is_none());
+        assert!(manifest.input_name.is_none());
+        assert!(manifest.input_content_sha256.is_none());
+    }
+
+    #[test]
     fn validated_report_imports_atomically_and_keeps_source_zip() {
         let root = std::env::temp_dir().join(format!(
             "annocat-report-library-{}-{}",
@@ -545,7 +627,44 @@ mod tests {
         .unwrap();
         fs::write(
             run.join("manifest.json"),
-            br#"{"schemaVersion":1,"canonicalSchemaVersion":1,"representativeSelectionContract":"allele-gene-severity-v1","state":"completed","runId":"run-import","name":"Import fixture","completedAt":"2026-07-16T00:00:00Z","assembly":"GRCh38","variantCount":1,"resultFile":"variants.parquet","consequencesFile":"consequences.parquet","evidenceFile":"evidence.parquet","fieldCatalogFile":"field-catalog.json","fastvepVersion":"0.2.0","fastvepSha256":"fixture","sourceIds":["clinvar"]}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "canonicalSchemaVersion": 1,
+                "representativeSelectionContract": "allele-gene-severity-v1",
+                "state": "completed",
+                "runId": "run-import",
+                "name": "Import fixture",
+                "completedAt": "2026-07-16T00:00:00Z",
+                "assembly": "GRCh38",
+                "variantCount": 1,
+                "resultFile": "variants.parquet",
+                "consequencesFile": "consequences.parquet",
+                "evidenceFile": "evidence.parquet",
+                "fieldCatalogFile": "field-catalog.json",
+                "fastvepVersion": "0.2.0",
+                "fastvepSha256": "a".repeat(64),
+                "sourceIds": ["clinvar"],
+                "sources": [{
+                    "resourceId": "clinvar",
+                    "release": "2026-07-15",
+                    "assembly": "GRCh38",
+                    "selectedSchema": "clinvar-20260715",
+                    "cacheFormat": "osa2",
+                    "osaSchemaVersion": 2,
+                    "cacheBuilderContract": "fastvep-osa-v2-multivalue-v1",
+                    "chromosomes": ["all"]
+                }],
+                "observedSourceIds": ["clinvar", "vep"],
+                "sourcesWithoutObservedEvidence": [],
+                "annotationSelection": "profile",
+                "requestedProfile": "wgs",
+                "referenceManifestSha256": "b".repeat(64),
+                "transcriptManifestSha256": "c".repeat(64)
+                ,"inputName": "sample.vcf.gz"
+                ,"inputBytes": 1234
+                ,"inputContentSha256": "d".repeat(64)
+            }))
+            .unwrap(),
         )
         .unwrap();
         let fingerprint = "a".repeat(64);
@@ -634,6 +753,18 @@ mod tests {
             imported_manifest["representativeSelectionContract"],
             "allele-gene-severity-v1"
         );
+        assert_eq!(imported_manifest["fastvepVersion"], "0.2.0");
+        assert_eq!(
+            imported_manifest["sourceIds"],
+            serde_json::json!(["clinvar", "hpo"])
+        );
+        assert_eq!(imported_manifest["sources"][0]["resourceId"], "clinvar");
+        assert_eq!(imported_manifest["requestedProfile"], "wgs");
+        assert_eq!(imported_manifest["annotationSelection"], "profile");
+        assert_eq!(imported_manifest["inputName"], "sample.vcf.gz");
+        assert_eq!(imported_manifest["inputBytes"], 1234);
+        assert_eq!(imported_manifest["inputContentSha256"], "d".repeat(64));
+        assert!(imported_manifest.get("importedFrom").is_none());
         assert!(package_path.is_file(), "source ZIP must remain untouched");
         assert!(!library.join(".import-run-import.partial").exists());
         let restored = crate::library_metadata::candidate_snapshot(&library, "run-import").unwrap();

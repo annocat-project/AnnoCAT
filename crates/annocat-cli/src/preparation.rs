@@ -28,6 +28,7 @@ use cache::{
     verified_cache_compatibility, verify_partial_osa,
 };
 pub use cache::{initialize_partial, promote_verified};
+pub(crate) use cache::{verified_cache_files, verify_source_cache};
 use catalog::canonical_chromosomes;
 pub use catalog::{
     DbnsfpArchiveShard, DbnsfpPinnedManifest, PinnedShardedSource, RevelArchive,
@@ -198,6 +199,8 @@ fn checkpoint_stream_complete(
             parsed_records: 0,
             prepared_bytes: result.prepared_osa_bytes,
             prepared_index_bytes: result.prepared_index_bytes,
+            prepared_sha256: None,
+            prepared_index_sha256: None,
         },
     )
 }
@@ -3750,6 +3753,68 @@ mod tests {
             restart_decision(&paths, &expected),
             RestartDecision::RestartCurrentChromosome
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verified_cache_accepts_missing_legacy_hashes_but_rejects_size_changes() {
+        let root = root("verified-file-size");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let expected = identity("1");
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
+        promote_verified(&paths, expected.clone(), 10, 2).unwrap();
+
+        let mut checkpoint: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths.verification()).unwrap()).unwrap();
+        checkpoint.as_object_mut().unwrap().remove("preparedSha256");
+        checkpoint
+            .as_object_mut()
+            .unwrap()
+            .remove("preparedIndexSha256");
+        fs::write(
+            paths.verification(),
+            serde_json::to_vec_pretty(&checkpoint).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verified_cache_compatibility(&paths, &expected),
+            VerifiedCacheCompatibility::Ready
+        );
+
+        fs::write(paths.final_data(CacheFormat::OsaV1), b"longer").unwrap();
+        assert_eq!(
+            verified_cache_compatibility(&paths, &expected),
+            VerifiedCacheCompatibility::RebuildRequired
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn full_verification_detects_same_size_hash_changes_without_writing_metadata() {
+        let root = root("verified-file-hash");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let expected = identity("1");
+        initialize_partial(&paths, expected.clone()).unwrap();
+        fs::write(paths.partial_data(CacheFormat::OsaV1), b"osa").unwrap();
+        fs::write(paths.partial_index(CacheFormat::OsaV1).unwrap(), b"idx").unwrap();
+        promote_verified(&paths, expected, 10, 2).unwrap();
+        let checkpoint = fs::read(paths.verification()).unwrap();
+        let contract = fs::read(paths.cache_contract()).unwrap();
+
+        fs::write(paths.final_data(CacheFormat::OsaV1), b"bad").unwrap();
+        let error = verify_source_cache(
+            Path::new("unused-fastvep"),
+            &root,
+            "gnomad",
+            &["1".into()],
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("SHA-256 mismatch"));
+        assert_eq!(fs::read(paths.verification()).unwrap(), checkpoint);
+        assert_eq!(fs::read(paths.cache_contract()).unwrap(), contract);
         fs::remove_dir_all(root).unwrap();
     }
 

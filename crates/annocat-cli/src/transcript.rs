@@ -35,6 +35,27 @@ pub fn is_ready(resources: &Path) -> bool {
     validate_installation(resources).is_ok()
 }
 
+pub(crate) fn verify(fastvep: &Path, resources: &Path) -> Result<serde_json::Value, String> {
+    validate_installation(resources)?;
+    let manifest: Manifest = serde_json::from_slice(
+        &fs::read(resources.join("transcript-cache").join("manifest.json"))
+            .map_err(|error| format!("cannot read transcript cache manifest: {error}"))?,
+    )
+    .map_err(|error| format!("invalid transcript cache manifest: {error}"))?;
+    let cache = cache_path(resources);
+    if !crate::fastvep::sha256_file(&cache)?.eq_ignore_ascii_case(&manifest.cache_sha256) {
+        return Err("transcript cache SHA-256 mismatch".into());
+    }
+    let verification = verify_staged_cache(fastvep, &cache)?;
+    Ok(serde_json::json!({
+        "sourceId": "ensembl-gff3",
+        "verified": true,
+        "scope": "size-sha256-and-structure",
+        "transcriptCount": verification.transcript_count,
+        "cacheBytes": verification.cache_bytes
+    }))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TranscriptCacheVerification {
@@ -304,8 +325,6 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
         "resourceId": "transcript-cache",
         "assembly": "GRCh38",
         "ensemblRelease": "115",
-        "gff3": gff3,
-        "fasta": fasta,
         "cache": "ensembl-115.cache",
         "cacheBytes": bytes,
         "cacheSha256": cache_sha256,

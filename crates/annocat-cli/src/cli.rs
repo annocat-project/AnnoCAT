@@ -202,6 +202,15 @@ pub(crate) enum SourcesCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Fully verify installed annotation data without changing it.
+    Verify {
+        /// Annotation source IDs. Omit to verify all installed data.
+        #[arg(value_name = "SOURCE_ID", action = ArgAction::Append)]
+        source_ids: Vec<String>,
+        /// Print one machine-readable JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install and verify annotation data.
     #[command(group(
         ArgGroup::new("install_selection")
@@ -934,6 +943,17 @@ struct FieldCatalogEntry {
     selected: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceVerificationResult {
+    source_id: String,
+    name: String,
+    verified: bool,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<serde_json::Value>,
+}
+
 fn sources(command: SourcesCommand) -> Result<i32, String> {
     ensure_portable_layout()?;
     let paths = portable_paths()?;
@@ -944,17 +964,7 @@ fn sources(command: SourcesCommand) -> Result<i32, String> {
             json,
         } => {
             let allowed = profile.as_deref().map(profile_source_ids).transpose()?;
-            let mut ids = vec!["grch38-reference".to_string(), "ensembl-gff3".to_string()];
-            ids.extend(
-                annocat_core::source_catalog::catalog()
-                    .sources
-                    .iter()
-                    .filter(|source| source.id != favor::SERVICE_ID)
-                    .map(|source| source.id.clone()),
-            );
-            ids.sort();
-            ids.dedup();
-            let mut rows = ids
+            let mut rows = all_source_ids()
                 .into_iter()
                 .filter(|id| {
                     allowed.as_ref().is_none_or(|allowed| {
@@ -1001,6 +1011,9 @@ fn sources(command: SourcesCommand) -> Result<i32, String> {
             } else {
                 print_field_configuration(&value)?;
             }
+        }
+        SourcesCommand::Verify { source_ids, json } => {
+            return verify_sources(source_ids, json, &paths);
         }
         SourcesCommand::Install {
             source_ids,
@@ -1065,6 +1078,179 @@ fn sources(command: SourcesCommand) -> Result<i32, String> {
         }
     }
     Ok(0)
+}
+
+fn verify_sources(
+    mut source_ids: Vec<String>,
+    json: bool,
+    paths: &PortablePaths,
+) -> Result<i32, String> {
+    if source_ids.is_empty() {
+        source_ids = all_source_ids()
+            .into_iter()
+            .filter(|id| has_source_data(id, &paths.resources))
+            .collect();
+    } else {
+        source_ids.sort();
+        source_ids.dedup();
+    }
+
+    let engine = fastvep::readiness();
+    let mut rows = vec![SourceVerificationResult {
+        source_id: "fastvep".into(),
+        name: "fastVEP".into(),
+        verified: engine.ready,
+        detail: if engine.ready {
+            "Pinned executable SHA-256 and version match".into()
+        } else {
+            format!("fastVEP is not ready: {}", engine.state)
+        },
+        summary: Some(serde_json::json!({
+            "version": engine.version,
+            "sha256": engine.sha256,
+            "expectedSha256": engine.expected_sha256
+        })),
+    }];
+
+    for source_id in source_ids {
+        let name = resource_task_title(&source_id);
+        if !json {
+            eprintln!("Verifying {name}...");
+        }
+        let verified = verify_source(&source_id, paths, engine.executable.as_deref(), json);
+        rows.push(match verified {
+            Ok(summary) => SourceVerificationResult {
+                source_id,
+                name,
+                verified: true,
+                detail: verification_detail(&summary),
+                summary: Some(summary),
+            },
+            Err(error) => SourceVerificationResult {
+                source_id,
+                name,
+                verified: false,
+                detail: error,
+                summary: None,
+            },
+        });
+    }
+
+    if json {
+        println!("{}", serialize_json(&rows));
+    } else {
+        for row in &rows {
+            println!(
+                "{:<30}  {:<8}  {}",
+                truncate(&row.name, 30),
+                if row.verified { "Verified" } else { "Failed" },
+                row.detail
+            );
+        }
+    }
+    Ok(if rows.iter().all(|row| row.verified) {
+        0
+    } else {
+        1
+    })
+}
+
+fn verify_source(
+    source_id: &str,
+    paths: &PortablePaths,
+    fastvep: Option<&Path>,
+    json: bool,
+) -> Result<serde_json::Value, String> {
+    match source_id {
+        "grch38-reference" => reference::verify(&paths.resources),
+        "ensembl-gff3" => transcript::verify(
+            fastvep.ok_or("fastVEP is required to verify the transcript cache")?,
+            &paths.resources,
+        ),
+        "hpo" => phenotype::verify_assets(&paths.resources),
+        _ => {
+            if annocat_core::source_catalog::source(source_id).is_none() {
+                return Err(format!("annotation source '{source_id}' does not exist"));
+            }
+            let root = active_source_root(source_id, &paths.resources)
+                .ok_or_else(|| format!("{source_id} is not installed or is not ready"))?;
+            let executable = fastvep.ok_or("fastVEP is required to verify OSA caches")?;
+            let report = preparation::verify_source_cache(
+                executable,
+                &root,
+                source_id,
+                &resource_chromosomes(source_id),
+                |chromosome| {
+                    if !json {
+                        eprintln!("  {source_id} chromosome {chromosome}");
+                    }
+                },
+            )?;
+            serde_json::to_value(report).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn all_source_ids() -> Vec<String> {
+    let mut ids = vec!["grch38-reference".to_string(), "ensembl-gff3".to_string()];
+    ids.extend(
+        annocat_core::source_catalog::catalog()
+            .sources
+            .iter()
+            .filter(|source| source.id != favor::SERVICE_ID)
+            .map(|source| source.id.clone()),
+    );
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn has_source_data(source_id: &str, resources: &Path) -> bool {
+    match source_id {
+        "grch38-reference" => resources.join("reference").is_dir(),
+        "ensembl-gff3" => resources.join("transcript-cache").is_dir(),
+        "hpo" => resources.join("hpo").is_dir(),
+        _ => active_source_root(source_id, resources).is_some(),
+    }
+}
+
+fn active_source_root(source_id: &str, resources: &Path) -> Option<PathBuf> {
+    let chromosomes = resource_chromosomes(source_id);
+    if is_rolling_resource(source_id) {
+        let mut fallback = None;
+        for version in installed_resource_versions(source_id, resources)
+            .into_iter()
+            .rev()
+        {
+            let root = resources.join(source_id).join(version);
+            if root.join("shards").is_dir() {
+                fallback.get_or_insert_with(|| root.clone());
+            }
+            if preparation::verified_storage_status(source_id, &root, &chromosomes).state == "ready"
+            {
+                return Some(root);
+            }
+        }
+        return fallback;
+    }
+    let release = annocat_core::source_catalog::download_release(source_id)?;
+    let root = resources.join(source_id).join(release.version);
+    root.join("shards").is_dir().then_some(root)
+}
+
+fn verification_detail(summary: &serde_json::Value) -> String {
+    if let Some(shards) = summary["shardCount"].as_u64() {
+        let hashes = summary["hashedFileCount"].as_u64().unwrap_or(0);
+        let structural = summary["structurallyVerifiedShardCount"]
+            .as_u64()
+            .unwrap_or(0);
+        format!("{shards} shards; {hashes} file hashes; {structural} structural checks")
+    } else {
+        summary["scope"]
+            .as_str()
+            .unwrap_or("full verification passed")
+            .replace('-', " ")
+    }
 }
 
 fn source_summary(id: &str, paths: &PortablePaths) -> Result<SourceSummary, String> {

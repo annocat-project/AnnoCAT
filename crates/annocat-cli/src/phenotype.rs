@@ -445,6 +445,56 @@ pub fn installed_status(resources: &Path) -> Option<HpoReadyManifest> {
     installed_release(resources).map(|(_, ready, _)| ready)
 }
 
+pub(crate) fn verify_assets(resources: &Path) -> Result<serde_json::Value, String> {
+    let mut installations = fs::read_dir(resources.join("hpo"))
+        .map_err(|error| format!("cannot inspect installed HPO data: {error}"))?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let root = entry.path();
+            let manifest = asset_manifest_at(&root).ok()?;
+            Some((root, manifest))
+        })
+        .collect::<Vec<_>>();
+    installations.sort_by(|left, right| left.1.version_key().cmp(&right.1.version_key()));
+    let (root, manifest) = installations
+        .pop()
+        .ok_or("Human Phenotype Ontology data is not installed")?;
+    let ready: HpoReadyManifest = serde_json::from_slice(
+        &fs::read(root.join(READY_FILENAME))
+            .map_err(|error| format!("cannot read the HPO ready marker: {error}"))?,
+    )
+    .map_err(|error| format!("invalid HPO ready marker: {error}"))?;
+    if ready.schema_version != INSTALL_SCHEMA_VERSION
+        || ready.release != manifest.release
+        || ready.asset_bytes != manifest.expected_bytes()
+        || ready.mondo_release != manifest.mondo_release
+    {
+        return Err("HPO ready marker does not match its asset manifest".into());
+    }
+    for asset in &manifest.assets {
+        let path = root.join("raw").join(&asset.filename);
+        let actual_bytes = fs::metadata(&path)
+            .map_err(|error| format!("cannot read {} metadata: {error}", asset.filename))?
+            .len();
+        if actual_bytes != asset.bytes {
+            return Err(format!(
+                "{} size differs from its manifest ({actual_bytes} != {})",
+                asset.filename, asset.bytes
+            ));
+        }
+        verify_sha256(&path, &asset.sha256)?;
+    }
+    Ok(serde_json::json!({
+        "sourceId": "hpo",
+        "verified": true,
+        "scope": "size-and-sha256",
+        "release": ready.release,
+        "assetCount": manifest.assets.len(),
+        "assetBytes": ready.asset_bytes
+    }))
+}
+
 fn installed_release(resources: &Path) -> Option<(PathBuf, HpoReadyManifest, HpoAssetManifest)> {
     fs::read_dir(resources.join("hpo"))
         .ok()?

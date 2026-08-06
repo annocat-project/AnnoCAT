@@ -73,6 +73,53 @@ pub fn is_ready(resources: &Path) -> bool {
                 && valid_file(&fai)
         })
 }
+
+pub(crate) fn verify(resources: &Path) -> Result<serde_json::Value, String> {
+    if !is_ready(resources) {
+        return Err("GRCh38 reference is not ready".into());
+    }
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(manifest(resources))
+            .map_err(|error| format!("cannot read the GRCh38 reference manifest: {error}"))?,
+    )
+    .map_err(|error| format!("invalid GRCh38 reference manifest: {error}"))?;
+    let fasta = fasta_path(resources);
+    let fai = fasta.with_extension("fna.fai");
+    let stored = [
+        ("FASTA", &fasta, "fasta_bytes", "fasta_sha256"),
+        ("FAI", &fai, "fai_bytes", "fai_sha256"),
+    ];
+    let hash_field_count = ["fasta_bytes", "fasta_sha256", "fai_bytes", "fai_sha256"]
+        .into_iter()
+        .filter(|key| value.get(*key).is_some_and(|value| !value.is_null()))
+        .count();
+    if !matches!(hash_field_count, 0 | 4) {
+        return Err("GRCh38 reference manifest has incomplete size or hash metadata".into());
+    }
+    let has_hashes = hash_field_count == 4;
+    if has_hashes {
+        for (label, path, bytes_key, hash_key) in stored {
+            let expected_bytes = value[bytes_key].as_u64().unwrap();
+            let actual_bytes = fs::metadata(path)
+                .map_err(|error| format!("cannot read {label} metadata: {error}"))?
+                .len();
+            if actual_bytes != expected_bytes {
+                return Err(format!(
+                    "GRCh38 {label} size differs from its manifest ({actual_bytes} != {expected_bytes})"
+                ));
+            }
+            let expected_hash = value[hash_key].as_str().unwrap();
+            if !crate::fastvep::sha256_file(path)?.eq_ignore_ascii_case(expected_hash) {
+                return Err(format!("GRCh38 {label} SHA-256 mismatch"));
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "sourceId": "grch38-reference",
+        "verified": true,
+        "scope": if has_hashes { "size-and-sha256" } else { "portable-metadata" }
+    }))
+}
 pub fn is_running() -> bool {
     state()
         .lock()
@@ -220,9 +267,13 @@ struct Manifest {
     resource_id: &'static str,
     version: &'static str,
     assembly: &'static str,
-    source_archive: String,
-    fasta: String,
-    fai: String,
+    source_archive: &'static str,
+    fasta: &'static str,
+    fai: &'static str,
+    fasta_bytes: u64,
+    fasta_sha256: String,
+    fai_bytes: u64,
+    fai_sha256: String,
     validation: &'static str,
 }
 
@@ -319,11 +370,15 @@ fn prepare(input: &Path, resources: &Path) -> Result<(), String> {
         resource_id: "grch38-reference",
         version: VERSION,
         assembly: "GRCh38",
-        source_archive: input.to_string_lossy().into_owned(),
-        fasta: fasta.to_string_lossy().into_owned(),
-        fai: fai.to_string_lossy().into_owned(),
+        source_archive: ARCHIVE,
+        fasta: FASTA,
+        fai: "GRCh38_no_alt_analysis_set.fna.fai",
+        fasta_bytes: fs::metadata(&fasta).map_err(|e| e.to_string())?.len(),
+        fasta_sha256: crate::fastvep::sha256_file(&fasta)?,
+        fai_bytes: fs::metadata(&fai).map_err(|e| e.to_string())?.len(),
+        fai_sha256: crate::fastvep::sha256_file(&fai)?,
         validation: "expected compressed size + gzip decode + FASTA structure + generated FAI",
     };
     let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
-    fs::write(manifest(resources), bytes).map_err(|e| e.to_string())
+    crate::library_metadata::atomic_write(&manifest(resources), &bytes)
 }
