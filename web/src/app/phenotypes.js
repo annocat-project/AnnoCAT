@@ -235,6 +235,36 @@ export function createPhenotypeFeature({
   let selectedGeneListName = '';
   let geneListDraft = [];
   let geneSections = [];
+  let missingGenes = [];
+  let missingGenesHasMore = false;
+  let missingGenesRequest = null;
+  let missingGenesTimer = null;
+
+  function resetDraftState() {
+    clearTimeout(timer);
+    clearTimeout(previewTimer);
+    clearTimeout(pasteTimer);
+    request?.abort();
+    previewRequest?.abort();
+    pasteRequest?.abort();
+    request = null;
+    previewRequest = null;
+    pasteRequest = null;
+    pasteLoading = false;
+    profile = emptyProfile();
+    message = '';
+    results = [];
+    activeIndex = -1;
+    preview = null;
+    previewError = '';
+    previewLoading = false;
+    pasteText = '';
+    pasteResolution = null;
+    geneListDraft = [];
+    geneSections = [];
+    selectedGeneListName = '';
+    pasteRevision += 1;
+  }
 
   function emptyProfile() {
     return {
@@ -277,7 +307,7 @@ export function createPhenotypeFeature({
     if (popover) return popover;
     document.body.insertAdjacentHTML(
       'beforeend',
-      '<section id="phenotype-popover" class="phenotype-popover fui-popover fui-popover--dialog fui-popover--nested-content hidden" role="dialog" aria-labelledby="phenotype-popover-title"></section>',
+      '<section id="phenotype-popover" class="phenotype-popover fui-popover fui-popover--dialog fui-popover--nested-content hidden" role="dialog" aria-label="Genes"></section>',
     );
     popover = $('#phenotype-popover');
     popover.addEventListener('click', handleClick);
@@ -290,6 +320,91 @@ export function createPhenotypeFeature({
       void resolvePaste();
     });
     return popover;
+  }
+
+  function missingGenesDialog() {
+    let dialog = $('#genes-without-variants');
+    if (dialog) return dialog;
+    document.body.insertAdjacentHTML(
+      'beforeend',
+      `<dialog id="genes-without-variants" class="fui-dialog fui-dialog--wide" aria-labelledby="genes-without-variants-title"><section class="fui-dialog__surface"><header class="fui-dialog__header"><div><h2 id="genes-without-variants-title">Genes without variants</h2><p class="fui-dialog__description">These selected genes have no variants in this result.</p></div><button type="button" class="fui-button fui-button--icon" data-close-missing-genes aria-label="Close">${prototypeIcon('close')}</button></header><div class="fui-dialog__content fui-dialog__content--scrollable"><label class="fui-field"><span class="fui-field__label">Search genes</span><input type="search" class="fui-input" data-search-missing-genes autocomplete="off"></label><div class="fui-list fui-list--divided" data-missing-gene-list></div><button type="button" class="fui-button hidden" data-load-more-missing-genes>Load more</button></div><footer class="fui-dialog__footer"><div class="fui-dialog__actions"><button type="button" class="fui-button" data-close-missing-genes>Close</button></div></footer></section></dialog>`,
+    );
+    dialog = $('#genes-without-variants');
+    dialog.addEventListener('click', event => {
+      if (event.target.closest('[data-close-missing-genes]')) dialog.close();
+      if (event.target.closest('[data-load-more-missing-genes]')) {
+        void loadMissingGenes({ append: true });
+      }
+    });
+    dialog.addEventListener('input', event => {
+      if (!event.target.matches('[data-search-missing-genes]')) return;
+      clearTimeout(missingGenesTimer);
+      missingGenesTimer = setTimeout(() => void loadMissingGenes(), 180);
+    });
+    dialog.addEventListener('close', () => {
+      missingGenesRequest?.abort();
+      missingGenesRequest = null;
+      clearTimeout(missingGenesTimer);
+    });
+    return dialog;
+  }
+
+  function renderMissingGenes() {
+    const dialog = missingGenesDialog();
+    const list = dialog.querySelector('[data-missing-gene-list]');
+    list.innerHTML = missingGenes.length
+      ? missingGenes.map(gene => `<div class="fui-list-row fui-list-row--two-column"><strong>${escapeHtml(gene.symbol)}</strong><span>${escapeHtml([gene.geneId, ...(gene.sources || [])].filter(Boolean).join(' · '))}</span></div>`).join('')
+      : '<p class="fui-caption">No genes found.</p>';
+    dialog.querySelector('[data-load-more-missing-genes]')
+      ?.classList.toggle('hidden', !missingGenesHasMore);
+  }
+
+  async function loadMissingGenes({ append = false } = {}) {
+    if (!run) return;
+    missingGenesRequest?.abort();
+    const controller = new AbortController();
+    missingGenesRequest = controller;
+    const dialog = missingGenesDialog();
+    const query = dialog.querySelector('[data-search-missing-genes]')?.value.trim() || '';
+    const offset = append ? missingGenes.length : 0;
+    try {
+      const params = new URLSearchParams({
+        offset: String(offset),
+        limit: '100',
+        q: query,
+        presence: 'not-in-result',
+      });
+      const response = await fetch(
+        `/api/runs/${encodeURIComponent(run.id)}/genes/preview?${params}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-AnnoCat-CSRF': '1' },
+          body: JSON.stringify(draftRequest('preview')),
+          signal: controller.signal,
+        },
+      );
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Could not load genes');
+      missingGenes = append ? [...missingGenes, ...(body.rows || [])] : body.rows || [];
+      missingGenesHasMore = Boolean(body.hasMore);
+      renderMissingGenes();
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        dialog.querySelector('[data-missing-gene-list]').innerHTML =
+          `<p class="fui-status-message fui-status-message--error">${escapeHtml(error.message)}</p>`;
+      }
+    } finally {
+      if (missingGenesRequest === controller) missingGenesRequest = null;
+    }
+  }
+
+  function openMissingGenes() {
+    const dialog = missingGenesDialog();
+    missingGenes = [];
+    missingGenesHasMore = false;
+    dialog.querySelector('[data-search-missing-genes]').value = '';
+    dialog.showModal();
+    void loadMissingGenes();
   }
 
   function terms(kind) {
@@ -514,11 +629,8 @@ export function createPhenotypeFeature({
     const enteredGenes = genes.length
       ? `<span ${genes.length === 1 ? `title="Gene · ${escapeHtml(genes[0].id)}"` : ''}><b>${escapeHtml(genes.length === 1 ? genes[0].label : `${genes.length.toLocaleString()} entered genes`)}</b>${genes.length === 1 ? `<small>${escapeHtml(genes[0].id)}</small>` : ''}<button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-clear-entered-genes aria-label="Remove entered genes">${prototypeIcon('close')}</button></span>`
       : '';
-    return `<section class="phenotype-selection">${
-      items.length || enteredGenes
-        ? `<div class="phenotype-chips">${items.map(term => `<span title="${escapeHtml(`${term.type} · ${term.id}${term.kind === 'conditions' ? `. ${conditionTitle(term)}` : ''}`)}"><b>${escapeHtml(term.label)}</b><small>${escapeHtml(term.id)}</small><button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-remove-phenotype="${escapeHtml(term.id)}" data-phenotype-kind="${term.kind}" aria-label="Remove ${escapeHtml(term.label)}">${prototypeIcon('close')}</button></span>`).join('')}${enteredGenes}</div>`
-        : '<p class="phenotype-empty">No items selected</p>'
-    }</section>`;
+    if (!items.length && !enteredGenes) return '';
+    return `<section class="phenotype-selection"><div class="phenotype-chips">${items.map(term => `<span title="${escapeHtml(`${term.type} · ${term.id}${term.kind === 'conditions' ? `. ${conditionTitle(term)}` : ''}`)}"><b>${escapeHtml(term.label)}</b><small>${escapeHtml(term.id)}</small><button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-remove-phenotype="${escapeHtml(term.id)}" data-phenotype-kind="${term.kind}" aria-label="Remove ${escapeHtml(term.label)}">${prototypeIcon('close')}</button></span>`).join('')}${enteredGenes}</div></section>`;
   }
 
   function resolvedPasteGenes() {
@@ -542,7 +654,7 @@ export function createPhenotypeFeature({
       ...(pasteResolution?.notRecognized || []),
     ];
     return `<section class="gene-paste">
-      <textarea class="fui-textarea" rows="8" data-paste-genes aria-label="Gene list" placeholder="BRCA1, BRCA2, ENSG00000141510">${escapeHtml(pasteText)}</textarea>
+      <textarea class="fui-textarea" rows="8" data-paste-genes aria-label="Gene list" placeholder="Or paste genes here, separated by commas">${escapeHtml(pasteText)}</textarea>
       ${unresolved.length ? `<p class="gene-list-unresolved" role="status"><strong>Unresolved genes:</strong> ${escapeHtml(unresolved.join(', '))}</p>` : ''}
       ${previewError ? `<p class="fui-status-message fui-status-message--error">${escapeHtml(previewError)}</p>` : ''}
       <div class="saved-gene-lists__row">
@@ -596,21 +708,20 @@ export function createPhenotypeFeature({
       : 0;
     const unmatchedGenes = preview ? Math.max(0, preview.includedGenes - includedInResult) : 0;
     const scopeSummary = preview
-      ? `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} linked ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} matching gene symbols in this result.${unmatchedGenes ? ` ${unmatchedGenes.toLocaleString()} linked ${unmatchedGenes === 1 ? 'gene has' : 'genes have'} no matching gene symbol.` : ''} `
+      ? `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${unmatchedGenes ? ` <button type="button" class="fui-button fui-button--subtle" data-view-missing-genes>View ${unmatchedGenes.toLocaleString()} without variants</button>` : ''}`
       : '';
-    popover.innerHTML = `<header class="phenotype-popover__header"><h2 id="phenotype-popover-title" class="fui-section-heading">Genes</h2></header>
-      <div class="phenotype-popover__content">
+    popover.innerHTML = `<div class="phenotype-popover__content">
         <label class="fui-field phenotype-search-field phenotype-popover__search"><span class="fui-field__label">Add a feature, condition, pathway, or gene</span><input class="fui-input" type="search" data-phenotype-search autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="phenotype-search-results" aria-expanded="false" placeholder="Search names or identifiers"><div id="phenotype-search-results" class="phenotype-search-results fui-popover fui-popover--listbox" data-phenotype-results role="listbox"></div></label>
         ${hpoReady && profile.mondoRelease && reactomeReady
           ? ''
           : `<div class="fui-status-message fui-status-message--warning"><span>${escapeHtml([
-            !hpoReady || !profile.mondoRelease ? 'Install HPO and MONDO to add features and conditions.' : '',
+            !hpoReady || !profile.mondoRelease ? 'Install phenotype and condition knowledge to add features and conditions.' : '',
             !reactomeReady ? 'Install Reactome to add pathways.' : '',
             'Entered genes remain available.',
           ].filter(Boolean).join(' '))}</span><button type="button" class="fui-button" data-install-hpo>Open Data sources</button></div>`}
         ${selectedTermsHtml()}
         ${geneListHtml()}
-        <p class="phenotype-scope-note">${scopeSummary}Shows variants in genes linked to the selected items. It does not rank variants.</p>
+        <p class="phenotype-scope-note">${scopeSummary}</p>
         ${message ? `<div class="phenotype-message" role="status"><span>${escapeHtml(message)}</span></div>` : ''}
       </div>
       <footer class="phenotype-popover__footer result-filter-actions"><button type="button" class="fui-button" data-clear-phenotypes ${hasSelection && !applying ? '' : 'disabled'}>Clear</button><button type="button" class="fui-button fui-button--primary" data-apply-phenotypes ${validProfile && previewReady && !applying ? '' : 'disabled'}>${applying ? 'Applying…' : previewLoading || pasteLoading ? 'Resolving…' : 'Apply'}</button></footer>`;
@@ -976,6 +1087,10 @@ export function createPhenotypeFeature({
       });
       return;
     }
+    if (event.target.closest('[data-view-missing-genes]')) {
+      openMissingGenes();
+      return;
+    }
     if (event.target.closest('[data-apply-phenotypes]')) void apply();
     if (event.target.closest('[data-clear-phenotypes]')) void clear();
     if (event.target.closest('[data-install-hpo]')) {
@@ -1059,12 +1174,14 @@ export function createPhenotypeFeature({
     pasteRequest?.abort();
     pasteTimer = null;
     pasteRequest = null;
-    host().classList.add('hidden');
+    $('#phenotype-popover')?.classList.add('hidden');
     $('#phenotypes')?.setAttribute('aria-expanded', 'false');
     if (returnFocus) $('#phenotypes')?.focus();
   }
 
   async function sync(currentRun, currentResources = resources) {
+    const runChanged = run?.id !== currentRun?.id;
+    if (runChanged) resetDraftState();
     run = currentRun;
     resources = currentResources;
     if (!run) {
@@ -1092,24 +1209,19 @@ export function createPhenotypeFeature({
       close();
       return;
     }
+    const alreadySynced = run?.id === currentRun?.id;
+    if (!alreadySynced) resetDraftState();
     run = currentRun;
     resources = currentResources;
     message = '';
     results = [];
     activeIndex = -1;
-    preview = null;
-    previewError = '';
-    pasteText = '';
-    pasteResolution = null;
-    geneListDraft = [];
-    geneSections = [];
-    pasteRevision += 1;
     popover.classList.remove('hidden');
     $('#phenotypes')?.setAttribute('aria-expanded', 'true');
     position();
     render();
     try {
-      await sync(run, resources);
+      if (!alreadySynced) await sync(run, resources);
       try {
         await loadGeneLists();
       } catch (error) {
@@ -1117,7 +1229,9 @@ export function createPhenotypeFeature({
       }
       render();
       position();
-      if (hasPositiveInput()) {
+      if (pasteText.trim() && !pasteResolution && !geneListDraft.length) {
+        await resolvePaste();
+      } else if (hasPositiveInput() && !preview) {
         await requestPreview({ allSymbols: true, syncGeneList: true });
       }
       queueMicrotask(() =>

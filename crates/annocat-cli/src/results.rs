@@ -2969,6 +2969,7 @@ struct CorePageFilters {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FilterValueKind {
     Text,
+    Json,
     Number,
     Boolean,
 }
@@ -3048,6 +3049,42 @@ fn text_contains_list_sql(
     ))
 }
 
+fn json_text_member_sql(
+    expression: &str,
+    operator: &str,
+    value: &str,
+) -> Result<(String, Vec<SqlValue>), String> {
+    let negative = matches!(operator, "not_equals" | "not_in");
+    let values = if matches!(operator, "equals" | "not_equals") {
+        vec![
+            bounded_page_text(value, "rule value", 32 * 1024)?
+                .trim()
+                .to_ascii_lowercase()
+                .replace(['_', '-'], " "),
+        ]
+    } else {
+        comma_filter_values(value)?
+            .into_iter()
+            .map(|value| value.replace(['_', '-'], " "))
+            .collect()
+    };
+    let placeholders = std::iter::repeat_n("?", values.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok((
+        format!(
+            "{}EXISTS (
+                SELECT 1
+                FROM unnest(json_extract_string(coalesce({expression}, '[]'), '$[*]')) AS json_items(value)
+                WHERE replace(replace(lower(trim(json_items.value)), '_', ' '), '-', ' ')
+                    IN ({placeholders})
+            )",
+            if negative { "NOT " } else { "" }
+        ),
+        values.into_iter().map(Into::into).collect(),
+    ))
+}
+
 fn comparison_sql(
     expression: &str,
     kind: FilterValueKind,
@@ -3085,6 +3122,20 @@ fn comparison_sql(
                 values.into_iter().map(Into::into).collect(),
             ))
         }
+        (FilterValueKind::Json, operator @ ("equals" | "not_equals" | "in" | "not_in")) => {
+            json_text_member_sql(expression, operator, value)
+        }
+        (FilterValueKind::Json, operator @ ("contains" | "not_contains")) => Ok((
+            format!(
+                "{}contains(lower(coalesce(CAST({expression} AS VARCHAR), '')), lower(?))",
+                if operator == "not_contains" {
+                    "NOT "
+                } else {
+                    ""
+                }
+            ),
+            vec![value.to_owned().into()],
+        )),
         (
             FilterValueKind::Number,
             operator @ ("equals" | "not_equals" | "gt" | "gte" | "lt" | "lte"),
@@ -3110,7 +3161,7 @@ fn comparison_sql(
             ))
         }
         (
-            FilterValueKind::Text | FilterValueKind::Boolean,
+            FilterValueKind::Text | FilterValueKind::Json | FilterValueKind::Boolean,
             operator @ ("gt" | "gte" | "lt" | "lte"),
         ) => {
             let number = value
@@ -4918,6 +4969,7 @@ fn evidence_filter_rules_sql(
         }
         let kind = match field.value_type.as_str() {
             "boolean" => FilterValueKind::Boolean,
+            "json" => FilterValueKind::Json,
             _ if evidence_field_is_numeric(&field) => FilterValueKind::Number,
             _ => FilterValueKind::Text,
         };
@@ -4932,6 +4984,7 @@ fn evidence_filter_rules_sql(
                     "coalesce(ge.number_value, CAST(ge.integer_value AS DOUBLE))"
                 }
                 FilterValueKind::Boolean => "ge.boolean_value",
+                FilterValueKind::Json => "ge.json_value",
                 FilterValueKind::Text => {
                     "coalesce(ge.string_value, CAST(ge.integer_value AS VARCHAR), CAST(ge.number_value AS VARCHAR), CAST(ge.boolean_value AS VARCHAR), ge.json_value, '')"
                 }
@@ -4973,10 +5026,11 @@ fn evidence_filter_rules_sql(
             let resolved =
                 crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
                     .ok_or("transcript evidence index is not ready")?;
-            let expression = if kind == FilterValueKind::Number {
-                "er.resolved_number"
-            } else {
-                "er.resolved_string"
+            let expression = match kind {
+                FilterValueKind::Number => "er.resolved_number",
+                FilterValueKind::Text | FilterValueKind::Json | FilterValueKind::Boolean => {
+                    "er.resolved_string"
+                }
             };
             let negative = matches!(
                 filter.operator.as_str(),
@@ -5015,6 +5069,7 @@ fn evidence_filter_rules_sql(
                 "coalesce(ev.number_value, CAST(ev.integer_value AS DOUBLE), try_cast(ev.string_value AS DOUBLE))"
             }
             FilterValueKind::Boolean => "ev.boolean_value",
+            FilterValueKind::Json => "ev.json_value",
             FilterValueKind::Text => {
                 "coalesce(ev.string_value, CAST(ev.integer_value AS VARCHAR), CAST(ev.number_value AS VARCHAR), CAST(ev.boolean_value AS VARCHAR), ev.json_value, '')"
             }
@@ -6529,6 +6584,23 @@ fn request_requires_query_projection(
         .any(query_projection_field_is_eligible))
 }
 
+pub fn query_projection_ready(
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    request: &PageRequest,
+) -> Result<bool, String> {
+    let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
+        return Ok(true);
+    };
+    if !request_requires_query_projection(catalog, request)? {
+        return Ok(true);
+    }
+    let Some(fields) = request_query_projection_fields(catalog, request)? else {
+        return Ok(true);
+    };
+    Ok(available_query_projection(evidence, catalog, &fields).is_some())
+}
+
 fn with_query_evidence<T>(
     evidence: Option<&Path>,
     catalog: Option<&Path>,
@@ -6742,13 +6814,17 @@ pub(crate) struct ReportGeneOccurrence {
 pub(crate) fn report_gene_occurrences(
     parquet: &Path,
     selected_symbols: &HashSet<String>,
+    selected_gene_ids: &BTreeSet<String>,
 ) -> Result<Vec<ReportGeneOccurrence>, String> {
-    if selected_symbols.is_empty() {
+    if selected_symbols.is_empty() && selected_gene_ids.is_empty() {
         return Ok(Vec::new());
     }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
-        .execute_batch("CREATE TEMP TABLE selected_genes(symbol VARCHAR PRIMARY KEY)")
+        .execute_batch(
+            "CREATE TEMP TABLE selected_genes(symbol VARCHAR PRIMARY KEY);
+             CREATE TEMP TABLE selected_gene_ids(gene_id VARCHAR PRIMARY KEY);",
+        )
         .map_err(|error| format!("cannot prepare selected result genes: {error}"))?;
     {
         let mut appender = connection
@@ -6763,27 +6839,44 @@ pub(crate) fn report_gene_occurrences(
             .flush()
             .map_err(|error| format!("cannot select result genes: {error}"))?;
     }
+    {
+        let mut appender = connection
+            .appender("selected_gene_ids")
+            .map_err(|error| format!("cannot prepare selected result gene identifiers: {error}"))?;
+        for gene_id in selected_gene_ids {
+            appender
+                .append_row([gene_id.as_str()])
+                .map_err(|error| format!("cannot select result gene identifier: {error}"))?;
+        }
+        appender
+            .flush()
+            .map_err(|error| format!("cannot select result gene identifiers: {error}"))?;
+    }
     let consequences = parquet.with_file_name("consequences.parquet");
     let (sql, path) = if consequences.is_file() {
         (
-            "SELECT allele_id, upper(trim(gene_symbol)) AS symbol,
-                    min(coalesce(nullif(trim(gene_id), ''), '')) AS gene_id
+            "SELECT allele_id, upper(trim(c.gene_symbol)) AS symbol,
+                    min(coalesce(nullif(trim(c.gene_id), ''), '')) AS gene_id
              FROM read_parquet(?) c
-             JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             LEFT JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             LEFT JOIN selected_gene_ids i ON i.gene_id=upper(trim(c.gene_id))
              WHERE allele_id IS NOT NULL AND trim(allele_id) <> ''
-             GROUP BY allele_id, upper(trim(gene_symbol))
+               AND (s.symbol IS NOT NULL OR i.gene_id IS NOT NULL)
+             GROUP BY allele_id, upper(trim(c.gene_symbol))
              ORDER BY allele_id, symbol",
             consequences,
         )
     } else {
         register_report_variants(&connection, parquet)?;
         (
-            "SELECT allele_id, upper(trim(gene_symbol)) AS symbol,
-                    min(coalesce(nullif(trim(gene_id), ''), '')) AS gene_id
+            "SELECT allele_id, upper(trim(c.gene_symbol)) AS symbol,
+                    min(coalesce(nullif(trim(c.gene_id), ''), '')) AS gene_id
              FROM annocat_variants(?) c
-             JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             LEFT JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             LEFT JOIN selected_gene_ids i ON i.gene_id=upper(trim(c.gene_id))
              WHERE allele_id IS NOT NULL AND trim(allele_id) <> ''
-             GROUP BY allele_id, upper(trim(gene_symbol))
+               AND (s.symbol IS NOT NULL OR i.gene_id IS NOT NULL)
+             GROUP BY allele_id, upper(trim(c.gene_symbol))
              ORDER BY allele_id, symbol",
             parquet.to_path_buf(),
         )
@@ -9655,7 +9748,7 @@ mod tests {
     }
 
     #[test]
-    fn gene_occurrences_materialize_only_selected_symbols() {
+    fn gene_occurrences_materialize_only_selected_identities() {
         let root = std::env::temp_dir().join(format!(
             "annocat-selected-gene-occurrences-{}",
             SystemTime::now()
@@ -9680,12 +9773,33 @@ mod tests {
 
         let selected = HashSet::from(["GENE1".to_owned()]);
         assert_eq!(
-            report_gene_occurrences(&root.join("variants.parquet"), &selected).unwrap(),
+            report_gene_occurrences(&root.join("variants.parquet"), &selected, &BTreeSet::new())
+                .unwrap(),
             [ReportGeneOccurrence {
                 allele_id: "allele-1".into(),
                 gene_symbol: "GENE1".into(),
                 gene_id: "ENSG1".into(),
             }]
+        );
+        assert_eq!(
+            report_gene_occurrences(
+                &root.join("variants.parquet"),
+                &HashSet::new(),
+                &BTreeSet::from(["ENSG2".to_owned()]),
+            )
+            .unwrap(),
+            [
+                ReportGeneOccurrence {
+                    allele_id: "allele-1".into(),
+                    gene_symbol: "GENE2".into(),
+                    gene_id: "ENSG2".into(),
+                },
+                ReportGeneOccurrence {
+                    allele_id: "allele-2".into(),
+                    gene_symbol: "GENE2".into(),
+                    gene_id: "ENSG2".into(),
+                },
+            ]
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -11894,6 +12008,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(clinvar_filtered["total"], 1);
+        for (operator, total) in [("equals", 1), ("in", 1), ("not_equals", 0), ("not_in", 0)] {
+            let exact: Value = serde_json::from_str(
+                &page_json_with_evidence(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    0,
+                    10,
+                    &PageRequest {
+                        evidence_filters: vec![EvidenceFilterRequest {
+                            index: clinvar_index,
+                            operator: operator.into(),
+                            value: "Pathogenic".into(),
+                            value2: String::new(),
+                        }],
+                        ..PageRequest::default()
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(exact["total"], total, "operator {operator}");
+        }
         let clinvar_search: Value = serde_json::from_str(
             &page_json_with_evidence(
                 &variants,
@@ -13643,6 +13780,7 @@ mod tests {
         )
         .unwrap();
         assert!(available_query_projection(&evidence, &catalog, &projection_fields).is_none());
+        assert!(!query_projection_ready(Some(&evidence), Some(&catalog), &search_request).unwrap());
         let projection = prepare_query_projection(&evidence, &catalog, &projection_fields)
             .unwrap()
             .unwrap();
@@ -13670,6 +13808,7 @@ mod tests {
         )
         .unwrap();
         assert!(available_query_projection(&evidence, &catalog, &projection_fields).is_some());
+        assert!(query_projection_ready(Some(&evidence), Some(&catalog), &search_request).unwrap());
         let projection_files = || {
             fs::read_dir(&root)
                 .unwrap()

@@ -2,6 +2,8 @@
   "schemaVersion": 1,
   "release": "2026-06-23",
   "releaseUrl": "https://github.com/obophenotype/human-phenotype-ontology/releases/tag/v2026-06-23",
+  "hgncRelease": "2026-08-07",
+  "hgncReleaseUrl": "https://www.genenames.org/download/",
   "assets": [
     {
       "kind": "ontology",
@@ -23,6 +25,20 @@
       "url": "https://github.com/obophenotype/human-phenotype-ontology/releases/download/v2026-06-23/genes_to_disease.txt",
       "bytes": 1477762,
       "sha256": "a247027ae9944e34545e0a91060243ff6c118681c06379b9721af1ee4f39286a"
+    },
+    {
+      "kind": "gene-identities",
+      "filename": "hgnc_complete_set.txt",
+      "url": "https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt?generation=1786106245736632",
+      "bytes": 16931491,
+      "sha256": "faaeb6ae1e2a596be658b5f23ee44937c9c5379fa37d1f5ace54b94b16962b1c"
+    },
+    {
+      "kind": "withdrawn-gene-identities",
+      "filename": "withdrawn.txt",
+      "url": "https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/withdrawn.txt?generation=1786106249933645",
+      "bytes": 258931,
+      "sha256": "77235063bba9492d09997e58387a50b6f750aed2de67a44c519c920b48f7ff87"
     }
   ]
 }

@@ -3210,7 +3210,7 @@ html.annocat-results-ui .about-version {
 
 html.annocat-results-ui #results .toolbar {
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-4);
 }
 
 html.annocat-results-ui #results {

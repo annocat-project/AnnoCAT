@@ -379,6 +379,7 @@ mod downloader;
 mod evidence_resolution;
 mod fastvep;
 mod favor;
+mod gene_identity;
 mod http_client;
 mod install_queue;
 mod library_metadata;
@@ -1747,6 +1748,30 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 record_number,
                 alt_index,
             )
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "404 Not Found",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/query-cache-status"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let page_request = result_page_request(query);
+        let response = portable_paths().and_then(|paths| {
+            let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
+            let ready = results::query_projection_ready(
+                evidence.as_deref(),
+                catalog.as_deref(),
+                &page_request?,
+            )?;
+            Ok(format!(r#"{{"ready":{ready}}}"#))
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -4875,6 +4900,7 @@ mod profile_status_tests {
             .expect("resolve current Human Phenotype Ontology release");
         assert!(hpo.expected_bytes() > 0);
         assert!(hpo.release().starts_with("20"));
+        assert!(hpo.version_key().contains("+hgnc-"));
     }
 
     #[test]
@@ -5137,7 +5163,8 @@ mod profile_status_tests {
         assert!(app.contains("aria-controls=\"phenotype-search-results\""));
         assert!(app.contains("Add a feature, condition, pathway, or gene"));
         assert!(app.contains("MONDO subtypes"));
-        assert!(app.contains("It does not rank variants."));
+        assert!(app.contains("data-view-missing-genes"));
+        assert!(!app.contains("It does not rank variants."));
         assert!(!app.contains("candidateRank"));
         assert!(app.contains("event.composedPath()"));
         assert!(app.contains("Export gene selections?"));

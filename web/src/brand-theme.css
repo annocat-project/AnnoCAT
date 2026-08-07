@@ -655,7 +655,7 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
   flex: 0 0 auto;
   align-items: center;
   margin: 0;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
 }
@@ -741,7 +741,7 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 .annocat-results-ui #results .toolbar {
   grid-template-columns: minmax(220px, 1fr) auto;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 8px var(--space-4);
 }
 .annocat-results-ui #results .toolbar:has(#candidate-selected:not(.hidden)) {
   grid-template-columns: minmax(0, 1fr) auto;

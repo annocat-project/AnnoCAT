@@ -469,6 +469,8 @@ pub struct HpoReadyManifest {
     pub mondo_release: Option<String>,
     #[serde(default)]
     pub mondo_term_count: usize,
+    #[serde(default)]
+    pub hgnc_release: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,6 +483,10 @@ pub(crate) struct HpoAssetManifest {
     mondo_release: Option<String>,
     #[serde(default)]
     mondo_release_url: Option<String>,
+    #[serde(default)]
+    hgnc_release: Option<String>,
+    #[serde(default)]
+    hgnc_release_url: Option<String>,
     assets: Vec<HpoAsset>,
 }
 
@@ -494,10 +500,14 @@ impl HpoAssetManifest {
     }
 
     pub(crate) fn version_key(&self) -> String {
-        self.mondo_release
-            .as_ref()
-            .map(|mondo| format!("{}+mondo-{mondo}", self.release))
-            .unwrap_or_else(|| self.release.clone())
+        let mut version = self.release.clone();
+        if let Some(mondo) = &self.mondo_release {
+            version.push_str(&format!("+mondo-{mondo}"));
+        }
+        if let Some(hgnc) = &self.hgnc_release {
+            version.push_str(&format!("+hgnc-{hgnc}"));
+        }
+        version
     }
 }
 
@@ -508,7 +518,10 @@ struct HpoAsset {
     filename: String,
     url: String,
     bytes: u64,
+    #[serde(default)]
     sha256: String,
+    #[serde(default)]
+    md5: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -628,6 +641,24 @@ pub fn release_root(resources: &Path) -> Result<PathBuf, String> {
         })
 }
 
+pub(crate) fn gene_identity_files(resources: &Path) -> Option<(PathBuf, PathBuf, String)> {
+    let (root, _, manifest) = installed_release(resources)?;
+    let release = manifest.hgnc_release?;
+    let complete = manifest
+        .assets
+        .iter()
+        .find(|asset| asset.kind == "gene-identities")?;
+    let withdrawn = manifest
+        .assets
+        .iter()
+        .find(|asset| asset.kind == "withdrawn-gene-identities")?;
+    Some((
+        root.join("raw").join(&complete.filename),
+        root.join("raw").join(&withdrawn.filename),
+        release,
+    ))
+}
+
 pub fn installed_versions(resources: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(resources.join("hpo")) else {
         return Vec::new();
@@ -673,6 +704,7 @@ pub(crate) fn verify_assets(resources: &Path) -> Result<serde_json::Value, Strin
         || ready.release != manifest.release
         || ready.asset_bytes != manifest.expected_bytes()
         || ready.mondo_release != manifest.mondo_release
+        || ready.hgnc_release != manifest.hgnc_release
     {
         return Err("HPO ready marker does not match its asset manifest".into());
     }
@@ -687,12 +719,12 @@ pub(crate) fn verify_assets(resources: &Path) -> Result<serde_json::Value, Strin
                 asset.filename, asset.bytes
             ));
         }
-        verify_sha256(&path, &asset.sha256)?;
+        verify_asset_checksum(&path, asset)?;
     }
     Ok(serde_json::json!({
         "sourceId": "hpo",
         "verified": true,
-        "scope": "size-and-sha256",
+        "scope": "size-and-checksum",
         "release": ready.release,
         "assetCount": manifest.assets.len(),
         "assetBytes": ready.asset_bytes
@@ -726,6 +758,7 @@ fn installed_status_and_manifest_at(root: &Path) -> Option<(HpoReadyManifest, Hp
         || ready.release != manifest.release
         || ready.asset_bytes != manifest.expected_bytes()
         || ready.mondo_release != manifest.mondo_release
+        || ready.hgnc_release != manifest.hgnc_release
     {
         return None;
     }
@@ -794,7 +827,7 @@ fn verified_installation(root: &Path, manifest: &HpoAssetManifest) -> bool {
     if manifest
         .assets
         .iter()
-        .any(|asset| verify_sha256(&root.join("raw").join(&asset.filename), &asset.sha256).is_err())
+        .any(|asset| verify_asset_checksum(&root.join("raw").join(&asset.filename), asset).is_err())
     {
         return false;
     }
@@ -862,6 +895,14 @@ pub fn install_hpo(
     } else {
         0
     };
+    let hgnc_gene_count = if manifest.hgnc_release.is_some() {
+        Some(super::gene_identity::validate_files(
+            &raw_root.join("hgnc_complete_set.txt"),
+            &raw_root.join("withdrawn.txt"),
+        )?)
+    } else {
+        None
+    };
     let ready = HpoReadyManifest {
         schema_version: INSTALL_SCHEMA_VERSION,
         release: manifest.release.clone(),
@@ -872,6 +913,7 @@ pub fn install_hpo(
         disease_gene_association_count: knowledge.disease_gene_association_count,
         mondo_release: manifest.mondo_release.clone(),
         mondo_term_count,
+        hgnc_release: manifest.hgnc_release.clone(),
     };
     let bytes = serde_json::to_vec_pretty(&ready)
         .map_err(|error| format!("cannot serialize the HPO ready marker: {error}"))?;
@@ -888,10 +930,17 @@ pub fn install_hpo(
         .insert(resource_root.to_path_buf(), knowledge);
     progress(InstallProgress {
         phase: "ready".into(),
-        detail: format!(
-            "Validated {} phenotype terms, {} conditions, and {} disease profiles",
-            ready.term_count, ready.mondo_term_count, ready.disease_count
-        ),
+        detail: if let Some(hgnc_gene_count) = hgnc_gene_count {
+            format!(
+                "Validated {} phenotype terms, {} conditions, {} disease profiles, and {} gene identities",
+                ready.term_count, ready.mondo_term_count, ready.disease_count, hgnc_gene_count
+            )
+        } else {
+            format!(
+                "Validated {} phenotype terms, {} conditions, and {} disease profiles",
+                ready.term_count, ready.mondo_term_count, ready.disease_count
+            )
+        },
         network_bytes: expected,
         expected_network_bytes: expected,
         parsed_records: ready.disease_count as u64,
@@ -1056,83 +1105,23 @@ pub fn search_gene_terms(
     query: &str,
     limit: usize,
 ) -> Result<Vec<TermSearchResult>, String> {
-    let identities = match super::transcript::gene_dictionary(resources) {
-        Ok(dictionary) => dictionary
-            .into_iter()
-            .map(|gene| (gene.symbol, gene.gene_id))
-            .collect(),
-        Err(_) => super::results::report_gene_identities(parquet)?,
-    };
-    let query = query.trim().to_ascii_uppercase();
-    if query.len() < 2 {
-        return Ok(Vec::new());
-    }
-    let mut matches = identities
+    let report = super::results::report_gene_identities(parquet)?;
+    let resolver = super::gene_identity::Resolver::new(resources, &report);
+    Ok(resolver
+        .search(query, limit)
         .into_iter()
-        .filter_map(|(symbol, gene_id)| {
-            let score = if gene_id.eq_ignore_ascii_case(&query) {
-                0
-            } else if symbol.eq_ignore_ascii_case(&query) {
-                1
-            } else if symbol.starts_with(&query) {
-                2
-            } else if symbol.contains(&query) || gene_id.to_ascii_uppercase().contains(&query) {
-                3
-            } else {
-                return None;
-            };
-            Some((
-                score,
-                symbol.len(),
-                TermSearchResult {
-                    id: gene_id,
-                    label: symbol.clone(),
-                    term_type: "gene".into(),
-                    matched_text: symbol,
-                    match_kind: if score == 0 {
-                        "geneIdentifier"
-                    } else {
-                        "geneSymbol"
-                    }
-                    .into(),
-                    synonym_scope: None,
-                    subtype_count: None,
-                    gene_count: None,
-                    synonyms: Vec::new(),
-                },
-            ))
+        .map(|matched| TermSearchResult {
+            id: matched.gene.gene_id,
+            label: matched.gene.symbol,
+            term_type: "gene".into(),
+            matched_text: matched.matched_text,
+            match_kind: matched.match_kind.into(),
+            synonym_scope: None,
+            subtype_count: None,
+            gene_count: None,
+            synonyms: Vec::new(),
         })
-        .collect::<Vec<_>>();
-    matches.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.label.cmp(&right.2.label))
-            .then(left.2.id.cmp(&right.2.id))
-    });
-    Ok(matches
-        .into_iter()
-        .take(limit.clamp(1, 100))
-        .map(|(_, _, term)| term)
         .collect())
-}
-
-fn available_gene_identities(
-    resources: &Path,
-    report_genes: &[super::results::ReportGeneOccurrence],
-) -> Vec<(String, String)> {
-    if let Ok(dictionary) = super::transcript::gene_dictionary(resources) {
-        return dictionary
-            .into_iter()
-            .map(|gene| (gene.symbol, gene.gene_id))
-            .collect();
-    }
-    report_genes
-        .iter()
-        .map(|gene| (gene.gene_symbol.clone(), gene.gene_id.clone()))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 pub fn empty_profile(run_id: &str) -> PhenotypeProfile {
@@ -1346,6 +1335,7 @@ pub fn apply(
         &prepared.combination,
         prepared.mondo_release.as_deref(),
         prepared.reactome_release.as_deref(),
+        prepared.identity.identity_release(),
         &prepared.ranking,
     );
     if request.preview_fingerprint.as_deref() != Some(expected_fingerprint.as_str()) {
@@ -1353,6 +1343,7 @@ pub fn apply(
     }
     let resolved = write_gene_evidence(
         None,
+        &prepared.identity,
         &prepared.report_genes,
         &prepared.observed,
         &prepared.conditions,
@@ -1364,13 +1355,27 @@ pub fn apply(
         &prepared.condition_matches,
         &prepared.ranking,
     )?;
+    let selection = prepared.identity.result_keys(&resolved.included);
     let matched_report_genes =
-        super::results::report_gene_occurrences(parquet, &resolved.included)?;
+        super::results::report_gene_occurrences(parquet, &selection.symbols, &selection.gene_ids)?
+            .into_iter()
+            .map(|occurrence| {
+                let gene = prepared
+                    .identity
+                    .canonicalize(&occurrence.gene_symbol, &occurrence.gene_id);
+                super::results::ReportGeneOccurrence {
+                    allele_id: occurrence.allele_id,
+                    gene_symbol: gene.symbol,
+                    gene_id: gene.gene_id,
+                }
+            })
+            .collect::<Vec<_>>();
     let existing = load(runs, run_id)?;
     let same_observed = existing.observed == prepared.observed;
     let generation = publish_gene_evidence(
         runs,
         run_id,
+        &prepared.identity,
         &matched_report_genes,
         &prepared.observed,
         &prepared.excluded,
@@ -1433,6 +1438,7 @@ struct PreparedGeneProfile {
     mondo_release: Option<String>,
     reactome_release: Option<String>,
     ranking: PhenotypeRanking,
+    identity: super::gene_identity::Resolver,
 }
 
 fn prepare_gene_profile(
@@ -1479,22 +1485,28 @@ fn prepare_gene_profile(
             label: condition.label.clone(),
         })
         .collect::<Vec<_>>();
-    let report_genes: Vec<super::results::ReportGeneOccurrence> =
-        super::results::report_gene_identities(parquet)?
-            .into_iter()
-            .map(
-                |(gene_symbol, gene_id)| super::results::ReportGeneOccurrence {
-                    allele_id: String::new(),
-                    gene_symbol,
-                    gene_id,
-                },
-            )
-            .collect();
-    let genes = canonical_manual_genes(resources, &request.genes, &report_genes)?;
+    let report_identities = super::results::report_gene_identities(parquet)?;
+    let identity = super::gene_identity::Resolver::new(resources, &report_identities);
+    let report_genes = report_identities
+        .into_iter()
+        .map(|(gene_symbol, gene_id)| {
+            let gene = identity.canonicalize(&gene_symbol, &gene_id);
+            super::results::ReportGeneOccurrence {
+                allele_id: String::new(),
+                gene_symbol: gene.symbol,
+                gene_id: gene.gene_id,
+            }
+        })
+        .collect();
+    let genes = canonical_manual_genes(&identity, &request.genes)?;
     let excluded_genes = request
         .excluded_genes
         .iter()
-        .map(|gene| gene.trim().to_ascii_uppercase())
+        .map(|gene| {
+            identity
+                .canonical_symbol(gene)
+                .map_or_else(|| gene.trim().to_ascii_uppercase(), |gene| gene.symbol)
+        })
         .filter(|gene| !gene.is_empty())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -1652,6 +1664,7 @@ fn prepare_gene_profile(
         mondo_release,
         reactome_release,
         ranking,
+        identity,
     })
 }
 
@@ -1679,10 +1692,12 @@ pub fn preview(
         &prepared.combination,
         prepared.mondo_release.as_deref(),
         prepared.reactome_release.as_deref(),
+        prepared.identity.identity_release(),
         &prepared.ranking,
     );
     let resolved = write_gene_evidence(
         None,
+        &prepared.identity,
         &prepared.report_genes,
         &prepared.observed,
         &prepared.conditions,
@@ -1736,7 +1751,10 @@ pub fn preview(
                 || gene.hpo_gene_id.to_ascii_uppercase().contains(&query))
                 && match presence {
                     "in-result" => resolved.result_symbols.contains(&gene.symbol),
-                    "not-in-result" => !resolved.result_symbols.contains(&gene.symbol),
+                    "not-in-result" => {
+                        resolved.included.contains(&gene.symbol)
+                            && !resolved.result_symbols.contains(&gene.symbol)
+                    }
                     _ => true,
                 }
         })
@@ -1786,55 +1804,25 @@ pub fn preview(
 }
 
 fn canonical_manual_genes(
-    resources: &Path,
+    identity: &super::gene_identity::Resolver,
     requested: &[PhenotypeTerm],
-    report_genes: &[super::results::ReportGeneOccurrence],
 ) -> Result<Vec<PhenotypeTerm>, String> {
-    let mut by_symbol = HashMap::<String, BTreeSet<String>>::new();
-    let mut by_id = HashMap::<String, BTreeSet<String>>::new();
-    for (symbol, gene_id) in available_gene_identities(resources, report_genes) {
-        let symbol = symbol.to_ascii_uppercase();
-        let gene_id = gene_id.to_ascii_uppercase();
-        if !gene_id.is_empty() {
-            by_symbol
-                .entry(symbol.clone())
-                .or_default()
-                .insert(gene_id.clone());
-            by_id.entry(gene_id).or_default().insert(symbol);
-        }
-    }
     let mut genes = BTreeMap::<String, PhenotypeTerm>::new();
     for term in requested {
-        let id = term.id.trim().to_ascii_uppercase();
-        let label = term.label.trim().to_ascii_uppercase();
-        let (symbol, gene_id) = if let Some(symbols) = by_id.get(&id) {
-            if symbols.len() != 1 {
-                return Err(format!("Gene identifier {} is ambiguous", term.id));
+        let resolved = match identity.resolve_pair(&term.id, &term.label) {
+            super::gene_identity::Resolution::Resolved(gene) => gene,
+            super::gene_identity::Resolution::Ambiguous => {
+                return Err(format!("Gene {} is ambiguous", term.label));
             }
-            (symbols.iter().next().unwrap().clone(), id)
-        } else {
-            let symbol = if by_symbol.contains_key(&id) {
-                &id
-            } else {
-                &label
-            };
-            let Some(gene_ids) = by_symbol.get(symbol) else {
+            super::gene_identity::Resolution::Unknown => {
                 return Err(format!("Gene {} is not recognized", term.label));
-            };
-            if gene_ids.len() != 1 {
-                return Err(format!("Gene symbol {} is ambiguous", term.label));
             }
-            (symbol.clone(), gene_ids.iter().next().unwrap().clone())
         };
         genes.insert(
-            symbol.clone(),
+            resolved.symbol.clone(),
             PhenotypeTerm {
-                id: if gene_id.is_empty() {
-                    symbol.clone()
-                } else {
-                    gene_id
-                },
-                label: symbol,
+                id: resolved.gene_id,
+                label: resolved.symbol,
             },
         );
     }
@@ -1902,6 +1890,7 @@ struct GeneEvidenceRow {
 fn publish_gene_evidence(
     runs: &Path,
     run_id: &str,
+    identity: &super::gene_identity::Resolver,
     report_genes: &[super::results::ReportGeneOccurrence],
     observed: &[PhenotypeTerm],
     excluded: &[PhenotypeTerm],
@@ -1926,6 +1915,7 @@ fn publish_gene_evidence(
         combination,
         mondo_release,
         reactome_release,
+        identity.identity_release(),
         ranking,
     );
     let short = &fingerprint[..16];
@@ -1942,6 +1932,7 @@ fn publish_gene_evidence(
     if !evidence_path.is_file() {
         write_gene_evidence(
             Some(&evidence_path),
+            identity,
             report_genes,
             observed,
             conditions,
@@ -1962,6 +1953,7 @@ fn publish_gene_evidence(
         &ranking.hpo_release,
         mondo_release,
         reactome_release,
+        identity.identity_release(),
         &ranking.algorithm_version,
         ranking.provider_url.as_str(),
     )?;
@@ -1985,6 +1977,7 @@ fn gene_evidence_fingerprint(
     combination: &str,
     mondo_release: Option<&str>,
     reactome_release: Option<&str>,
+    identity_release: Option<&str>,
     ranking: &PhenotypeRanking,
 ) -> String {
     let mut fingerprint_input = observed
@@ -2006,7 +1999,11 @@ fn gene_evidence_fingerprint(
         fingerprint_input.push(format!("T:{release}"));
     }
     fingerprint_input.push(format!("V:{}", ranking.algorithm_version));
-    fingerprint_input.push("R:allele-gene-match-v2".into());
+    fingerprint_input.push(format!(
+        "R:allele-gene-match-v3:{}:{}",
+        super::gene_identity::CONTRACT_VERSION,
+        identity_release.unwrap_or("report-identities")
+    ));
     fingerprint_input.push(format!("O:{combination}"));
     format!(
         "{:x}",
@@ -2030,6 +2027,7 @@ fn phenotype_matched_gene_count(path: &Path) -> Result<usize, String> {
 
 fn write_gene_evidence(
     path: Option<&Path>,
+    identity: &super::gene_identity::Resolver,
     report_genes: &[super::results::ReportGeneOccurrence],
     observed: &[PhenotypeTerm],
     conditions: &[PhenotypeTerm],
@@ -2070,7 +2068,8 @@ fn write_gene_evidence(
         .iter()
         .flat_map(|disease| disease.genes.iter())
     {
-        let symbol = gene.symbol.trim().to_ascii_uppercase();
+        let canonical = identity.canonicalize(&gene.symbol, &gene.gene_id);
+        let symbol = canonical.symbol;
         let gene_id = gene.gene_id.trim();
         if !gene_id.is_empty() {
             hpo_gene_ids
@@ -2093,7 +2092,8 @@ fn write_gene_evidence(
         }))
         .map_err(|error| format!("cannot serialize phenotype evidence details: {error}"))?;
         for gene in &disease.genes {
-            let symbol = gene.symbol.trim().to_ascii_uppercase();
+            let canonical = identity.canonicalize(&gene.symbol, &gene.gene_id);
+            let symbol = canonical.symbol;
             let result_gene_id = result_gene_ids
                 .get(symbol.as_str())
                 .cloned()
@@ -2245,8 +2245,12 @@ fn write_gene_evidence(
             });
     }
     for (order, pathway) in selected_pathways.iter().enumerate() {
-        for symbol in &pathway.genes {
-            let result_gene_id = result_gene_ids.get(symbol).cloned().unwrap_or_default();
+        for source_symbol in &pathway.genes {
+            let symbol = identity.canonical_symbol(source_symbol).map_or_else(
+                || source_symbol.trim().to_ascii_uppercase(),
+                |gene| gene.symbol,
+            );
+            let result_gene_id = result_gene_ids.get(&symbol).cloned().unwrap_or_default();
             let summary = genes
                 .entry(symbol.clone())
                 .or_insert_with(|| GenePhenotypeSummary {
@@ -2441,8 +2445,9 @@ fn write_gene_evidence(
     let mut allele_matches =
         BTreeMap::<String, Vec<(&GenePhenotypeSummary, &GeneSelectedMatch)>>::new();
     for occurrence in report_genes {
+        let canonical = identity.canonicalize(&occurrence.gene_symbol, &occurrence.gene_id);
         let Some(gene) = genes
-            .get(&occurrence.gene_symbol)
+            .get(&canonical.symbol)
             .filter(|gene| included.contains(&gene.symbol))
         else {
             continue;
@@ -2640,6 +2645,7 @@ fn write_gene_catalog(
     hpo_release: &str,
     mondo_release: Option<&str>,
     reactome_release: Option<&str>,
+    identity_release: Option<&str>,
     algorithm_version: &str,
     provider_url: &str,
 ) -> Result<(), String> {
@@ -2798,6 +2804,14 @@ fn write_gene_catalog(
         "id": "gene-profile",
         "name": "Genes profile"
     })];
+    if let Some(release) = identity_release {
+        sources.push(json!({
+            "id": "hgnc",
+            "name": "HGNC gene identities",
+            "release": release,
+            "providerUrl": super::gene_identity::SOURCE_URL
+        }));
+    }
     if !hpo_release.is_empty() {
         sources.push(json!({
             "id": "hpo",
@@ -4103,13 +4117,12 @@ fn validate_asset_manifest(manifest: &HpoAssetManifest) -> Result<(), String> {
     if manifest.schema_version != 1
         || !valid_hpo_release_version(&manifest.release)
         || manifest.release_url != release_url
-        || !matches!(manifest.assets.len(), 3 | 4)
+        || !(3..=6).contains(&manifest.assets.len())
         || manifest.assets.iter().any(|asset| {
             asset.kind.trim().is_empty()
                 || asset.filename.contains(['/', '\\'])
                 || asset.bytes == 0
-                || asset.sha256.len() != 64
-                || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !valid_asset_checksum(asset)
         })
     {
         return Err("HPO asset manifest failed validation".into());
@@ -4129,14 +4142,14 @@ fn validate_asset_manifest(manifest: &HpoAssetManifest) -> Result<(), String> {
             ));
         }
     }
+    let mut expected_assets = 3;
     match (
         manifest.mondo_release.as_deref(),
         manifest.mondo_release_url.as_deref(),
     ) {
-        (None, None) if manifest.assets.len() == 3 => {}
-        (Some(release), Some(release_url))
-            if valid_hpo_release_version(release) && manifest.assets.len() == 4 =>
-        {
+        (None, None) => {}
+        (Some(release), Some(release_url)) if valid_hpo_release_version(release) => {
+            expected_assets += 1;
             let tag = format!("v{release}");
             if release_url
                 != format!("https://github.com/monarch-initiative/mondo/releases/tag/{tag}")
@@ -4159,7 +4172,58 @@ fn validate_asset_manifest(manifest: &HpoAssetManifest) -> Result<(), String> {
         }
         _ => return Err("MONDO release metadata is incomplete".into()),
     }
+    match (
+        manifest.hgnc_release.as_deref(),
+        manifest.hgnc_release_url.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(release), Some("https://www.genenames.org/download/"))
+            if valid_hpo_release_version(release) =>
+        {
+            expected_assets += 2;
+            for (kind, filename) in [
+                ("gene-identities", "hgnc_complete_set.txt"),
+                ("withdrawn-gene-identities", "withdrawn.txt"),
+            ] {
+                let matching = manifest
+                    .assets
+                    .iter()
+                    .filter(|asset| asset.kind == kind && asset.filename == filename)
+                    .collect::<Vec<_>>();
+                let base = format!(
+                    "https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/{filename}"
+                );
+                if matching.len() != 1 || !valid_hgnc_asset_url(&matching[0].url, &base) {
+                    return Err(format!(
+                        "phenotype knowledge is missing the official HGNC {filename} asset"
+                    ));
+                }
+            }
+        }
+        _ => return Err("HGNC release metadata is incomplete".into()),
+    }
+    if manifest.assets.len() != expected_assets {
+        return Err("phenotype knowledge contains unexpected assets".into());
+    }
     Ok(())
+}
+
+fn valid_asset_checksum(asset: &HpoAsset) -> bool {
+    let sha256 =
+        asset.sha256.len() == 64 && asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let md5 = asset.md5.as_deref().is_some_and(|value| {
+        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    sha256 ^ md5
+}
+
+fn valid_hgnc_asset_url(url: &str, base: &str) -> bool {
+    url == base
+        || url
+            .strip_prefix(&format!("{base}?generation="))
+            .is_some_and(|generation| {
+                !generation.is_empty() && generation.bytes().all(|byte| byte.is_ascii_digit())
+            })
 }
 
 fn valid_hpo_release_version(value: &str) -> bool {
@@ -4177,6 +4241,102 @@ fn valid_hpo_release_version(value: &str) -> bool {
     let day = value[8..10].parse::<u8>().ok();
     month.is_some_and(|month| (1..=12).contains(&month))
         && day.is_some_and(|day| (1..=31).contains(&day))
+}
+
+fn hgnc_release_from_http_date(value: &str) -> Option<String> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return None;
+    }
+    let month = match parts[2] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let day = parts[1].parse::<u8>().ok()?;
+    let year = parts[3].parse::<u16>().ok()?;
+    let release = format!("{year:04}-{month:02}-{day:02}");
+    valid_hpo_release_version(&release).then_some(release)
+}
+
+fn resolve_latest_hgnc_assets() -> Result<(String, Vec<HpoAsset>), String> {
+    let bootstrap = embedded_asset_manifest()?;
+    let client = super::http_client::source()
+        .map_err(|error| format!("cannot create the HGNC release resolver: {error}"))?;
+    let mut release = None;
+    let mut assets = Vec::with_capacity(2);
+    for (kind, filename) in [
+        ("gene-identities", "hgnc_complete_set.txt"),
+        ("withdrawn-gene-identities", "withdrawn.txt"),
+    ] {
+        let asset = bootstrap
+            .assets
+            .iter()
+            .find(|asset| asset.kind == kind && asset.filename == filename)
+            .ok_or_else(|| format!("the HGNC bootstrap manifest is missing {filename}"))?;
+        let base_url = asset.url.split('?').next().unwrap_or(&asset.url);
+        let response = client
+            .head(base_url)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(|error| format!("cannot discover the current HGNC {filename}: {error}"))?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let bytes = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("HGNC did not report the {filename} size"))?;
+        let generation = header("x-goog-generation")
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .ok_or_else(|| format!("HGNC did not report a stable {filename} generation"))?;
+        let md5 = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim_matches('"').to_ascii_lowercase())
+            .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| format!("HGNC did not report a valid {filename} checksum"))?;
+        let current_release = response
+            .headers()
+            .get(reqwest::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .and_then(hgnc_release_from_http_date)
+            .ok_or_else(|| format!("HGNC did not report a valid {filename} release date"))?;
+        if release
+            .as_ref()
+            .is_some_and(|release| release != &current_release)
+        {
+            return Err("HGNC complete and withdrawn files are from different releases".into());
+        }
+        release = Some(current_release);
+        assets.push(HpoAsset {
+            kind: kind.into(),
+            filename: filename.into(),
+            url: format!("{base_url}?generation={generation}"),
+            bytes,
+            sha256: String::new(),
+            md5: Some(md5),
+        });
+    }
+    Ok((release.ok_or("HGNC release metadata is empty")?, assets))
 }
 
 fn parse_github_release(bytes: &[u8]) -> Result<HpoAssetManifest, String> {
@@ -4244,6 +4404,7 @@ fn parse_github_release(bytes: &[u8]) -> Result<HpoAssetManifest, String> {
             url: asset.browser_download_url.clone(),
             bytes: asset.size,
             sha256,
+            md5: None,
         });
     }
     let manifest = HpoAssetManifest {
@@ -4252,6 +4413,8 @@ fn parse_github_release(bytes: &[u8]) -> Result<HpoAssetManifest, String> {
         release_url: release.html_url,
         mondo_release: None,
         mondo_release_url: None,
+        hgnc_release: None,
+        hgnc_release_url: None,
         assets,
     };
     validate_asset_manifest(&manifest)?;
@@ -4294,7 +4457,12 @@ pub(crate) fn resolve_latest_asset_manifest() -> Result<HpoAssetManifest, String
         url: asset.url.clone(),
         bytes: asset.bytes,
         sha256: asset.sha256.clone(),
+        md5: None,
     });
+    let (hgnc_release, hgnc_assets) = resolve_latest_hgnc_assets()?;
+    manifest.hgnc_release = Some(hgnc_release);
+    manifest.hgnc_release_url = Some("https://www.genenames.org/download/".into());
+    manifest.assets.extend(hgnc_assets);
     validate_asset_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -4400,7 +4568,7 @@ fn download_asset(
             asset.filename, persisted, asset.bytes
         ));
     }
-    verify_sha256(&partial, &asset.sha256)?;
+    verify_asset_checksum(&partial, asset)?;
     if final_path.exists() {
         fs::remove_file(final_path)
             .map_err(|error| format!("cannot replace {}: {error}", asset.filename))?;
@@ -4414,7 +4582,28 @@ fn verified_asset(path: &Path, asset: &HpoAsset) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    Ok(verify_sha256(path, &asset.sha256).is_ok())
+    Ok(verify_asset_checksum(path, asset).is_ok())
+}
+
+fn verify_asset_checksum(path: &Path, asset: &HpoAsset) -> Result<(), String> {
+    if !asset.sha256.is_empty() {
+        return verify_sha256(path, &asset.sha256);
+    }
+    let expected = asset.md5.as_deref().ok_or("asset has no checksum")?;
+    let actual = format!(
+        "{:x}",
+        md5::compute(fs::read(path).map_err(|error| {
+            format!(
+                "cannot read {} for checksum verification: {error}",
+                asset.filename
+            )
+        })?)
+    );
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!("{} failed MD5 verification", asset.filename))
+    }
 }
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
@@ -4634,11 +4823,16 @@ mod tests {
     fn bootstrap_asset_manifest_is_pinned_and_complete() {
         let manifest = embedded_asset_manifest().unwrap();
         assert!(manifest.release_url.contains(&manifest.release));
-        assert_eq!(manifest.assets.len(), 3);
+        assert_eq!(manifest.assets.len(), 5);
         assert_eq!(
             manifest.assets.iter().map(|asset| asset.bytes).sum::<u64>(),
-            48_372_406
+            65_562_828
         );
+        assert_eq!(manifest.hgnc_release.as_deref(), Some("2026-08-07"));
+        assert!(manifest.version_key().contains("+hgnc-2026-08-07"));
+        assert!(manifest.assets.iter().any(|asset| {
+            asset.kind == "gene-identities" && asset.filename == "hgnc_complete_set.txt"
+        }));
     }
 
     #[test]
@@ -4740,6 +4934,7 @@ mod tests {
                     sha256:
                         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
                             .into(),
+                    md5: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -4751,6 +4946,8 @@ mod tests {
                 ),
                 mondo_release: None,
                 mondo_release_url: None,
+                hgnc_release: None,
+                hgnc_release_url: None,
                 assets,
             };
             fs::write(
@@ -4770,6 +4967,7 @@ mod tests {
                     disease_gene_association_count: 1,
                     mondo_release: None,
                     mondo_term_count: 0,
+                    hgnc_release: None,
                 })
                 .unwrap(),
             )
@@ -4800,12 +4998,15 @@ mod tests {
             release_url: "https://example.test".into(),
             mondo_release: None,
             mondo_release_url: None,
+            hgnc_release: None,
+            hgnc_release_url: None,
             assets: vec![HpoAsset {
                 kind: "test".into(),
                 filename: "asset.txt".into(),
                 url: "https://example.test/asset.txt".into(),
                 bytes: 3,
                 sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into(),
+                md5: None,
             }],
         };
         assert!(!verified_installation(&root, &manifest));
@@ -4817,6 +5018,12 @@ mod tests {
         );
         fs::write(root.join("raw").join("asset.txt"), b"abc").unwrap();
         assert!(verified_installation(&root, &manifest));
+        let md5_asset = HpoAsset {
+            sha256: String::new(),
+            md5: Some("900150983cd24fb0d6963f7d28e17f72".into()),
+            ..manifest.assets[0].clone()
+        };
+        assert!(verified_asset(&root.join("raw").join("asset.txt"), &md5_asset).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5065,6 +5272,7 @@ mod tests {
             "hpo-test",
             Some("mondo-test"),
             None,
+            Some("hgnc-test"),
             "test",
             "https://example.test",
         )
@@ -5126,6 +5334,13 @@ mod tests {
         };
         write_gene_evidence(
             Some(&path),
+            &crate::gene_identity::Resolver::new(
+                Path::new("missing"),
+                &[
+                    ("GENE1".into(), "ENSG1".into()),
+                    ("GENE2".into(), "ENSG2".into()),
+                ],
+            ),
             &[
                 crate::results::ReportGeneOccurrence {
                     allele_id: "allele-1".into(),
@@ -5225,6 +5440,10 @@ mod tests {
         )]);
         write_gene_evidence(
             Some(&path),
+            &crate::gene_identity::Resolver::new(
+                Path::new("missing"),
+                &[("GENE1".into(), "ENSG1".into())],
+            ),
             &[crate::results::ReportGeneOccurrence {
                 allele_id: "allele-1".into(),
                 gene_symbol: "GENE1".into(),
@@ -5329,19 +5548,19 @@ mod tests {
                 }],
                 genes: vec![
                     GeneAssociation {
-                        gene_id: "1".into(),
+                        gene_id: "ENSG1".into(),
                         symbol: "MENDEL".into(),
                         association_type: "MENDELIAN".into(),
                         source: "HPO".into(),
                     },
                     GeneAssociation {
-                        gene_id: "2".into(),
+                        gene_id: "ENSG2".into(),
                         symbol: "POLY".into(),
                         association_type: "POLYGENIC".into(),
                         source: "HPO".into(),
                     },
                     GeneAssociation {
-                        gene_id: "3".into(),
+                        gene_id: "ENSG3".into(),
                         symbol: "UNKNOWN".into(),
                         association_type: "UNKNOWN".into(),
                         source: "HPO".into(),
@@ -5362,6 +5581,14 @@ mod tests {
         )]);
         write_gene_evidence(
             Some(&path),
+            &crate::gene_identity::Resolver::new(
+                Path::new("missing"),
+                &[
+                    ("MENDEL".into(), "ENSG1".into()),
+                    ("POLY".into(), "ENSG2".into()),
+                    ("UNKNOWN".into(), "ENSG3".into()),
+                ],
+            ),
             &[
                 crate::results::ReportGeneOccurrence {
                     allele_id: "allele-1".into(),

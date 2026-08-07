@@ -204,7 +204,7 @@
     {
       "id": "hpo",
       "name": "Phenotype and condition knowledge",
-      "purpose": "Local phenotype terms, condition terms, disease profiles, and gene associations",
+      "purpose": "Local phenotype and condition terms, disease-gene associations, and approved human gene identities",
       "defaultEnabled": false,
       "fastvepSource": null,
       "evidenceScope": "gene",

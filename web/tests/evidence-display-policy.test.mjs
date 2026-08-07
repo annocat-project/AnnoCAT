@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
-import {createVariantPresentation,evidenceColumnPolicy} from '../src/app/variant-presentation.js';
+import {createVariantPresentation,evidenceColumnPolicy,isSpliceAiGeneField} from '../src/app/variant-presentation.js';
 import {favorFieldPresentation} from '../src/app/favor-online.js';
 
 globalThis.localStorage={getItem:()=>null,setItem:()=>{}};
@@ -12,6 +12,7 @@ test('SpliceAI recommends only the maximum score and hides its duplicate gene fi
     assert.deepEqual(evidenceColumnPolicy({sourceId:'spliceai',fieldPath}),{selectable:true,recommended:false});
   }
   assert.deepEqual(evidenceColumnPolicy({sourceId:'spliceai',fieldPath:'gene'}),{selectable:false,recommended:false});
+  assert.equal(isSpliceAiGeneField({sourceId:'spliceai@mane-v1.4',fieldPath:'gene'}),true);
 });
 
 const evidenceCalibrations=JSON.parse(readFileSync(new URL('../../config/evidence-calibrations.json',import.meta.url),'utf8'));
