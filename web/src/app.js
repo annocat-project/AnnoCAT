@@ -13,7 +13,7 @@ const columnGroups=[
   {label:'Selected transcript',columns:[['gene','Gene',true],['geneId','Gene ID',false],['transcriptId','Transcript',false],['consequence','Consequence',true],['impact','Impact',true],['canonical','Canonical',false],['maneSelect','MANE Select',false]]}
 ];
 const columns=columnGroups.flatMap(group=>group.columns);
-const nonSortableCoreColumns=new Set(['zygosity']);
+const nonSortableCoreColumns=new Set();
 const coreColumnDetails={
   chromosome:['Chromosome','Chromosome or contig containing the variant, normalized to the result assembly.'],
   position:['Position','One-based genomic position of the variant on the chromosome.'],
@@ -454,7 +454,7 @@ async function saveCaseNotes(){const runId=caseNotesRunId;if(!runId)return;clear
 async function toggleCaseNotes(){if(!currentResultRun)return;const panel=$('#case-notes-panel'),opening=panel.classList.contains('hidden');panel.classList.toggle('hidden',!opening);if(opening)await loadCaseNotes()}
 function configureGeneQuery(profile){
   const fieldIndex=path=>resultFieldCatalog.findIndex(field=>(fieldSourceIs(field,'gene-profile')||fieldSourceIs(field,'hpo'))&&field.fieldPath===path),includedGene=fieldIndex('includedGene');
-  resultFilters.setProfileLinkedFilter(includedGene,Boolean(profile?.showMatchesOnly));
+  resultFilters.setProfileLinkedFilter(resultFieldCatalog[includedGene],Boolean(profile?.showMatchesOnly));
 }
 async function phenotypeProfileApplied(profile,action){
   await refreshCurrentResultSchema({

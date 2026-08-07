@@ -251,6 +251,7 @@ pub struct GenePreviewResponse {
     pub total_genes: usize,
     pub genes_in_result: usize,
     pub included_genes: usize,
+    pub included_genes_in_result: usize,
     pub offset: usize,
     pub has_more: bool,
     pub rows: Vec<GenePreviewRow>,
@@ -1700,6 +1701,11 @@ pub fn preview(
         .filter(|symbol| resolved.result_symbols.contains(*symbol))
         .count();
     let included_genes = resolved.included.len();
+    let included_genes_in_result = resolved
+        .included
+        .iter()
+        .filter(|symbol| resolved.result_symbols.contains(*symbol))
+        .count();
     let all_included_genes = include_all_symbols.then(|| {
         resolved
             .genes
@@ -1771,6 +1777,7 @@ pub fn preview(
         total_genes,
         genes_in_result,
         included_genes,
+        included_genes_in_result,
         offset,
         has_more,
         rows,
