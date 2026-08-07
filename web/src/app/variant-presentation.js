@@ -456,7 +456,7 @@ const evidenceDomainTitles={key:'Key evidence',clinical:'Clinical evidence',popu
 const evidenceDomainOrder=['clinical','population','prediction','splicing','conservation','functional','regulatory','gene','technical','regional','other'];
 function evidenceDomain(item){
   const source=String(item?.sourceId||'').toLowerCase(),field=String(item?.fieldPath||'').toLowerCase(),text=`${source} ${field}`;
-  if(source==='hpo')return'phenotype';
+  if(source==='hpo'||source==='gene-profile')return'phenotype';
   if(alleleFrequencyField(source,field))return'population';
   if(/clinvar|clingen|clnsig|clinical|review.?status|condition|phenotype|disease/.test(text))return'clinical';
   if(/gnomad|topmed|bravo|1000.?genomes|population|allele.?frequency|(^|[._])af([._]|$)|faf|nhomalt|allele.?count|allele.?number/.test(text))return'population';
@@ -567,6 +567,17 @@ function phenotypeEvidenceExtra(items){
     sections.push(`<div class="key-evidence-subgroup"><div class="key-evidence-subheading fui-section-heading"><strong>Condition associations</strong></div><div class="annotation-list fui-key-value-list">${links.map(link=>{const source=String(link.associationSource||''),sourceLabel=/mim2gene/i.test(source)?'NCBI mim2gene/MedGen':source.replace(/^https?:\/\/|^ftp:\/\//i,'').split('/')[0],matched=[link.matchedCondition,link.matchedConditionId].filter(Boolean).join(' · '),provenance=[link.associationType,sourceLabel].filter(Boolean).join(' · ');return`<div class="annotation-row fui-key-value-row fui-key-value-row--stacked"><span class="annotation-field fui-key-value-cell"><strong>${escapeHtml(link.selectedCondition||link.selectedConditionId||'Selected condition')}</strong><small>${escapeHtml(link.selectedConditionId||'')}</small></span><span class="annotation-value fui-key-value-cell"><b>${escapeHtml(link.relation||'Not reported')}</b>${matched?`<small>${escapeHtml(matched)}</small>`:''}${provenance?`<small>${escapeHtml(provenance)}</small>`:''}</span></div>`}).join('')}</div></div>`)
   }
   return sections.join('')
+}
+function geneMatchEvidenceExtra(items){
+  const item=items.find(candidate=>String(candidate.fieldPath||'')==='geneMatchDetails');
+  if(!item)return'';
+  const matches=decodeEvidenceValue(item.value);
+  if(!Array.isArray(matches)||!matches.length)return'';
+  const rows=matches.map(match=>{
+    const itemId=String(match.selectedItemId||''),pathway=itemId.startsWith('R-HSA-'),label=match.selectedItem||itemId||'Selected item',title=pathway?`<a href="${escapeHtml(`https://reactome.org/content/detail/${encodeURIComponent(itemId)}`)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)} ↗</a>`:`<strong>${escapeHtml(label)}</strong>`;
+    return`<div class="annotation-row fui-key-value-row fui-key-value-row--stacked"><span class="annotation-field fui-key-value-cell">${title}<small>${escapeHtml([itemId,match.itemType].filter(Boolean).join(' · '))}</small></span><span class="annotation-value fui-key-value-cell"><b>${escapeHtml(match.geneSymbol||match.geneId||'Gene not reported')}</b><small>${escapeHtml([match.geneId,match.relation].filter(Boolean).join(' · '))}</small></span></div>`
+  }).join('');
+  return`<div class="key-evidence-subgroup"><div class="key-evidence-subheading fui-section-heading"><strong>Selected matches</strong></div><div class="annotation-list fui-key-value-list">${rows}</div></div>`
 }
 function rememberVariantDetailSectionState(){
   $('#variant-detail-body')?.querySelectorAll('details[data-variant-detail-section]').forEach(section=>section.open?variantDetailOpenSections.add(section.dataset.variantDetailSection):variantDetailOpenSections.delete(section.dataset.variantDetailSection))
@@ -737,7 +748,7 @@ function renderVariantDetail(row,detail){
     ])
   ].join('');
   $('#variant-detail-body').innerHTML=`<section class="detail-overview"><div class="detail-links">${links.map(([label,url,title])=>`<a class="fui-button fui-button--small" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)} ↗</a>`).join('')}</div><dl class="detail-summary fui-description-grid">${summaryRows}</dl></section>${groupedEvidenceSection('Clinical & population evidence',[['Clinical',clinicalItems],['Population',populationItems,'Not reported',{kind:'population',preferredSourceId:frequency?.sourceId}]],{className:'clinical-population-section',sectionKey:'clinical-population'})}<section class="detail-section transcript-context fui-accordion-stack"><details class="transcript-details collapsible-detail fui-accordion" data-variant-detail-section="transcript-molecular" ${variantDetailOpenSections.has('transcript-molecular')?'open':''}><summary><strong>${escapeHtml(sectionHeading)}</strong></summary><div class="transcript-context-body">${unique.length?`<select id="detail-consequence-select" class="fui-select" aria-label="Consequence context" title="Shows transcripts and features annotated for this allele. Transcripts present only in a supplementary source are not added.">${options}</select><div class="selected-transcript-card">${isTranscript?transcriptDetail(selected,metadata):nonTranscriptDetail(selected)}</div>`:'<p class="detail-empty">No molecular consequence was recorded.</p>'}${detail.consequencesTruncated?'<p class="detail-warning">Only the first 1,000 consequences are available.</p>':''}</div></details></section>${groupedEvidenceSection('Predictions & conservation',[['Prediction scores',predictionItems],['Splicing',splicingItems],['Conservation',conservationItems],['Functional annotation summaries',functionalItems]],{className:'prediction-evidence-section',sectionKey:'predictions-conservation'})}${groupedEvidenceSection('Technical details & provenance',technicalGroups,{className:'technical-provenance-section',extra:provenance,sectionKey:'technical-provenance'})}`;
-  if(domainGroups.phenotype?.length){const profileItems=domainGroups.phenotype.filter(item=>String(item.fieldPath||'')!=='phenotypeEvidenceDetails'),extra=phenotypeEvidenceExtra(domainGroups.phenotype),groups=profileItems.length?[['Profile evidence',profileItems]]:[];$('#variant-detail-body .transcript-context')?.insertAdjacentHTML('beforebegin',groupedEvidenceSection('Phenotype & condition evidence',groups,{className:'phenotype-evidence-section',sectionKey:'phenotype-condition',extra}))}
+  if(domainGroups.phenotype?.length){const detailFields=new Set(['phenotypeEvidenceDetails','geneMatchDetails']),profileItems=domainGroups.phenotype.filter(item=>!detailFields.has(String(item.fieldPath||''))),extra=geneMatchEvidenceExtra(domainGroups.phenotype)+phenotypeEvidenceExtra(domainGroups.phenotype),groups=profileItems.length?[['Gene evidence',profileItems]]:[];$('#variant-detail-body .transcript-context')?.insertAdjacentHTML('beforebegin',groupedEvidenceSection('Gene associations',groups,{className:'phenotype-evidence-section',sectionKey:'gene-associations',extra}))}
   $('#detail-consequence-select')?.addEventListener('change',event=>{detailConsequenceSelections.set(detail.alleleId||row.alleleId,event.target.value);renderVariantDetail(row,detail)});
   bindVariantDetailSectionState();
   revealVariantDetail();

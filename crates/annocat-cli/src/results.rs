@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -30,8 +30,9 @@ use std::time::{Instant, UNIX_EPOCH};
 
 pub const SCHEMA_VERSION: i32 = annocat_core::RESULT_SCHEMA_VERSION;
 pub const REPRESENTATIVE_SELECTION_CONTRACT: &str = "allele-gene-severity-v1";
-const QUERY_PROJECTION_CONTRACT: &str = "field-indexed-evidence-v2";
-const QUERY_PROJECTION_PREFIX: &str = ".annocat-query-v1-";
+const QUERY_PROJECTION_CONTRACT: &str = "field-indexed-evidence-v3";
+const QUERY_PROJECTION_PREFIX: &str = ".annocat-query-v2-";
+const LEGACY_QUERY_PROJECTION_PREFIX: &str = ".annocat-query-v1-";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,11 +52,55 @@ struct ResultPage {
 struct PageQuery<'a> {
     variants: &'a Path,
     evidence: Option<&'a Path>,
+    evidence_files: Option<&'a [PathBuf]>,
     catalog: Option<&'a Path>,
     offset: u64,
     limit: u64,
     request: &'a PageRequest,
     candidate_ids: Option<&'a [String]>,
+}
+
+fn evidence_read(evidence: &Path, files: Option<&[PathBuf]>) -> (String, Vec<SqlValue>) {
+    let Some(files) = files else {
+        return (
+            "read_parquet(?)".into(),
+            vec![evidence.to_string_lossy().into_owned().into()],
+        );
+    };
+    let paths = files
+        .iter()
+        .map(|path| format!("'{}'", path.to_string_lossy().replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    (format!("read_parquet([{paths}])"), Vec::new())
+}
+
+fn evidence_read_for_fields(
+    evidence: &Path,
+    files: Option<&[PathBuf]>,
+    field_indices: impl IntoIterator<Item = usize>,
+) -> (String, Vec<SqlValue>) {
+    let Some(files) = files else {
+        return evidence_read(evidence, None);
+    };
+    let prefixes = field_indices
+        .into_iter()
+        .map(|index| format!("{QUERY_PROJECTION_PREFIX}{index}-"))
+        .collect::<Vec<_>>();
+    let selected = files
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        evidence_read(evidence, Some(files))
+    } else {
+        evidence_read(evidence, Some(&selected))
+    }
 }
 
 struct ActivePageQuery {
@@ -66,6 +111,11 @@ struct ActivePageQuery {
 static ACTIVE_PAGE_QUERIES: OnceLock<Mutex<HashMap<String, ActivePageQuery>>> = OnceLock::new();
 static REPRESENTATIVE_OVERRIDE_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
 static QUERY_PROJECTION_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
+type ResultRowKey = (i64, i32);
+static MATCHED_ROW_CACHE: OnceLock<Mutex<VecDeque<(String, Arc<Vec<ResultRowKey>>)>>> =
+    OnceLock::new();
+const MATCHED_ROW_CACHE_ENTRIES: usize = 8;
+const MATCHED_ROW_CACHE_LIMIT: i64 = 10_000;
 
 struct TemporaryDirectory(PathBuf);
 
@@ -1095,7 +1145,7 @@ fn parse_and_write_variant_chunk(
     Ok(rows)
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageRequest {
     #[serde(default)]
@@ -1154,14 +1204,14 @@ pub struct PageRequest {
     pub excluded_allele_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageSortRequest {
     pub column: String,
     pub direction: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreFilterRuleRequest {
     pub column: String,
@@ -1170,7 +1220,7 @@ pub struct CoreFilterRuleRequest {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EvidenceFilterRequest {
     pub index: usize,
@@ -3323,6 +3373,7 @@ fn page_json_internal(
     let query = PageQuery {
         variants: parquet,
         evidence,
+        evidence_files: None,
         catalog,
         offset,
         limit,
@@ -3339,6 +3390,7 @@ fn page_result_internal(
 ) -> Result<ResultPage, String> {
     let parquet = query.variants;
     let evidence = query.evidence;
+    let evidence_files = query.evidence_files;
     let catalog = query.catalog;
     let offset = query.offset;
     let limit = query.limit;
@@ -3346,16 +3398,51 @@ fn page_result_internal(
     let candidate_ids = query.candidate_ids;
     let limit = limit.clamp(1, 500);
     let core_filters = validated_core_page_filters(request)?;
-    let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
-    let (evidence_rule_sql, evidence_rule_params) =
-        evidence_filter_rules_sql(evidence, catalog, request)?;
-    let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
-    let (search_sql, mut search_params) =
-        displayed_field_search_sql(connection, evidence, catalog, request, &core_filters.search)?;
-    let excluded_sql = format!("{search_sql}{excluded_sql}");
-    search_params.extend(excluded_params);
-    let excluded_params = search_params;
-    let page_sorts = page_sort_specs(evidence, catalog, request)?;
+    let match_cache_key = matched_row_cache_key(query, &core_filters)?;
+    let cached_rows = match_cache_key.as_deref().and_then(cached_result_rows);
+    if let Some(rows) = &cached_rows {
+        install_matched_rows(connection, rows)?;
+    }
+    let (
+        core_rule_sql,
+        core_rule_params,
+        evidence_rule_sql,
+        evidence_rule_params,
+        excluded_sql,
+        excluded_params,
+    ) = if cached_rows.is_some() {
+        (
+            String::new(),
+            Vec::new(),
+            String::new(),
+            Vec::new(),
+            String::new(),
+            Vec::new(),
+        )
+    } else {
+        let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
+        let (evidence_rule_sql, evidence_rule_params) =
+            evidence_filter_rules_sql(evidence, evidence_files, catalog, request)?;
+        let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
+        let (search_sql, mut search_params) = displayed_field_search_sql(
+            connection,
+            evidence,
+            evidence_files,
+            catalog,
+            request,
+            &core_filters.search,
+        )?;
+        search_params.extend(excluded_params);
+        (
+            core_rule_sql,
+            core_rule_params,
+            evidence_rule_sql,
+            evidence_rule_params,
+            format!("{search_sql}{excluded_sql}"),
+            search_params,
+        )
+    };
+    let page_sorts = page_sort_specs(evidence, evidence_files, catalog, request)?;
     let primary_sort = page_sorts
         .first()
         .expect("every result page has an input-order sort");
@@ -3365,8 +3452,15 @@ fn page_result_internal(
     let candidate_sql = candidate_ids
         .map(|_| " AND v.allele_id IN (SELECT allele_id FROM candidate_alleles)")
         .unwrap_or_default();
+    let matched_sql = cached_rows
+        .as_ref()
+        .map(|_| {
+            " AND EXISTS (SELECT 1 FROM matched_result_rows matched
+                WHERE matched.record_number=v.record_number AND matched.alt_index=v.alt_index)"
+        })
+        .unwrap_or_default();
     let where_sql = format!(
-        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}{candidate_sql}"
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}{candidate_sql}{matched_sql}"
     );
     if let Some(candidate_ids) = candidate_ids {
         connection
@@ -3452,21 +3546,53 @@ fn page_result_internal(
             rows,
         });
     }
-    let total = if let Some(total) = request.known_total {
+    let total = if let Some(rows) = &cached_rows {
+        i64::try_from(rows.len()).map_err(|_| "cached result total is too large")?
+    } else if let Some(total) = request.known_total {
         i64::try_from(total).map_err(|_| "known result total is too large")?
+    } else if request.exact_total && match_cache_key.is_some() {
+        let rows = bounded_matched_rows(
+            connection,
+            path.as_ref(),
+            request,
+            &core_filters,
+            &where_sql,
+            &core_rule_params,
+            &evidence_rule_params,
+            &excluded_params,
+        )?;
+        if rows.len() <= MATCHED_ROW_CACHE_LIMIT as usize {
+            let total = rows.len() as i64;
+            remember_result_rows(
+                match_cache_key
+                    .clone()
+                    .expect("exact filtered query has a cache key"),
+                rows,
+            );
+            total
+        } else {
+            count_result_rows(
+                connection,
+                path.as_ref(),
+                request,
+                &core_filters,
+                &where_sql,
+                &core_rule_params,
+                &evidence_rule_params,
+                &excluded_params,
+            )?
+        }
     } else {
-        let mut count_statement = connection
-            .prepare(&format!(
-                "SELECT count(*) FROM annocat_variants(?) v WHERE {where_sql}"
-            ))
-            .map_err(|error| format!("cannot prepare result count: {error}"))?;
-        let mut count_params = core_page_params(path.as_ref(), request, &core_filters);
-        count_params.extend(core_rule_params.iter().cloned());
-        count_params.extend(evidence_rule_params.iter().cloned());
-        count_params.extend(excluded_params.iter().cloned());
-        count_statement
-            .query_row(params_from_iter(count_params.iter()), |row| row.get(0))
-            .map_err(|error| format!("cannot count result page: {error}"))?
+        count_result_rows(
+            connection,
+            path.as_ref(),
+            request,
+            &core_filters,
+            &where_sql,
+            &core_rule_params,
+            &evidence_rule_params,
+            &excluded_params,
+        )?
     };
     if total == 0 {
         return Ok(ResultPage {
@@ -3610,6 +3736,178 @@ fn page_request_is_unfiltered(request: &PageRequest, filters: &CorePageFilters) 
         && request.excluded_allele_ids.is_empty()
 }
 
+fn matched_row_cache_key(
+    query: &PageQuery<'_>,
+    filters: &CorePageFilters,
+) -> Result<Option<String>, String> {
+    if query.candidate_ids.is_some() || page_request_is_unfiltered(query.request, filters) {
+        return Ok(None);
+    }
+    let mut request = query.request.clone();
+    request.sort.clear();
+    request.direction.clear();
+    request.sort_evidence = None;
+    request.sorts.clear();
+    request.known_total = None;
+    request.exact_total = false;
+    request.query_session.clear();
+    request.request_generation = 0;
+    request.evidence_columns.sort_unstable();
+
+    let mut digest = Sha256::new();
+    digest.update(
+        serde_json::to_vec(&request)
+            .map_err(|error| format!("cannot identify result query: {error}"))?,
+    );
+    let mut paths = vec![query.variants.to_path_buf()];
+    if let Some(files) = query.evidence_files {
+        paths.extend(files.iter().cloned());
+    } else if let Some(evidence) = query.evidence {
+        paths.extend(visible_evidence_files(evidence)?);
+    }
+    paths.extend(query.catalog.map(Path::to_path_buf));
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        let metadata = fs::metadata(&path).map_err(|error| {
+            format!(
+                "cannot inspect result query input {}: {error}",
+                path.display()
+            )
+        })?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |value| value.as_nanos());
+        digest.update(path.to_string_lossy().as_bytes());
+        digest.update(metadata.len().to_le_bytes());
+        digest.update(modified.to_le_bytes());
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
+}
+
+fn cached_result_rows(key: &str) -> Option<Arc<Vec<ResultRowKey>>> {
+    let mut cache = MATCHED_ROW_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache.iter().position(|(candidate, _)| candidate == key)?;
+    let entry = cache.remove(index)?;
+    let rows = Arc::clone(&entry.1);
+    cache.push_front(entry);
+    Some(rows)
+}
+
+fn remember_result_rows(key: String, rows: Vec<ResultRowKey>) {
+    let mut cache = MATCHED_ROW_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(index) = cache.iter().position(|(candidate, _)| candidate == &key) {
+        cache.remove(index);
+    }
+    cache.push_front((key, Arc::new(rows)));
+    cache.truncate(MATCHED_ROW_CACHE_ENTRIES);
+}
+
+fn install_matched_rows(connection: &Connection, rows: &[ResultRowKey]) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE matched_result_rows(
+                record_number BIGINT NOT NULL,
+                alt_index INTEGER NOT NULL,
+                PRIMARY KEY(record_number, alt_index)
+            )",
+        )
+        .map_err(|error| format!("cannot create cached result query: {error}"))?;
+    for chunk in rows.chunks(500) {
+        let placeholders = std::iter::repeat_n("(?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = chunk
+            .iter()
+            .flat_map(|(record_number, alt_index)| {
+                [SqlValue::BigInt(*record_number), SqlValue::Int(*alt_index)]
+            })
+            .collect::<Vec<_>>();
+        connection
+            .execute(
+                &format!("INSERT INTO matched_result_rows VALUES {placeholders}"),
+                params_from_iter(values.iter()),
+            )
+            .map_err(|error| format!("cannot populate cached result query: {error}"))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bounded_matched_rows(
+    connection: &Connection,
+    path: &str,
+    request: &PageRequest,
+    filters: &CorePageFilters,
+    where_sql: &str,
+    core_rule_params: &[SqlValue],
+    evidence_rule_params: &[SqlValue],
+    excluded_params: &[SqlValue],
+) -> Result<Vec<ResultRowKey>, String> {
+    let sql = format!(
+        "SELECT v.record_number, v.alt_index
+         FROM annocat_variants(?) v
+         WHERE {where_sql}
+         LIMIT {}",
+        MATCHED_ROW_CACHE_LIMIT + 1
+    );
+    let parameters = filtered_page_params(
+        path,
+        request,
+        filters,
+        core_rule_params,
+        evidence_rule_params,
+        excluded_params,
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("cannot prepare bounded result query: {error}"))?;
+    let rows = statement
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+        })
+        .map_err(|error| format!("cannot read bounded result query: {error}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot collect bounded result query: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn count_result_rows(
+    connection: &Connection,
+    path: &str,
+    request: &PageRequest,
+    filters: &CorePageFilters,
+    where_sql: &str,
+    core_rule_params: &[SqlValue],
+    evidence_rule_params: &[SqlValue],
+    excluded_params: &[SqlValue],
+) -> Result<i64, String> {
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT count(*) FROM annocat_variants(?) v WHERE {where_sql}"
+        ))
+        .map_err(|error| format!("cannot prepare result count: {error}"))?;
+    let parameters = filtered_page_params(
+        path,
+        request,
+        filters,
+        core_rule_params,
+        evidence_rule_params,
+        excluded_params,
+    );
+    statement
+        .query_row(params_from_iter(parameters.iter()), |row| row.get(0))
+        .map_err(|error| format!("cannot count result page: {error}"))
+}
+
 fn query_result_rows(
     connection: &Connection,
     sql: &str,
@@ -3667,6 +3965,7 @@ struct SelectedEvidenceColumn {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvidenceResolutionStrategy {
     Allele,
+    AlleleGeneDirect,
     DerivedMaximum,
     GeneDirect,
     MaterializedSelected,
@@ -3725,6 +4024,8 @@ fn resolved_value_is_usable(strategy: EvidenceResolutionStrategy, kind: &str) ->
 
 struct EvidenceSortSpec {
     evidence: String,
+    evidence_read: String,
+    evidence_parameters: Vec<SqlValue>,
     field: SelectedEvidenceColumn,
     value_expression: &'static str,
 }
@@ -3786,8 +4087,10 @@ fn append_evidence_field_parameters(
 }
 
 fn evidence_sort_parameters(sort: &EvidenceSortSpec) -> Vec<SqlValue> {
-    let mut parameters = vec![sort.evidence.clone().into()];
+    let mut parameters = sort.evidence_parameters.clone();
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect
+        || (sort.field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+            && !is_query_projection(Path::new(&sort.evidence)))
         || uses_resolution_sidecar(sort.field.resolution)
     {
         parameters.push(sort.field.source_id.clone().into());
@@ -3799,10 +4102,14 @@ fn evidence_sort_parameters(sort: &EvidenceSortSpec) -> Vec<SqlValue> {
     parameters
 }
 
+fn evidence_sort_sql(sort: &EvidenceSortSpec, sql: String) -> String {
+    sql.replace("read_parquet(?)", &sort.evidence_read)
+}
+
 fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
         if sort.field.field_path == "phenotypeRelevance" {
-            return "(SELECT coalesce(
+            return evidence_sort_sql(sort, "(SELECT coalesce(
                         max(CASE WHEN ev_sort.field_path='phenotypeRelevance'
                                  THEN coalesce(ev_sort.number_value, CAST(ev_sort.integer_value AS DOUBLE), try_cast(ev_sort.string_value AS DOUBLE)) END),
                         max(CASE WHEN ev_sort.field_path='selectedConditionMatches'
@@ -3812,49 +4119,75 @@ fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
                      WHERE upper(ev_sort.gene_symbol)=upper(v.gene_symbol)
                        AND ev_sort.source_id=?
                        AND ev_sort.field_path IN (?, 'selectedConditionMatches'))"
-                .into();
+                .into());
         }
-        return format!(
-            "(SELECT {} FROM read_parquet(?) ev_sort
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "(SELECT {} FROM read_parquet(?) ev_sort
               WHERE upper(ev_sort.gene_symbol)=upper(v.gene_symbol)
                 AND ev_sort.source_id=? AND ev_sort.field_path=?
               LIMIT 1)",
-            sort.value_expression
+                sort.value_expression
+            ),
+        );
+    }
+    if sort.field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+        && !is_query_projection(Path::new(&sort.evidence))
+    {
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "(SELECT {} FROM read_parquet(?) ev_sort
+              WHERE ev_sort.allele_id = v.allele_id
+                AND ev_sort.source_id=? AND ev_sort.field_path=?
+              LIMIT 1)",
+                sort.value_expression
+            ),
         );
     }
     if uses_resolution_sidecar(sort.field.resolution) {
         let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
-        return format!(
-            "(SELECT {} FROM read_parquet(?) ev_sort
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "(SELECT {} FROM read_parquet(?) ev_sort
               WHERE ev_sort.allele_id = v.allele_id
                 AND ev_sort.source_id = ? AND ev_sort.field_path = ?
                 AND {}
               LIMIT 1)",
-            sort.value_expression, resolution
+                sort.value_expression, resolution
+            ),
         );
     }
     let field_condition =
         evidence_field_condition(&sort.field, "ev_sort", Path::new(&sort.evidence));
     if is_query_projection(Path::new(&sort.evidence)) {
-        return format!(
-            "(SELECT {} FROM read_parquet(?) ev_sort
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "(SELECT {} FROM read_parquet(?) ev_sort
               WHERE ev_sort.allele_id = v.allele_id AND {}
               LIMIT 1)",
-            sort.value_expression, field_condition
+                sort.value_expression, field_condition
+            ),
         );
     }
-    format!(
-        "(SELECT {} FROM read_parquet(?) ev_sort
+    evidence_sort_sql(
+        sort,
+        format!(
+            "(SELECT {} FROM read_parquet(?) ev_sort
           WHERE ev_sort.allele_id = v.allele_id AND {}
           ORDER BY ev_sort.consequence_id NULLS FIRST LIMIT 1)",
-        sort.value_expression, field_condition
+            sort.value_expression, field_condition
+        ),
     )
 }
 
 fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
         if sort.field.field_path == "phenotypeRelevance" {
-            return "WITH scored_evidence AS (
+            return evidence_sort_sql(sort, "WITH scored_evidence AS (
                        SELECT upper(gene_symbol) AS gene_symbol,
                               coalesce(
                                 max(CASE WHEN ev_sort.field_path='phenotypeRelevance'
@@ -3868,29 +4201,52 @@ fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
                        GROUP BY upper(gene_symbol)
                        HAVING sort_value IS NOT NULL
                      )"
-                .into();
+                .into());
         }
-        return format!(
-            "WITH scored_evidence AS (
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "WITH scored_evidence AS (
                SELECT upper(gene_symbol) AS gene_symbol, {} AS sort_value
                FROM read_parquet(?) ev_sort
                WHERE ev_sort.source_id=? AND ev_sort.field_path=?
                  AND {} IS NOT NULL
              )",
-            sort.value_expression, sort.value_expression
+                sort.value_expression, sort.value_expression
+            ),
+        );
+    }
+    if sort.field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+        && !is_query_projection(Path::new(&sort.evidence))
+    {
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "WITH scored_evidence AS (
+               SELECT allele_id, first({}) AS sort_value
+               FROM read_parquet(?) ev_sort
+               WHERE ev_sort.source_id=? AND ev_sort.field_path=?
+               GROUP BY allele_id
+               HAVING sort_value IS NOT NULL
+             )",
+                sort.value_expression
+            ),
         );
     }
     if uses_resolution_sidecar(sort.field.resolution) {
         let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
-        return format!(
-            "WITH scored_evidence AS (
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "WITH scored_evidence AS (
                SELECT allele_id, {} AS sort_value
                FROM read_parquet(?) ev_sort
                WHERE ev_sort.source_id = ? AND ev_sort.field_path = ?
                  AND {}
                  AND {} IS NOT NULL
              )",
-            sort.value_expression, resolution, sort.value_expression
+                sort.value_expression, resolution, sort.value_expression
+            ),
         );
     }
     let field_condition =
@@ -3903,8 +4259,10 @@ fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
             sort.value_expression
         )
     };
-    format!(
-        "WITH evidence_values AS (
+    evidence_sort_sql(
+        sort,
+        format!(
+            "WITH evidence_values AS (
            SELECT allele_id,
                   {selection} AS sort_value
            FROM read_parquet(?) ev_sort
@@ -3913,7 +4271,8 @@ fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
          ), scored_evidence AS (
            SELECT allele_id, sort_value FROM evidence_values WHERE sort_value IS NOT NULL
          )",
-        field_condition
+            field_condition
+        ),
     )
 }
 
@@ -4047,8 +4406,10 @@ fn filtered_evidence_sorted_page_rows(
     limit: u64,
 ) -> Result<Vec<Value>, String> {
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
-        let sql = format!(
-            "WITH matched_variants AS MATERIALIZED (
+        let sql = evidence_sort_sql(
+            sort,
+            format!(
+                "WITH matched_variants AS MATERIALIZED (
                SELECT v.* FROM annocat_variants(?) v WHERE {where_sql}
              ), evidence_values AS (
                SELECT upper(ev_sort.gene_symbol) AS gene_symbol,
@@ -4064,7 +4425,8 @@ fn filtered_evidence_sorted_page_rows(
              ORDER BY ev_order.sort_value {direction} NULLS LAST,
                       v.record_number ASC, v.alt_index ASC
              LIMIT ? OFFSET ?",
-            sort.value_expression
+                sort.value_expression
+            ),
         );
         let mut parameters = filtered_page_params(
             path,
@@ -4079,7 +4441,15 @@ fn filtered_evidence_sorted_page_rows(
         parameters.push((offset as i64).into());
         return query_result_rows(connection, &sql, &parameters);
     }
-    let (selection, evidence_where) = if uses_resolution_sidecar(sort.field.resolution) {
+    let (selection, evidence_where) = if sort.field.resolution
+        == EvidenceResolutionStrategy::AlleleGeneDirect
+        && !is_query_projection(Path::new(&sort.evidence))
+    {
+        (
+            format!("first({})", sort.value_expression),
+            "ev_sort.source_id = ? AND ev_sort.field_path = ?".into(),
+        )
+    } else if uses_resolution_sidecar(sort.field.resolution) {
         (
             format!("first({})", sort.value_expression),
             format!(
@@ -4100,8 +4470,10 @@ fn filtered_evidence_sorted_page_rows(
             evidence_field_condition(&sort.field, "ev_sort", Path::new(&sort.evidence)),
         )
     };
-    let sql = format!(
-        "WITH matched_variants AS MATERIALIZED (
+    let sql = evidence_sort_sql(
+        sort,
+        format!(
+            "WITH matched_variants AS MATERIALIZED (
            SELECT v.* FROM annocat_variants(?) v WHERE {where_sql}
          ), evidence_values AS (
            SELECT ev_sort.allele_id,
@@ -4117,6 +4489,7 @@ fn filtered_evidence_sorted_page_rows(
          ORDER BY ev_order.sort_value {direction} NULLS LAST,
                   v.record_number ASC, v.alt_index ASC
          LIMIT ? OFFSET ?",
+        ),
     );
     let mut parameters = filtered_page_params(
         path,
@@ -4258,6 +4631,7 @@ fn is_query_projection(evidence: &Path) -> bool {
 
 fn evidence_filter_rules_sql(
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     request: &PageRequest,
 ) -> Result<(String, Vec<SqlValue>), String> {
@@ -4286,7 +4660,10 @@ fn evidence_filter_rules_sql(
             _ if evidence_field_is_numeric(&field) => FilterValueKind::Number,
             _ => FilterValueKind::Text,
         };
-        if field.resolution == EvidenceResolutionStrategy::GeneDirect {
+        if field.resolution == EvidenceResolutionStrategy::GeneDirect
+            || (field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+                && !is_query_projection(evidence))
+        {
             let gene_evidence =
                 gene_evidence_path(catalog)?.ok_or("phenotype gene evidence is not ready")?;
             let expression = match kind {
@@ -4314,11 +4691,15 @@ fn evidence_filter_rules_sql(
             } else {
                 " AND EXISTS ("
             });
+            sql.push_str("SELECT 1 FROM read_parquet(?) ge WHERE ");
             sql.push_str(
-                "SELECT 1 FROM read_parquet(?) ge
-                 WHERE upper(ge.gene_symbol)=upper(v.gene_symbol)
-                   AND ge.source_id=? AND ge.field_path=? AND (",
+                if field.resolution == EvidenceResolutionStrategy::GeneDirect {
+                    "upper(ge.gene_symbol)=upper(v.gene_symbol)"
+                } else {
+                    "ge.allele_id=v.allele_id"
+                },
             );
+            sql.push_str(" AND ge.source_id=? AND ge.field_path=? AND (");
             sql.push_str(&condition);
             sql.push_str(") LIMIT 1)");
             parameters.push(gene_evidence.to_string_lossy().into_owned().into());
@@ -4399,14 +4780,16 @@ fn evidence_filter_rules_sql(
         } else {
             " AND EXISTS ("
         });
+        let (read_sql, read_parameters) =
+            evidence_read_for_fields(evidence, evidence_files, [field.index]);
         sql.push_str(&format!(
-            "SELECT 1 FROM read_parquet(?) ev
+            "SELECT 1 FROM {read_sql} ev
              WHERE ev.allele_id = v.allele_id AND {} AND (",
             evidence_field_condition(&field, "ev", evidence)
         ));
         sql.push_str(&condition);
         sql.push_str(") LIMIT 1)");
-        parameters.push(evidence.to_string_lossy().into_owned().into());
+        parameters.extend(read_parameters);
         append_evidence_field_parameters(&mut parameters, &field, evidence)?;
         parameters.extend(values);
     }
@@ -4416,6 +4799,7 @@ fn evidence_filter_rules_sql(
 fn displayed_field_search_sql(
     connection: &Connection,
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     request: &PageRequest,
     search: &str,
@@ -4447,6 +4831,11 @@ fn displayed_field_search_sql(
             let (gene_fields, fields): (Vec<_>, Vec<_>) = fields
                 .into_iter()
                 .partition(|field| field.resolution == EvidenceResolutionStrategy::GeneDirect);
+            let (allele_gene_fields, fields): (Vec<_>, Vec<_>) =
+                fields.into_iter().partition(|field| {
+                    field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+                        && !is_query_projection(evidence)
+                });
             let (resolved_fields, raw): (Vec<_>, Vec<_>) = fields
                 .into_iter()
                 .partition(|field| uses_resolution_sidecar(field.resolution));
@@ -4493,7 +4882,46 @@ fn displayed_field_search_sql(
                     )
                     .map_err(|error| format!("cannot search phenotype evidence fields: {error}"))?;
             }
+            if !allele_gene_fields.is_empty() {
+                let gene_evidence =
+                    gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?;
+                let conditions = allele_gene_fields
+                    .iter()
+                    .map(|_| {
+                        "(match_search.source_id=? AND match_search.field_path=? AND \
+                         contains(replace(replace(lower(coalesce(match_search.string_value, \
+                         cast(match_search.integer_value AS VARCHAR), \
+                         cast(match_search.number_value AS VARCHAR), \
+                         cast(match_search.boolean_value AS VARCHAR), match_search.json_value, '')), \
+                         '_', ' '), '-', ' '), lower(?)))"
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let mut search_parameters =
+                    vec![SqlValue::from(gene_evidence.to_string_lossy().into_owned())];
+                for field in allele_gene_fields {
+                    search_parameters.push(field.source_id.into());
+                    search_parameters.push(field.field_path.into());
+                    search_parameters.push(search.to_owned().into());
+                }
+                connection
+                    .execute(
+                        &format!(
+                            "INSERT OR IGNORE INTO displayed_evidence_search
+                             SELECT DISTINCT match_search.allele_id
+                             FROM read_parquet(?) match_search
+                             WHERE match_search.allele_id IS NOT NULL AND ({conditions})"
+                        ),
+                        params_from_iter(search_parameters.iter()),
+                    )
+                    .map_err(|error| format!("cannot search gene match fields: {error}"))?;
+            }
             if !raw.is_empty() {
+                let (read_sql, mut search_parameters) = evidence_read_for_fields(
+                    evidence,
+                    evidence_files,
+                    raw.iter().map(|field| field.index),
+                );
                 let conditions = raw
                     .iter()
                     .map(|field| {
@@ -4507,8 +4935,6 @@ fn displayed_field_search_sql(
                     })
                     .collect::<Vec<_>>()
                     .join(" OR ");
-                let mut search_parameters =
-                    vec![SqlValue::from(evidence.to_string_lossy().into_owned())];
                 for field in &raw {
                     append_evidence_field_parameters(&mut search_parameters, &field, evidence)?;
                     search_parameters.push(search.to_owned().into());
@@ -4518,7 +4944,7 @@ fn displayed_field_search_sql(
                         &format!(
                             "INSERT OR IGNORE INTO displayed_evidence_search
                              SELECT DISTINCT ev_search.allele_id
-                             FROM read_parquet(?) ev_search
+                             FROM {read_sql} ev_search
                              WHERE {conditions}"
                         ),
                         params_from_iter(search_parameters.iter()),
@@ -4662,22 +5088,29 @@ fn page_json_with_evidence_internal(
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
     prepare_requested_evidence_resolution(variants, evidence, catalog, request)?;
-    with_query_evidence(evidence, catalog, request, |query_evidence| {
-        page_json_with_evidence_once(
-            variants,
-            query_evidence,
-            catalog,
-            offset,
-            limit,
-            request,
-            candidate_ids,
-        )
-    })
+    with_query_evidence(
+        evidence,
+        catalog,
+        request,
+        |query_evidence, query_evidence_files| {
+            page_json_with_evidence_once(
+                variants,
+                query_evidence,
+                query_evidence_files,
+                catalog,
+                offset,
+                limit,
+                request,
+                candidate_ids,
+            )
+        },
+    )
 }
 
 fn page_json_with_evidence_once(
     variants: &Path,
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     offset: u64,
     limit: u64,
@@ -4689,6 +5122,7 @@ fn page_json_with_evidence_once(
     let query = PageQuery {
         variants,
         evidence,
+        evidence_files,
         catalog,
         offset,
         limit,
@@ -4706,6 +5140,7 @@ fn page_with_evidence_result(
     query: &PageQuery<'_>,
 ) -> Result<ResultPage, String> {
     let evidence = query.evidence;
+    let evidence_files = query.evidence_files;
     let catalog = query.catalog;
     let request = query.request;
     if request.evidence_columns.is_empty() {
@@ -4734,6 +5169,7 @@ fn page_with_evidence_result(
             .filter(|field| query_projection_field_is_eligible(field))
             .collect::<Vec<_>>();
         if !direct.is_empty() {
+            let (read_sql, mut parameters) = evidence_read(evidence, evidence_files);
             let field_placeholders = std::iter::repeat_n("?", direct.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -4742,12 +5178,11 @@ fn page_with_evidence_result(
                         coalesce(string_value, cast(integer_value AS VARCHAR),
                                  cast(number_value AS VARCHAR),
                                  cast(boolean_value AS VARCHAR), json_value)
-                 FROM read_parquet(?)
+                 FROM {read_sql}
                  WHERE allele_id IN ({allele_placeholders})
                    AND field_index IN ({field_placeholders})
                  ORDER BY allele_id, field_index"
             );
-            let mut parameters = vec![SqlValue::from(evidence.to_string_lossy().into_owned())];
             parameters.extend(allele_ids.iter().cloned().map(Into::into));
             parameters.extend(direct.iter().map(|field| (field.index as i64).into()));
             let mut statement = connection
@@ -4772,6 +5207,7 @@ fn page_with_evidence_result(
             }
         }
     } else {
+        let (read_sql, mut parameters) = evidence_read(evidence, evidence_files);
         let field_conditions = selected
             .iter()
             .map(|field| format!("({})", evidence_field_condition(field, "ev", evidence)))
@@ -4782,12 +5218,11 @@ fn page_with_evidence_result(
                     coalesce(string_value, cast(integer_value AS VARCHAR),
                              cast(number_value AS VARCHAR),
                              cast(boolean_value AS VARCHAR), json_value)
-             FROM read_parquet(?) ev
+             FROM {read_sql} ev
              WHERE allele_id IN ({allele_placeholders}) AND ({field_conditions})
              ORDER BY allele_id, scope, source_id, field_path,
                       consequence_id NULLS FIRST"
         );
-        let mut parameters = vec![evidence.to_string_lossy().into_owned().into()];
         parameters.extend(allele_ids.iter().cloned().map(Into::into));
         for field in &selected {
             append_evidence_field_parameters(&mut parameters, field, evidence)?;
@@ -4873,28 +5308,33 @@ fn page_with_evidence_result(
             let symbol_placeholders = std::iter::repeat_n("?", symbols.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let field_placeholders = std::iter::repeat_n("?", gene_fields.len())
-                .collect::<Vec<_>>()
-                .join(",");
+            let field_conditions =
+                std::iter::repeat_n("(source_id=? AND field_path=?)", gene_fields.len())
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
             let sql = format!(
-                "SELECT upper(gene_symbol), field_path,
+                "SELECT upper(gene_symbol), source_id, field_path,
                         coalesce(string_value, cast(integer_value AS VARCHAR),
                                  cast(number_value AS VARCHAR),
                                  cast(boolean_value AS VARCHAR), json_value)
                  FROM read_parquet(?)
                  WHERE upper(gene_symbol) IN ({symbol_placeholders})
-                   AND source_id='hpo' AND field_path IN ({field_placeholders})"
+                   AND ({field_conditions})"
             );
             let mut parameters = vec![SqlValue::from(gene_evidence.to_string_lossy().into_owned())];
             parameters.extend(symbols.iter().cloned().map(Into::into));
-            parameters.extend(
-                gene_fields
-                    .iter()
-                    .map(|field| SqlValue::from(field.field_path.clone())),
-            );
+            for field in &gene_fields {
+                parameters.push(field.source_id.clone().into());
+                parameters.push(field.field_path.clone().into());
+            }
             let lookup = gene_fields
                 .iter()
-                .map(|field| (field.field_path.as_str(), field.index))
+                .map(|field| {
+                    (
+                        (field.source_id.as_str(), field.field_path.as_str()),
+                        field.index,
+                    )
+                })
                 .collect::<HashMap<_, _>>();
             let allele_symbols = rows
                 .iter()
@@ -4919,14 +5359,16 @@ fn page_with_evidence_result(
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 })
                 .map_err(|error| format!("cannot read phenotype evidence columns: {error}"))?;
             for row in mapped {
-                let (symbol, field_path, value) = row.map_err(|error| error.to_string())?;
+                let (symbol, source_id, field_path, value) =
+                    row.map_err(|error| error.to_string())?;
                 let (Some(index), Some(value), Some(alleles)) = (
-                    lookup.get(field_path.as_str()),
+                    lookup.get(&(source_id.as_str(), field_path.as_str())),
                     value,
                     allele_symbols.get(&symbol),
                 ) else {
@@ -4935,6 +5377,69 @@ fn page_with_evidence_result(
                 for allele_id in alleles {
                     values.insert((allele_id.clone(), *index), vec![value.clone()]);
                 }
+            }
+        }
+    }
+
+    let allele_gene_fields = selected
+        .iter()
+        .filter(|field| {
+            field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+                && !is_query_projection(evidence)
+        })
+        .collect::<Vec<_>>();
+    if !allele_gene_fields.is_empty() {
+        let gene_evidence =
+            gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?;
+        let field_conditions =
+            std::iter::repeat_n("(source_id=? AND field_path=?)", allele_gene_fields.len())
+                .collect::<Vec<_>>()
+                .join(" OR ");
+        let sql = format!(
+            "SELECT allele_id, source_id, field_path,
+                    coalesce(string_value, cast(integer_value AS VARCHAR),
+                             cast(number_value AS VARCHAR), cast(boolean_value AS VARCHAR),
+                             json_value)
+             FROM read_parquet(?)
+             WHERE allele_id IN ({allele_placeholders})
+               AND ({field_conditions})"
+        );
+        let mut parameters = vec![SqlValue::from(gene_evidence.to_string_lossy().into_owned())];
+        parameters.extend(allele_ids.iter().cloned().map(Into::into));
+        for field in &allele_gene_fields {
+            parameters.push(field.source_id.clone().into());
+            parameters.push(field.field_path.clone().into());
+        }
+        let lookup = allele_gene_fields
+            .iter()
+            .map(|field| {
+                (
+                    (field.source_id.as_str(), field.field_path.as_str()),
+                    field.index,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("cannot prepare gene match columns: {error}"))?;
+        let mapped = statement
+            .query_map(params_from_iter(parameters.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(|error| format!("cannot read gene match columns: {error}"))?;
+        for row in mapped {
+            let (allele_id, source_id, field_path, value) =
+                row.map_err(|error| error.to_string())?;
+            if let (Some(index), Some(value)) = (
+                lookup.get(&(source_id.as_str(), field_path.as_str())),
+                value,
+            ) {
+                values.entry((allele_id, *index)).or_default().push(value);
             }
         }
     }
@@ -5096,6 +5601,7 @@ pub fn page_json_with_details(
         PageQuery {
             variants,
             evidence,
+            evidence_files: None,
             catalog,
             offset,
             limit,
@@ -5121,6 +5627,7 @@ pub fn page_json_with_details_for_candidates(
         PageQuery {
             variants,
             evidence,
+            evidence_files: None,
             catalog,
             offset,
             limit,
@@ -5137,9 +5644,21 @@ fn page_json_with_details_query(query_key: &str, query: PageQuery<'_>) -> Result
         query.catalog,
         query.request,
     )?;
-    with_query_evidence(query.evidence, query.catalog, query.request, |evidence| {
-        page_json_with_details_query_once(query_key, PageQuery { evidence, ..query })
-    })
+    with_query_evidence(
+        query.evidence,
+        query.catalog,
+        query.request,
+        |evidence, evidence_files| {
+            page_json_with_details_query_once(
+                query_key,
+                PageQuery {
+                    evidence,
+                    evidence_files,
+                    ..query
+                },
+            )
+        },
+    )
 }
 
 fn page_json_with_details_query_once(
@@ -5216,6 +5735,8 @@ fn selected_evidence_columns(
             let resolution_policy = field["resolutionPolicy"].as_str();
             let resolution = if resolution_policy == Some("derivedSpliceAiMaximum") {
                 EvidenceResolutionStrategy::DerivedMaximum
+            } else if resolution_policy == Some("alleleGeneDirect") {
+                EvidenceResolutionStrategy::AlleleGeneDirect
             } else if resolution_policy == Some("geneDirect")
                 || field["storageRelation"].as_str() == Some("geneEvidence")
             {
@@ -5384,14 +5905,26 @@ fn query_projection_identities(
         .collect()
 }
 
-fn query_projection_fingerprint(evidence: &Path, catalog: &Path) -> Result<String, String> {
+fn query_projection_fingerprint(
+    evidence: &Path,
+    catalog: &Path,
+    field: &SelectedEvidenceColumn,
+) -> Result<String, String> {
     let mut digest = Sha256::new();
     digest.update(QUERY_PROJECTION_CONTRACT.as_bytes());
-    let catalog_bytes = fs::read(catalog)
-        .map_err(|error| format!("cannot read query projection catalog: {error}"))?;
-    digest.update((catalog_bytes.len() as u64).to_le_bytes());
-    digest.update(&catalog_bytes);
-    for path in visible_evidence_files(evidence)? {
+    for (index, scope, source_id, field_path) in query_projection_identities(field) {
+        digest.update((index as u64).to_le_bytes());
+        for value in [scope, source_id, field_path] {
+            digest.update((value.len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    let source = if field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect {
+        gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?
+    } else {
+        evidence.to_path_buf()
+    };
+    for path in visible_evidence_files(&source)? {
         let metadata = fs::metadata(&path)
             .map_err(|error| format!("cannot inspect result evidence: {error}"))?;
         let modified = metadata
@@ -5414,13 +5947,40 @@ fn query_projection_fingerprint(evidence: &Path, catalog: &Path) -> Result<Strin
 
 fn query_projection_field_path(root: &Path, fingerprint: &str, field_index: usize) -> PathBuf {
     root.join(format!(
-        "{QUERY_PROJECTION_PREFIX}{fingerprint}-{field_index}.parquet"
+        "{QUERY_PROJECTION_PREFIX}{field_index}-{fingerprint}.parquet"
     ))
 }
 
-fn query_projection_glob(root: &Path, fingerprint: &str) -> PathBuf {
-    // ponytail: scan all built field files; pass explicit paths only if metadata becomes measurable.
-    root.join(format!("{QUERY_PROJECTION_PREFIX}{fingerprint}-*.parquet"))
+fn remove_stale_query_projection_field(root: &Path, field_index: usize, keep: &Path) {
+    let prefix = format!("{QUERY_PROJECTION_PREFIX}{field_index}-");
+    if let Ok(entries) = fs::read_dir(root) {
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let stale = path != keep
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".parquet"));
+            if stale {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn remove_legacy_query_projections(root: &Path) {
+    if let Ok(entries) = fs::read_dir(root) {
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let legacy = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(LEGACY_QUERY_PROJECTION_PREFIX) && name.ends_with(".parquet")
+                });
+            if legacy {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 fn query_projection_is_valid(path: &Path) -> bool {
@@ -5445,6 +6005,7 @@ fn query_projection_is_valid(path: &Path) -> bool {
 
 fn build_query_projection(
     evidence: &Path,
+    catalog: &Path,
     field: &SelectedEvidenceColumn,
     destination: &Path,
 ) -> Result<(), String> {
@@ -5474,7 +6035,12 @@ fn build_query_projection(
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    let evidence_sql = evidence.to_string_lossy().replace('\'', "''");
+    let source = if field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect {
+        gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?
+    } else {
+        evidence.to_path_buf()
+    };
+    let evidence_sql = source.to_string_lossy().replace('\'', "''");
     let partial_sql = partial.to_string_lossy().replace('\'', "''");
     connection
         .execute_batch(&format!(
@@ -5504,22 +6070,25 @@ fn prepare_query_projection(
     evidence: &Path,
     catalog: &Path,
     fields: &[SelectedEvidenceColumn],
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<Vec<PathBuf>>, String> {
     if fields.is_empty() {
         return Ok(None);
     }
-    let fingerprint = query_projection_fingerprint(evidence, catalog)?;
     let root = catalog
         .parent()
         .ok_or("field catalog has no result folder")?;
-    if fields.iter().all(|field| {
-        query_projection_is_valid(&query_projection_field_path(
-            root,
-            &fingerprint,
-            field.index,
-        ))
-    }) {
-        return Ok(Some(query_projection_glob(root, &fingerprint)));
+    let projection_files = || {
+        fields
+            .iter()
+            .map(|field| {
+                let fingerprint = query_projection_fingerprint(evidence, catalog, field)?;
+                Ok(query_projection_field_path(root, &fingerprint, field.index))
+            })
+            .collect::<Result<Vec<_>, String>>()
+    };
+    let existing = projection_files()?;
+    if existing.iter().all(|path| query_projection_is_valid(path)) {
+        return Ok(Some(existing));
     }
     // ponytail: one process-wide build is enough; use per-result locks only if builds contend.
     let _guard = QUERY_PROJECTION_BUILD
@@ -5527,66 +6096,40 @@ fn prepare_query_projection(
         .lock()
         .map_err(|_| "query projection lock failed")?;
     for field in fields {
+        let fingerprint = query_projection_fingerprint(evidence, catalog, field)?;
         let destination = query_projection_field_path(root, &fingerprint, field.index);
         if !query_projection_is_valid(&destination) {
-            build_query_projection(evidence, field, &destination)?;
+            build_query_projection(evidence, catalog, field, &destination)?;
         }
+        remove_stale_query_projection_field(root, field.index, &destination);
     }
-    let current_prefix = format!("{QUERY_PROJECTION_PREFIX}{fingerprint}-");
-    if let Ok(entries) = fs::read_dir(root) {
-        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
-            let is_current = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&current_prefix));
-            if !is_current && is_query_projection(&path) {
-                let _ = fs::remove_file(path);
-            }
-        }
-    }
-    Ok(Some(query_projection_glob(root, &fingerprint)))
+    remove_legacy_query_projections(root);
+    Ok(Some(projection_files()?))
 }
 
 fn available_query_projection(
     evidence: &Path,
     catalog: &Path,
     fields: &[SelectedEvidenceColumn],
-) -> Option<PathBuf> {
-    let fingerprint = query_projection_fingerprint(evidence, catalog).ok()?;
+) -> Option<Vec<PathBuf>> {
     let root = catalog.parent()?;
-    fields
+    let paths = fields
         .iter()
-        .all(|field| {
-            query_projection_is_valid(&query_projection_field_path(
-                root,
-                &fingerprint,
-                field.index,
-            ))
+        .map(|field| {
+            query_projection_fingerprint(evidence, catalog, field)
+                .ok()
+                .map(|fingerprint| query_projection_field_path(root, &fingerprint, field.index))
         })
-        .then(|| query_projection_glob(root, &fingerprint))
+        .collect::<Option<Vec<_>>>()?;
+    paths
+        .iter()
+        .all(|path| query_projection_is_valid(path))
+        .then_some(paths)
 }
 
-fn remove_query_projection(path: &Path) {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    let Some(prefix) = name.strip_suffix("*.parquet") else {
+fn remove_query_projection(paths: &[PathBuf]) {
+    for path in paths {
         let _ = fs::remove_file(path);
-        return;
-    };
-    let Some(root) = path.parent() else {
-        return;
-    };
-    if let Ok(entries) = fs::read_dir(root) {
-        for candidate in entries.filter_map(Result::ok).map(|entry| entry.path()) {
-            let matches = candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(prefix) && name.ends_with(".parquet"));
-            if matches {
-                let _ = fs::remove_file(candidate);
-            }
-        }
     }
 }
 
@@ -5650,10 +6193,10 @@ fn with_query_evidence<T>(
     evidence: Option<&Path>,
     catalog: Option<&Path>,
     request: &PageRequest,
-    mut operation: impl FnMut(Option<&Path>) -> Result<T, String>,
+    mut operation: impl FnMut(Option<&Path>, Option<&[PathBuf]>) -> Result<T, String>,
 ) -> Result<T, String> {
     let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
-        return operation(evidence);
+        return operation(evidence, None);
     };
     let projection = request_query_projection_fields(catalog, request)
         .ok()
@@ -5671,19 +6214,22 @@ fn with_query_evidence<T>(
             })
         });
     let Some(projection) = projection else {
-        return operation(Some(evidence));
+        return operation(Some(evidence), None);
     };
     with_projection_fallback(evidence, &projection, operation)
 }
 
 fn with_projection_fallback<T>(
     evidence: &Path,
-    projection: &Path,
-    mut operation: impl FnMut(Option<&Path>) -> Result<T, String>,
+    projection: &[PathBuf],
+    mut operation: impl FnMut(Option<&Path>, Option<&[PathBuf]>) -> Result<T, String>,
 ) -> Result<T, String> {
-    match operation(Some(projection)) {
+    let marker = projection
+        .first()
+        .ok_or("query projection has no field files")?;
+    match operation(Some(marker), Some(projection)) {
         Ok(value) => Ok(value),
-        Err(_) => match operation(Some(evidence)) {
+        Err(_) => match operation(Some(evidence), None) {
             Ok(value) => {
                 remove_query_projection(projection);
                 Ok(value)
@@ -5733,10 +6279,11 @@ pub fn export_filtered_rows_with_details(
     columns: &[String],
 ) -> Result<u64, String> {
     prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
-    with_query_evidence(evidence, catalog, request, |query_evidence| {
+    with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
         export_filtered_rows_with_details_once(
             parquet,
             query_evidence,
+            query_files,
             catalog,
             destination,
             request,
@@ -5748,6 +6295,7 @@ pub fn export_filtered_rows_with_details(
 fn export_filtered_rows_with_details_once(
     parquet: &Path,
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     destination: &Path,
     request: &PageRequest,
@@ -5756,13 +6304,19 @@ fn export_filtered_rows_with_details_once(
     let filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
-        evidence_filter_rules_sql(evidence, catalog, request)?;
+        evidence_filter_rules_sql(evidence, evidence_files, catalog, request)?;
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
     let requested = export_columns(columns)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
-    let (search_sql, mut search_params) =
-        displayed_field_search_sql(&connection, evidence, catalog, request, &filters.search)?;
+    let (search_sql, mut search_params) = displayed_field_search_sql(
+        &connection,
+        evidence,
+        evidence_files,
+        catalog,
+        request,
+        &filters.search,
+    )?;
     let where_sql = format!(
         "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
     );
@@ -5838,34 +6392,167 @@ fn export_filtered_rows_with_details_once(
     })
 }
 
-pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, String)>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReportGeneOccurrence {
+    pub allele_id: String,
+    pub gene_symbol: String,
+    pub gene_id: String,
+}
+
+pub(crate) fn report_gene_occurrences(
+    parquet: &Path,
+    selected_symbols: &HashSet<String>,
+) -> Result<Vec<ReportGeneOccurrence>, String> {
+    if selected_symbols.is_empty() {
+        return Ok(Vec::new());
+    }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
-    register_report_variants(&connection, parquet)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT upper(trim(gene_symbol)) AS symbol,
-                    min(nullif(trim(gene_id), '')) AS gene_id
-             FROM annocat_variants(?)
-             WHERE gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
-             GROUP BY upper(trim(gene_symbol))
-             HAVING count(DISTINCT nullif(trim(gene_id), '')) = 1
-             ORDER BY symbol",
+    connection
+        .execute_batch("CREATE TEMP TABLE selected_genes(symbol VARCHAR PRIMARY KEY)")
+        .map_err(|error| format!("cannot prepare selected result genes: {error}"))?;
+    {
+        let mut appender = connection
+            .appender("selected_genes")
+            .map_err(|error| format!("cannot prepare selected result genes: {error}"))?;
+        for symbol in selected_symbols {
+            appender
+                .append_row([symbol.as_str()])
+                .map_err(|error| format!("cannot select result gene: {error}"))?;
+        }
+        appender
+            .flush()
+            .map_err(|error| format!("cannot select result genes: {error}"))?;
+    }
+    let consequences = parquet.with_file_name("consequences.parquet");
+    let (sql, path) = if consequences.is_file() {
+        (
+            "SELECT allele_id, upper(trim(gene_symbol)) AS symbol,
+                    min(coalesce(nullif(trim(gene_id), ''), '')) AS gene_id
+             FROM read_parquet(?) c
+             JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             WHERE allele_id IS NOT NULL AND trim(allele_id) <> ''
+             GROUP BY allele_id, upper(trim(gene_symbol))
+             ORDER BY allele_id, symbol",
+            consequences,
         )
+    } else {
+        register_report_variants(&connection, parquet)?;
+        (
+            "SELECT allele_id, upper(trim(gene_symbol)) AS symbol,
+                    min(coalesce(nullif(trim(gene_id), ''), '')) AS gene_id
+             FROM annocat_variants(?) c
+             JOIN selected_genes s ON s.symbol=upper(trim(c.gene_symbol))
+             WHERE allele_id IS NOT NULL AND trim(allele_id) <> ''
+             GROUP BY allele_id, upper(trim(gene_symbol))
+             ORDER BY allele_id, symbol",
+            parquet.to_path_buf(),
+        )
+    };
+    let mut statement = connection
+        .prepare(sql)
         .map_err(|error| format!("cannot prepare result gene lookup: {error}"))?;
     let mut rows = statement
-        .query(params![parquet.to_string_lossy().as_ref()])
+        .query(params![path.to_string_lossy().as_ref()])
         .map_err(|error| format!("cannot read result genes: {error}"))?;
     let mut genes = Vec::new();
     while let Some(row) = rows
         .next()
         .map_err(|error| format!("cannot read result genes: {error}"))?
     {
-        genes.push((
-            row.get(0).map_err(|error| error.to_string())?,
-            row.get(1).map_err(|error| error.to_string())?,
-        ));
+        genes.push(ReportGeneOccurrence {
+            allele_id: row.get(0).map_err(|error| error.to_string())?,
+            gene_symbol: row.get(1).map_err(|error| error.to_string())?,
+            gene_id: row.get(2).map_err(|error| error.to_string())?,
+        });
     }
     Ok(genes)
+}
+
+pub(crate) fn report_gene_identities_from_occurrences(
+    occurrences: &[ReportGeneOccurrence],
+) -> Vec<(String, String)> {
+    let mut identities = BTreeMap::<String, HashSet<String>>::new();
+    for occurrence in occurrences {
+        identities
+            .entry(occurrence.gene_symbol.clone())
+            .or_default()
+            .insert(occurrence.gene_id.clone());
+    }
+    identities
+        .into_iter()
+        .filter_map(|(symbol, ids)| {
+            let nonempty = ids
+                .into_iter()
+                .filter(|id| !id.is_empty())
+                .collect::<Vec<_>>();
+            (nonempty.len() == 1).then(|| (symbol, nonempty.into_iter().next().unwrap()))
+        })
+        .collect()
+}
+
+pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, String)>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<(String, String)>>>>> = OnceLock::new();
+    let path = parquet
+        .canonicalize()
+        .unwrap_or_else(|_| parquet.to_path_buf());
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "result gene cache is unavailable")?;
+    if let Some(genes) = cache.get(&path).cloned() {
+        return Ok((*genes).clone());
+    }
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    let consequences = parquet.with_file_name("consequences.parquet");
+    let (sql, source) = if consequences.is_file() {
+        (
+            "SELECT upper(trim(gene_symbol)) AS symbol,
+                    coalesce(nullif(trim(gene_id), ''), '') AS gene_id
+             FROM read_parquet(?)
+             WHERE gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
+             GROUP BY symbol, gene_id
+             ORDER BY symbol, gene_id",
+            consequences,
+        )
+    } else {
+        register_report_variants(&connection, parquet)?;
+        (
+            "SELECT upper(trim(gene_symbol)) AS symbol,
+                    coalesce(nullif(trim(gene_id), ''), '') AS gene_id
+             FROM annocat_variants(?)
+             WHERE gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
+             GROUP BY symbol, gene_id
+             ORDER BY symbol, gene_id",
+            parquet.to_path_buf(),
+        )
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("cannot prepare result gene dictionary: {error}"))?;
+    let mut rows = statement
+        .query(params![source.to_string_lossy().as_ref()])
+        .map_err(|error| format!("cannot read result gene dictionary: {error}"))?;
+    let mut identities = BTreeMap::<String, HashSet<String>>::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("cannot read result gene dictionary: {error}"))?
+    {
+        identities
+            .entry(row.get(0).map_err(|error| error.to_string())?)
+            .or_default()
+            .insert(row.get(1).map_err(|error| error.to_string())?);
+    }
+    let identities: Vec<(String, String)> = identities
+        .into_iter()
+        .filter_map(|(symbol, ids)| {
+            let mut nonempty = ids.into_iter().filter(|id| !id.is_empty());
+            let id = nonempty.next()?;
+            nonempty.next().is_none().then_some((symbol, id))
+        })
+        .collect();
+    let genes = Arc::new(identities);
+    cache.insert(path, genes.clone());
+    Ok((*genes).clone())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -5885,10 +6572,11 @@ pub fn export_filtered_genes_with_details(
     request: &PageRequest,
 ) -> Result<u64, String> {
     prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
-    with_query_evidence(evidence, catalog, request, |query_evidence| {
+    with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
         export_filtered_genes_with_details_once(
             parquet,
             query_evidence,
+            query_files,
             catalog,
             destination,
             request,
@@ -5899,6 +6587,7 @@ pub fn export_filtered_genes_with_details(
 fn export_filtered_genes_with_details_once(
     parquet: &Path,
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     destination: &Path,
     request: &PageRequest,
@@ -5906,12 +6595,18 @@ fn export_filtered_genes_with_details_once(
     let filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
-        evidence_filter_rules_sql(evidence, catalog, request)?;
+        evidence_filter_rules_sql(evidence, evidence_files, catalog, request)?;
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
-    let (search_sql, mut search_params) =
-        displayed_field_search_sql(&connection, evidence, catalog, request, &filters.search)?;
+    let (search_sql, mut search_params) = displayed_field_search_sql(
+        &connection,
+        evidence,
+        evidence_files,
+        catalog,
+        request,
+        &filters.search,
+    )?;
     let where_sql = format!(
         "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
     );
@@ -6150,6 +6845,7 @@ fn bounded_page_text<'a>(value: &'a str, name: &str, maximum: usize) -> Result<&
 
 fn evidence_sort_spec(
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     index: usize,
 ) -> Result<EvidenceSortSpec, String> {
@@ -6158,7 +6854,10 @@ fn evidence_sort_spec(
     let mut selected = selected_evidence_columns(catalog, &[index])?;
     let field = selected.pop().ok_or("unknown evidence sort column")?;
     let resolved = uses_resolution_sidecar(field.resolution);
-    let evidence_path = if field.resolution == EvidenceResolutionStrategy::GeneDirect {
+    let evidence_path = if matches!(
+        field.resolution,
+        EvidenceResolutionStrategy::GeneDirect | EvidenceResolutionStrategy::AlleleGeneDirect
+    ) {
         gene_evidence_path(catalog)?.ok_or("phenotype gene evidence is not ready")?
     } else if resolved {
         crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
@@ -6183,8 +6882,19 @@ fn evidence_sort_spec(
             "coalesce(ev_sort.string_value, CAST(ev_sort.integer_value AS VARCHAR), CAST(ev_sort.number_value AS VARCHAR), CAST(ev_sort.boolean_value AS VARCHAR), ev_sort.json_value)"
         }
     };
+    let direct_files = (!resolved
+        && !matches!(
+            field.resolution,
+            EvidenceResolutionStrategy::GeneDirect | EvidenceResolutionStrategy::AlleleGeneDirect
+        ))
+    .then_some(evidence_files)
+    .flatten();
+    let (evidence_read, evidence_parameters) =
+        evidence_read_for_fields(&evidence_path, direct_files, [field.index]);
     Ok(EvidenceSortSpec {
         evidence: evidence_path.to_string_lossy().into_owned(),
+        evidence_read,
+        evidence_parameters,
         field,
         value_expression,
     })
@@ -6200,6 +6910,7 @@ fn page_sort_direction(direction: &str) -> Result<String, String> {
 
 fn page_sort_specs(
     evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
     catalog: Option<&Path>,
     request: &PageRequest,
 ) -> Result<Vec<PageSortSpec>, String> {
@@ -6230,7 +6941,7 @@ fn page_sort_specs(
                 let index = index
                     .parse::<usize>()
                     .map_err(|_| "unknown evidence sort column")?;
-                let evidence_sort = evidence_sort_spec(evidence, catalog, index)?;
+                let evidence_sort = evidence_sort_spec(evidence, evidence_files, catalog, index)?;
                 let key = format!("evidence:{index}");
                 PageSortSpec {
                     key,
@@ -8397,6 +9108,120 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn projected_field_reads_do_not_open_unrelated_sidecars() {
+        let files = vec![
+            PathBuf::from(".annocat-query-v2-3-a.parquet"),
+            PathBuf::from(".annocat-query-v2-8-b.parquet"),
+        ];
+        let (sql, parameters) = evidence_read_for_fields(&files[0], Some(&files), [8]);
+        assert!(sql.contains(".annocat-query-v2-8-b.parquet"));
+        assert!(!sql.contains(".annocat-query-v2-3-a.parquet"));
+        assert!(parameters.is_empty());
+    }
+
+    #[test]
+    fn matched_row_cache_keys_ignore_sort_but_not_search() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-match-cache-key-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let variants = root.join("variants.parquet");
+        fs::write(&variants, b"test").unwrap();
+        let mut request = PageRequest {
+            search: "stop".into(),
+            sort: "position".into(),
+            direction: "asc".into(),
+            exact_total: true,
+            query_session: "count".into(),
+            request_generation: 1,
+            ..PageRequest::default()
+        };
+        let filters = validated_core_page_filters(&request).unwrap();
+        let first = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        request.sort = "gene".into();
+        request.direction = "desc".into();
+        request.exact_total = false;
+        request.known_total = Some(1_230);
+        request.query_session = "page".into();
+        request.request_generation = 2;
+        let filters = validated_core_page_filters(&request).unwrap();
+        let second = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        request.search = "frameshift".into();
+        let filters = validated_core_page_filters(&request).unwrap();
+        let changed = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_ne!(second, changed);
+
+        let evidence_dir = root.join("query-evidence");
+        fs::create_dir_all(&evidence_dir).unwrap();
+        fs::write(evidence_dir.join("core.parquet"), b"test").unwrap();
+        let evidence_glob = evidence_dir.join("*.parquet");
+        request.search = "stop".into();
+        let filters = validated_core_page_filters(&request).unwrap();
+        assert!(
+            matched_row_cache_key(
+                &PageQuery {
+                    variants: &variants,
+                    evidence: Some(&evidence_glob),
+                    evidence_files: None,
+                    catalog: None,
+                    offset: 0,
+                    limit: 200,
+                    request: &request,
+                    candidate_ids: None,
+                },
+                &filters,
+            )
+            .unwrap()
+            .is_some()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn gene_operations_fall_back_to_stable_identifiers() {
         assert_eq!(
             core_filter_column("gene").unwrap().0,
@@ -8406,6 +9231,42 @@ mod tests {
             page_sort_expression("gene").unwrap().1,
             "coalesce(gene_symbol, gene_id, transcript_id)"
         );
+    }
+
+    #[test]
+    fn gene_occurrences_materialize_only_selected_symbols() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-selected-gene-occurrences-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let consequences = root.join("consequences.parquet");
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE consequences(allele_id VARCHAR, gene_symbol VARCHAR, gene_id VARCHAR);
+                 INSERT INTO consequences VALUES
+                   ('allele-1', 'GENE1', 'ENSG1'),
+                   ('allele-1', 'GENE2', 'ENSG2'),
+                   ('allele-2', 'GENE2', 'ENSG2');
+                 COPY consequences TO '{}' (FORMAT PARQUET);",
+                consequences.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+
+        let selected = HashSet::from(["GENE1".to_owned()]);
+        assert_eq!(
+            report_gene_occurrences(&root.join("variants.parquet"), &selected).unwrap(),
+            [ReportGeneOccurrence {
+                allele_id: "allele-1".into(),
+                gene_symbol: "GENE1".into(),
+                gene_id: "ENSG1".into(),
+            }]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -12067,6 +12928,21 @@ mod tests {
     }
 
     #[test]
+    fn exact_sidecar_reads_escape_paths_without_binding_lists() {
+        let path = PathBuf::from("C:\\results\\O'Brien\\field.parquet");
+        let (read, parameters) = evidence_read(&path, Some(std::slice::from_ref(&path)));
+        assert_eq!(
+            read,
+            "read_parquet(['C:\\results\\O''Brien\\field.parquet'])"
+        );
+        assert!(parameters.is_empty());
+
+        let (read, parameters) = evidence_read(&path, None);
+        assert_eq!(read, "read_parquet(?)");
+        assert_eq!(parameters.len(), 1);
+    }
+
+    #[test]
     fn query_projection_preserves_direct_search_filter_and_sort() {
         let root = std::env::temp_dir().join(format!(
             "annocat-query-projection-{}-{}",
@@ -12180,17 +13056,21 @@ mod tests {
         )
         .unwrap();
         assert!(available_query_projection(&evidence, &catalog, &projection_fields).is_none());
-        page_json_with_evidence(
+        let projection = prepare_query_projection(&evidence, &catalog, &projection_fields)
+            .unwrap()
+            .unwrap();
+        page_json_with_evidence_once(
             &variants,
-            Some(&evidence),
+            Some(&projection[0]),
+            Some(&projection),
             Some(&catalog),
             0,
             10,
             &search_request,
+            None,
         )
         .unwrap();
-        let projection =
-            available_query_projection(&evidence, &catalog, &projection_fields).unwrap();
+        assert!(available_query_projection(&evidence, &catalog, &projection_fields).is_some());
         let projection_files = || {
             fs::read_dir(&root)
                 .unwrap()
@@ -12201,11 +13081,42 @@ mod tests {
         };
         let first_projection_files = projection_files();
         assert_eq!(first_projection_files.len(), 1);
+        let mut expanded_catalog: Value =
+            serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        expanded_catalog["fields"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "scope": "gene",
+                "sourceId": "gene-profile",
+                "fieldPath": "geneMatch",
+                "valueType": "boolean",
+                "resolutionPolicy": "alleleGeneDirect"
+            }));
+        fs::write(&catalog, serde_json::to_vec(&expanded_catalog).unwrap()).unwrap();
+        let expanded_projection_fields = request_query_projection_fields(&catalog, &search_request)
+            .unwrap()
+            .unwrap();
+        page_json_with_evidence(
+            &variants,
+            Some(&evidence),
+            Some(&catalog),
+            0,
+            10,
+            &search_request,
+        )
+        .unwrap();
+        assert!(
+            available_query_projection(&evidence, &catalog, &expanded_projection_fields).is_some()
+        );
+        assert_eq!(projection_files(), first_projection_files);
         let connection = Connection::open_in_memory().unwrap();
+        let (projection_read, projection_parameters) =
+            evidence_read(&projection[0], Some(&projection));
         let json_rows: i64 = connection
             .query_row(
-                "SELECT count(*) FROM read_parquet(?) WHERE field_index=1",
-                params![projection.to_string_lossy().as_ref()],
+                &format!("SELECT count(*) FROM {projection_read} WHERE field_index=1"),
+                params_from_iter(projection_parameters.iter()),
                 |row| row.get(0),
             )
             .unwrap();
@@ -12233,10 +13144,12 @@ mod tests {
         let projection =
             available_query_projection(&evidence, &catalog, &mixed_projection_fields).unwrap();
         assert_eq!(projection_files().len(), 2);
+        let (projection_read, projection_parameters) =
+            evidence_read(&projection[0], Some(&projection));
         let json_rows: i64 = connection
             .query_row(
-                "SELECT count(*) FROM read_parquet(?) WHERE field_index=1",
-                params![projection.to_string_lossy().as_ref()],
+                &format!("SELECT count(*) FROM {projection_read} WHERE field_index=1"),
+                params_from_iter(projection_parameters.iter()),
                 |row| row.get(0),
             )
             .unwrap();
@@ -12258,6 +13171,12 @@ mod tests {
         .unwrap();
         assert_eq!(projection_files().len(), 3);
         assert!(first_projection_files[0].is_file());
+        assert_eq!(
+            available_query_projection(&evidence, &catalog, &projection_fields)
+                .unwrap()
+                .len(),
+            1
+        );
 
         for request in [
             mixed_search_request,
@@ -12285,9 +13204,15 @@ mod tests {
                 ..PageRequest::default()
             },
         ] {
+            let fields = request_query_projection_fields(&catalog, &request)
+                .unwrap()
+                .unwrap();
+            let request_projection =
+                available_query_projection(&evidence, &catalog, &fields).unwrap();
             let canonical = page_json_with_evidence_once(
                 &variants,
                 Some(&evidence),
+                None,
                 Some(&catalog),
                 0,
                 10,
@@ -12297,7 +13222,8 @@ mod tests {
             .unwrap();
             let projected = page_json_with_evidence_once(
                 &variants,
-                Some(&projection),
+                Some(&request_projection[0]),
+                Some(&request_projection),
                 Some(&catalog),
                 0,
                 10,
@@ -12316,9 +13242,15 @@ mod tests {
         let canonical_rows = root.join("canonical-rows.csv");
         let projected_rows = root.join("projected-rows.csv");
         let columns = vec!["position".into(), "gene".into()];
+        let export_fields = request_query_projection_fields(&catalog, &export_request)
+            .unwrap()
+            .unwrap();
+        let export_projection =
+            available_query_projection(&evidence, &catalog, &export_fields).unwrap();
         let canonical_count = export_filtered_rows_with_details_once(
             &variants,
             Some(&evidence),
+            None,
             Some(&catalog),
             &canonical_rows,
             &export_request,
@@ -12327,7 +13259,8 @@ mod tests {
         .unwrap();
         let projected_count = export_filtered_rows_with_details_once(
             &variants,
-            Some(&projection),
+            Some(&export_projection[0]),
+            Some(&export_projection),
             Some(&catalog),
             &projected_rows,
             &export_request,
@@ -12345,6 +13278,7 @@ mod tests {
         let canonical_count = export_filtered_genes_with_details_once(
             &variants,
             Some(&evidence),
+            None,
             Some(&catalog),
             &canonical_genes,
             &export_request,
@@ -12352,7 +13286,8 @@ mod tests {
         .unwrap();
         let projected_count = export_filtered_genes_with_details_once(
             &variants,
-            Some(&projection),
+            Some(&export_projection[0]),
+            Some(&export_projection),
             Some(&catalog),
             &projected_genes,
             &export_request,
@@ -12363,6 +13298,164 @@ mod tests {
             fs::read(canonical_genes).unwrap(),
             fs::read(projected_genes).unwrap()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_projection_preserves_allele_gene_search_filter_sort_and_values() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-query-gene-projection-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|UPLOADED_ALLELE|CANONICAL\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n1\t82001\t.\tA\tG\t50\tPASS\tCSQ=G|missense_variant|MODERATE|GENE1|ENSG1|ENST1|A/G|YES\n1\t82002\t.\tC\tT\t50\tPASS\tCSQ=T|missense_variant|MODERATE|GENE2|ENSG2|ENST2|C/T|YES\n",
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+
+        let evidence = root.join("evidence.parquet");
+        let gene_evidence = root.join("query-gene-evidence.parquet");
+        let matched_allele = allele_id("1", 82002, "C", "T");
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE evidence(allele_id VARCHAR, consequence_id VARCHAR, scope VARCHAR,
+                    source_id VARCHAR, field_path VARCHAR, value_type VARCHAR,
+                    string_value VARCHAR, integer_value BIGINT, number_value DOUBLE,
+                    boolean_value BOOLEAN, json_value VARCHAR);
+                 COPY evidence TO '{}' (FORMAT PARQUET);
+                 CREATE TABLE gene_evidence(allele_id VARCHAR, gene_id VARCHAR,
+                    gene_symbol VARCHAR, scope VARCHAR, source_id VARCHAR, field_path VARCHAR,
+                    value_type VARCHAR, string_value VARCHAR, integer_value BIGINT,
+                    number_value DOUBLE, boolean_value BOOLEAN, json_value VARCHAR);
+                 INSERT INTO gene_evidence VALUES
+                    ('{matched_allele}', '', 'GENE2', 'gene', 'gene-profile', 'geneMatches', 'text', 'Migraine', NULL, NULL, NULL, NULL),
+                    ('{matched_allele}', '', 'GENE2', 'gene', 'gene-profile', 'geneMatch', 'boolean', NULL, NULL, NULL, true, NULL),
+                    ('{matched_allele}', '', 'GENE2', 'gene', 'gene-profile', 'matchedSelectedItems', 'text', 'Migraine', NULL, NULL, NULL, NULL);
+                 COPY gene_evidence TO '{}' (FORMAT PARQUET);",
+                evidence.to_string_lossy().replace('\'', "''"),
+                gene_evidence.to_string_lossy().replace('\'', "''"),
+            ))
+            .unwrap();
+
+        let catalog = root.join("query-field-catalog.json");
+        fs::write(
+            &catalog,
+            serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "geneEvidenceFile": "query-gene-evidence.parquet",
+                "fields": [
+                    {
+                        "scope": "gene",
+                        "sourceId": "gene-profile",
+                        "fieldPath": "geneMatches",
+                        "valueType": "text",
+                        "storageRelation": "geneEvidence",
+                        "resolutionPolicy": "alleleGeneDirect"
+                    },
+                    {
+                        "scope": "gene",
+                        "sourceId": "gene-profile",
+                        "fieldPath": "geneMatch",
+                        "valueType": "boolean",
+                        "storageRelation": "geneEvidence",
+                        "resolutionPolicy": "alleleGeneDirect"
+                    },
+                    {
+                        "scope": "gene",
+                        "sourceId": "gene-profile",
+                        "fieldPath": "matchedSelectedItems",
+                        "valueType": "text",
+                        "storageRelation": "geneEvidence",
+                        "resolutionPolicy": "alleleGeneDirect"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let request = PageRequest {
+            search: "migraine".into(),
+            evidence_columns: vec![0, 1, 2],
+            evidence_filters: vec![EvidenceFilterRequest {
+                index: 1,
+                operator: "equals".into(),
+                value: "true".into(),
+                value2: String::new(),
+            }],
+            sort_evidence: Some(0),
+            direction: "desc".into(),
+            exact_total: true,
+            ..PageRequest::default()
+        };
+        let fields = request_query_projection_fields(&catalog, &request)
+            .unwrap()
+            .unwrap();
+        let projection = prepare_query_projection(&evidence, &catalog, &fields)
+            .unwrap()
+            .unwrap();
+        let generated: Value = serde_json::from_str(
+            &page_json_with_evidence_once(
+                &variants,
+                Some(&projection[0]),
+                Some(&projection),
+                Some(&catalog),
+                0,
+                10,
+                &request,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(generated["total"], 1);
+        assert_eq!(generated["rows"][0]["evidence"]["0"], "Migraine");
+        assert_eq!(generated["rows"][0]["evidence"]["1"], "true");
+
+        assert!(available_query_projection(&evidence, &catalog, &fields).is_some());
+        let canonical = page_json_with_evidence_once(
+            &variants,
+            Some(&evidence),
+            None,
+            Some(&catalog),
+            0,
+            10,
+            &request,
+            None,
+        )
+        .unwrap();
+        let projected = page_json_with_evidence_once(
+            &variants,
+            Some(&projection[0]),
+            Some(&projection),
+            Some(&catalog),
+            0,
+            10,
+            &request,
+            None,
+        )
+        .unwrap();
+        assert_eq!(canonical, projected);
+
+        let (projection_read, projection_parameters) =
+            evidence_read(&projection[0], Some(&projection));
+        let projected_fields: i64 = connection
+            .query_row(
+                &format!("SELECT count(DISTINCT field_index) FROM {projection_read}"),
+                params_from_iter(projection_parameters.iter()),
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projected_fields, 3);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -12378,16 +13471,18 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let evidence = root.join("evidence.parquet");
-        let first_projection = root.join(".annocat-query-v1-test-0.parquet");
-        let second_projection = root.join(".annocat-query-v1-test-1.parquet");
-        let projection = root.join(".annocat-query-v1-test-*.parquet");
+        let first_projection = root.join(".annocat-query-v2-0-test.parquet");
+        let second_projection = root.join(".annocat-query-v2-1-test.parquet");
+        let projection = vec![first_projection.clone(), second_projection.clone()];
         fs::write(&evidence, b"canonical").unwrap();
         fs::write(&first_projection, b"broken").unwrap();
         fs::write(&second_projection, b"broken").unwrap();
-        let result = with_projection_fallback(&evidence, &projection, |path| {
-            if path == Some(projection.as_path()) {
+        let result = with_projection_fallback(&evidence, &projection, |path, files| {
+            if files.is_some() {
+                assert_eq!(path, Some(first_projection.as_path()));
                 Err("projection read failed".into())
             } else {
+                assert_eq!(path, Some(evidence.as_path()));
                 Ok("canonical")
             }
         })

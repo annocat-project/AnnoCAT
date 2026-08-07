@@ -53,6 +53,51 @@ export function openFluentDialog(dialog, focusTarget) {
   requestAnimationFrame(() => target.focus?.({ preventScroll: true }));
 }
 
+export function requestFluentText({
+  title,
+  label,
+  value = '',
+  confirmLabel = 'Save',
+  maxLength = 80,
+}) {
+  let dialog = document.querySelector('#fui-text-input-dialog');
+  if (!dialog) {
+    document.body.insertAdjacentHTML('beforeend', `
+      <dialog id="fui-text-input-dialog" class="fui-dialog" aria-labelledby="fui-text-input-title">
+        <form method="dialog">
+          <header class="fui-dialog__header"><h2 id="fui-text-input-title"></h2></header>
+          <div class="fui-dialog__content">
+            <label class="fui-field"><span class="fui-field__label" data-fui-text-input-label></span><input class="fui-input" data-fui-text-input required></label>
+          </div>
+          <footer class="fui-dialog__footer">
+            <button type="submit" value="cancel" class="fui-button">Cancel</button>
+            <button type="submit" value="confirm" class="fui-button fui-button--primary" data-fui-text-input-confirm>Save</button>
+          </footer>
+        </form>
+      </dialog>`);
+    dialog = document.querySelector('#fui-text-input-dialog');
+    const input = dialog.querySelector('[data-fui-text-input]');
+    input.addEventListener('input', () => {
+      dialog.querySelector('[data-fui-text-input-confirm]').disabled = !input.value.trim();
+    });
+  }
+  const input = dialog.querySelector('[data-fui-text-input]');
+  dialog.querySelector('#fui-text-input-title').textContent = title;
+  dialog.querySelector('[data-fui-text-input-label]').textContent = label;
+  dialog.querySelector('[data-fui-text-input-confirm]').textContent = confirmLabel;
+  input.maxLength = maxLength;
+  input.value = value;
+  dialog.querySelector('[data-fui-text-input-confirm]').disabled = !value.trim();
+  dialog.returnValue = '';
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => {
+      resolve(dialog.returnValue === 'confirm' ? input.value.trim() : null);
+    }, { once: true });
+    openFluentDialog(dialog, input);
+    requestAnimationFrame(() => input.select());
+  });
+}
+
 export function retainFluentModalFocus(modal, event) {
   if (!modal || event.key !== 'Tab') return;
   const focusable = [...modal.querySelectorAll(

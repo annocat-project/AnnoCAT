@@ -2,20 +2,63 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   PROFILE_EVIDENCE_DEPENDENCIES,
-  matchedGeneCountText,
+  summarizeGeneMatchRow,
   profileEvidenceDependencyIndexes,
   summarizeProfileEvidence,
   summarizeProfileEvidenceRow,
+  splitGeneListEntries,
+  formatGeneListSections,
 } from '../src/app/phenotypes.js';
 import { applyGenericEvidenceCellPresentation } from '../src/app/variant-presentation.js';
 
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 
-test('matched gene totals use compact popover copy', () => {
-  assert.equal(matchedGeneCountText(undefined), '');
-  assert.equal(matchedGeneCountText(0), '0 genes found. ');
-  assert.equal(matchedGeneCountText(1), '1 gene found. ');
-  assert.equal(matchedGeneCountText(1200), '1,200 genes found. ');
+test('pasted gene lists accept commas, spaces, and lines without duplicates', () => {
+  assert.deepEqual(
+    splitGeneListEntries('BRCA1, BRCA2\nENSG00000141510  BRCA1'),
+    ['BRCA1', 'BRCA2', 'ENSG00000141510'],
+  );
+});
+
+test('labeled gene-list sections remain editable and resolve only their genes', () => {
+  const text = formatGeneListSections([
+    { label: 'Steroid pathway', genes: [{ label: 'SRD5A2' }, { label: 'CYP21A2' }] },
+    { label: 'Migraine', genes: [{ label: 'CACNA1A' }, { label: 'ATP1A2' }] },
+  ]);
+  assert.equal(
+    text,
+    '[Steroid pathway]\nSRD5A2, CYP21A2\n\n[Migraine]\nCACNA1A, ATP1A2',
+  );
+  assert.deepEqual(
+    splitGeneListEntries(text),
+    ['SRD5A2', 'CYP21A2', 'CACNA1A', 'ATP1A2'],
+  );
+});
+
+test('gene matches use one compact value with detailed provenance', () => {
+  const catalog = [
+    {
+      sourceId: 'gene-profile',
+      fieldPath: 'geneMatches',
+      presentationDependencies: ['geneMatchDetails'],
+    },
+    { sourceId: 'gene-profile', fieldPath: 'geneMatchDetails' },
+  ];
+  const summary = summarizeGeneMatchRow({
+    catalog,
+    rowEvidence: {
+      1: [{
+        selectedItem: 'Migraine',
+        itemType: 'Feature',
+        geneSymbol: 'CACNA1A',
+        relation: 'Associated gene',
+      }],
+    },
+    index: 0,
+    value: 'Migraine',
+  });
+  assert.equal(summary.display, 'Migraine');
+  assert.equal(summary.tooltip, 'Migraine · Feature · CACNA1A · Associated gene');
 });
 
 test('condition details populate the composite phenotype cell when no score is reported', () => {

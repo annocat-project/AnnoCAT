@@ -213,6 +213,17 @@
       "licensePolicy": "publisher-terms"
     },
     {
+      "id": "reactome",
+      "name": "Reactome pathways",
+      "purpose": "Curated human pathways and their gene members",
+      "defaultEnabled": false,
+      "fastvepSource": null,
+      "evidenceScope": "gene",
+      "delivery": "managed-public",
+      "assembly": "Assembly independent",
+      "licensePolicy": "publisher-terms"
+    },
+    {
       "id": "cosmic",
       "name": "COSMIC",
       "purpose": "Licensed user-supplied somatic variant evidence",
@@ -250,7 +261,8 @@
       "id": "wgs",
       "name": "Comprehensive",
       "purpose": "Broad clinical, population, prediction, conservation, and splicing annotation",
-      "sourceIds": ["dbnsfp", "clinvar", "dbsnp", "gnomad-genomes", "cadd", "phylop", "spliceai"]
+      "sourceIds": ["dbnsfp", "clinvar", "dbsnp", "gnomad-genomes", "cadd", "phylop", "spliceai"],
+      "knowledgeSourceIds": ["reactome"]
     },
     {
       "id": "standard",
@@ -579,6 +591,26 @@
         "checksum": null,
         "resolver": "github-mondo-release-assets",
         "resolverApiUrl": "https://api.github.com/repos/monarch-initiative/mondo/releases/latest"
+      }
+    },
+    {
+      "id": "reactome",
+      "assembly": "Assembly independent",
+      "delivery": "knowledge-cache",
+      "adapterContract": "annocat-reactome-pathway-gmt-v1",
+      "manifestRef": null,
+      "release": {
+        "version": "current",
+        "policy": "rolling",
+        "artifactId": "reactome-pathways-gene-set:current",
+        "primaryUrl": "https://reactome.org/download/current/ReactomePathways.gmt.zip",
+        "filename": "ReactomePathways.gmt.zip",
+        "downloadBytes": 298479,
+        "archiveFormat": "zip",
+        "rangeResume": true,
+        "sizeCheckedAt": "2026-08-06T12:00:00-04:00",
+        "checksum": null,
+        "resolver": "reactome-current-download"
       }
     }
   ]

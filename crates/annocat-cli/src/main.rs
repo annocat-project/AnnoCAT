@@ -327,6 +327,11 @@ fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, Str
             phenotype::resolve_latest_asset_manifest()?.version_key(),
             "rolling-snapshot",
         )
+    } else if resource_id == "reactome" {
+        (
+            reactome::resolve_latest_release()?.version,
+            "rolling-snapshot",
+        )
     } else if resource_id == "ensembl-gff3" {
         ("115".to_string(), "compatibility-pinned")
     } else {
@@ -335,6 +340,8 @@ fn resource_update_status(resource_id: &str) -> Result<ResourceUpdateStatus, Str
     };
     let installed_versions = if resource_id == "hpo" {
         phenotype::installed_versions(&paths.resources)
+    } else if resource_id == "reactome" {
+        reactome::installed_versions(&paths.resources)
     } else if resource_id == "ensembl-gff3" {
         if transcript::is_ready(&paths.resources) {
             vec!["115".to_string()]
@@ -378,6 +385,7 @@ mod library_metadata;
 mod mondo;
 mod phenotype;
 mod preparation;
+mod reactome;
 mod reference;
 mod report_import;
 mod report_library;
@@ -402,6 +410,7 @@ const APP_JS: &str = include_str!("../../../web/src/app.js");
 const FAVOR_ONLINE_JS: &str = include_str!("../../../web/src/app/favor-online.js");
 const PHENOTYPES_JS: &str = include_str!("../../../web/src/app/phenotypes.js");
 const RESULT_FILTERS_JS: &str = include_str!("../../../web/src/app/result-filters.js");
+const RESULT_ORDERING_JS: &str = include_str!("../../../web/src/app/result-ordering.js");
 const UI_COMPONENTS_JS: &str = include_str!("../../../web/src/app/ui-components.js");
 const VARIANT_PRESENTATION_JS: &str = include_str!("../../../web/src/app/variant-presentation.js");
 const ANNOCAT_CSS: &str = include_str!("../../../web/src/annocat.css");
@@ -679,6 +688,8 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         || path.ends_with("/export")
         || path.ends_with("/favor/enrich")
         || (path.ends_with("/phenotypes") && method == "POST")
+        || (path.ends_with("/genes/preview") && method == "POST")
+        || (path == "/api/gene-lists" && method == "POST")
         || (path.ends_with("/config") && method == "POST")
         || (path.ends_with("/notes") && method == "POST")
         || (path == "/api/services/favor" && method == "POST")
@@ -1291,8 +1302,15 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 let request =
                     serde_json::from_slice::<phenotype::TermResolutionRequest>(request_body)
                         .map_err(|error| format!("invalid terminology list: {error}"))?;
+                let result = request
+                    .run_id
+                    .as_deref()
+                    .filter(|run_id| !run_id.is_empty())
+                    .map(|run_id| completed_run_result(&paths.runs, run_id))
+                    .transpose()?;
                 return serde_json::to_string(&phenotype::resolve_terms(
                     &paths.resources,
+                    result.as_deref(),
                     request,
                 )?)
                 .map_err(|error| error.to_string());
@@ -1302,13 +1320,127 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             }
             let search_query = query_parameter(query, "q").transpose()?.unwrap_or_default();
             let limit = query_parameter_u64(query, "limit").unwrap_or(20) as usize;
-            let terms = phenotype::search_terms(&paths.resources, &search_query, limit)?;
+            let run_id = query_parameter(query, "runId").transpose()?;
+            let mut terms = match phenotype::search_terms(&paths.resources, &search_query, limit) {
+                Ok(terms) => terms,
+                Err(_) if run_id.is_some() => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            if let Ok(pathways) = reactome::search(&paths.resources, &search_query, limit) {
+                terms.extend(pathways);
+            }
+            if let Some(run_id) = run_id
+                && !run_id.is_empty()
+            {
+                let result = completed_run_result(&paths.runs, &run_id)?;
+                terms.extend(phenotype::search_gene_terms(
+                    &paths.resources,
+                    &result,
+                    &search_query,
+                    limit,
+                )?);
+                terms.sort_by(|left, right| {
+                    let query = search_query.trim();
+                    let priority = |term: &phenotype::TermSearchResult| {
+                        if term.id.eq_ignore_ascii_case(query) {
+                            0
+                        } else if term.term_type == "gene" && term.label.eq_ignore_ascii_case(query)
+                        {
+                            1
+                        } else if term.label.eq_ignore_ascii_case(query) {
+                            2
+                        } else if term
+                            .label
+                            .to_ascii_lowercase()
+                            .starts_with(&query.to_ascii_lowercase())
+                        {
+                            3
+                        } else {
+                            4
+                        }
+                    };
+                    priority(left)
+                        .cmp(&priority(right))
+                        .then_with(|| left.label.cmp(&right.label))
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                terms.dedup_by(|left, right| {
+                    left.id == right.id && left.term_type == right.term_type
+                });
+                terms.truncate(limit);
+            }
             Ok(serde_json::json!({
-                "hpoRelease": phenotype::hpo_release(&paths.resources)?,
+                "hpoRelease": phenotype::hpo_release(&paths.resources).ok(),
                 "mondoRelease": phenotype::mondo_release(&paths.resources),
+                "reactomeRelease": reactome::installed_status(&paths.resources).map(|ready| ready.release),
                 "terms": terms
             })
             .to_string())
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if path == "/api/gene-lists" {
+        let response = portable_paths().and_then(|paths| {
+            let lists = match method.as_str() {
+                "GET" => phenotype::saved_gene_lists(&paths.config)?,
+                "POST" => {
+                    let request =
+                        serde_json::from_slice::<phenotype::SavedGeneListUpdate>(request_body)
+                            .map_err(|error| format!("invalid gene list request: {error}"))?;
+                    phenotype::update_saved_gene_lists(&paths.config, request)?
+                }
+                _ => return Err("GET or POST required".into()),
+            };
+            Ok(serde_json::json!({ "lists": lists }).to_string())
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/genes/preview"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            if method != "POST" {
+                return Err("POST required".into());
+            }
+            let result = completed_run_result(&paths.runs, run_id)?;
+            let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
+                .map_err(|error| format!("invalid gene preview request: {error}"))?;
+            let offset = query_parameter_u64(query, "offset").unwrap_or(0) as usize;
+            let limit = query_parameter_u64(query, "limit").unwrap_or(50) as usize;
+            let search = query_parameter(query, "q").transpose()?.unwrap_or_default();
+            let presence = query_parameter(query, "presence")
+                .transpose()?
+                .unwrap_or_default();
+            let include_all_symbols = query_parameter(query, "allSymbols")
+                .transpose()?
+                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+            serde_json::to_string(&phenotype::preview(
+                &paths.resources,
+                &result,
+                request,
+                offset,
+                limit,
+                &search,
+                &presence,
+                include_all_symbols,
+            )?)
+            .map_err(|error| error.to_string())
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -1331,11 +1463,13 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             } else if method == "POST" {
                 let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
                     .map_err(|error| format!("invalid phenotype profile request: {error}"))?;
-                if request.action == "apply" {
+                let profile = if request.action == "apply" {
                     phenotype::apply(&paths.resources, &paths.runs, run_id, &result, request)?
                 } else {
                     phenotype::update(&paths.resources, &paths.runs, run_id, request)?
-                }
+                };
+                prepare_completed_run_query_inputs(&paths.runs, run_id)?;
+                profile
             } else {
                 return Err("GET or POST required".into());
             };
@@ -1531,7 +1665,10 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         .filter(|value| !value.is_empty() && !value.contains('/'))
     {
         let response = portable_paths()
-            .and_then(|paths| completed_run_query_inputs(&paths.runs, run_id))
+            .and_then(|paths| {
+                prepare_completed_run_query_inputs(&paths.runs, run_id)?;
+                completed_run_query_inputs(&paths.runs, run_id)
+            })
             .and_then(|(_, catalog)| catalog.ok_or("field catalog is missing".into()))
             .and_then(|catalog| results::field_catalog_json(&catalog));
         let (status, body) = match response {
@@ -1676,6 +1813,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "200 OK",
             "text/javascript; charset=utf-8",
             web_asset("src/app/result-filters.js", RESULT_FILTERS_JS),
+        ),
+        "/app/result-ordering.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/result-ordering.js", RESULT_ORDERING_JS),
         ),
         "/app/ui-components.js" => (
             "200 OK",
@@ -2274,17 +2416,15 @@ fn profile_preparation_status(profile_id: &str) -> Result<ProfilePreparationStat
     let profile = annocat_core::source_catalog::profile(profile_id)
         .ok_or_else(|| format!("profile '{profile_id}' does not exist"))?;
     let resources = portable_paths()?.resources;
-    let sources = profile
-        .source_ids
-        .iter()
-        .filter(|id| id.as_str() != "fastvep")
+    let sources = profile_resource_ids(profile)
+        .filter(|id| *id != "fastvep")
         .map(|id| {
             let state = managed_preparation_status(id, &resources);
             let release = annocat_core::source_catalog::download_release(id);
             let catalog_ready =
                 state.state == "ready" || (preparation_available(id) && release.is_some());
             ProfileSourceStatus {
-                resource_id: id.clone(),
+                resource_id: id.to_string(),
                 preparation: state,
                 catalog_ready,
                 expected_compressed_bytes: release.and_then(|release| release.download_bytes),
@@ -2426,6 +2566,49 @@ fn managed_preparation_status(
             ..preparation::LivePreparationState::default()
         };
     }
+    if resource_id == "reactome" {
+        let live = preparation::live_status(resource_id);
+        if live.state != "idle" {
+            return live;
+        }
+        if let Some(ready) = reactome::installed_status(resources) {
+            return preparation::LivePreparationState {
+                resource_id: Some(resource_id.into()),
+                state: "ready".into(),
+                phase: "ready".into(),
+                network_bytes: ready.asset_bytes,
+                expected_network_bytes: ready.asset_bytes,
+                percent: 100.0,
+                parsed_records: ready.pathway_count as u64,
+                prepared_bytes: ready.prepared_bytes,
+                completed_chromosomes: 1,
+                remaining_chromosomes: 0,
+                detail: format!(
+                    "Indexed {} pathways and {} gene symbols",
+                    ready.pathway_count, ready.gene_count
+                ),
+                ..preparation::LivePreparationState::default()
+            };
+        }
+        if let Some(position) = install_queue::position(resource_id, preparation::running_count()) {
+            return preparation::LivePreparationState {
+                resource_id: Some(resource_id.into()),
+                state: "queued".into(),
+                phase: "queued".into(),
+                expected_network_bytes: release.download_bytes.unwrap_or(0),
+                remaining_chromosomes: 1,
+                detail: format!("Waiting in the installation queue (position {position})"),
+                ..preparation::LivePreparationState::default()
+            };
+        }
+        return preparation::LivePreparationState {
+            resource_id: Some(resource_id.into()),
+            expected_network_bytes: release.download_bytes.unwrap_or(0),
+            remaining_chromosomes: 1,
+            detail: "Reactome pathways are not installed".into(),
+            ..preparation::LivePreparationState::default()
+        };
+    }
     let chromosomes = resource_chromosomes(resource_id);
     let mut compatibility_issue = None;
     if is_rolling_resource(resource_id) {
@@ -2483,10 +2666,7 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
     let profile = annocat_core::source_catalog::profile(profile_id)
         .ok_or_else(|| format!("profile '{profile_id}' does not exist"))?;
     let resources = portable_paths()?.resources;
-    let actionable = profile
-        .source_ids
-        .iter()
-        .map(String::as_str)
+    let actionable = profile_resource_ids(profile)
         .filter(|id| {
             preparation_available(id)
                 && annocat_core::source_catalog::download_release(id).is_some()
@@ -2502,6 +2682,16 @@ fn start_profile_preparation(profile_id: &str) -> Result<(), String> {
         enqueue_preparation(resource_id, false, false)?;
     }
     Ok(())
+}
+
+fn profile_resource_ids(
+    profile: &annocat_core::source_catalog::Profile,
+) -> impl Iterator<Item = &str> {
+    profile
+        .source_ids
+        .iter()
+        .chain(profile.knowledge_source_ids.iter())
+        .map(String::as_str)
 }
 
 fn update_install_requested(query: &str) -> Result<bool, String> {
@@ -2650,7 +2840,8 @@ fn catalog_source_type(resource_id: &str) -> Option<&'static str> {
 }
 
 fn preparation_available(resource_id: &str) -> bool {
-    matches!(resource_id, "dbnsfp" | "hpo") || catalog_source_type(resource_id).is_some()
+    matches!(resource_id, "dbnsfp" | "hpo" | "reactome")
+        || catalog_source_type(resource_id).is_some()
 }
 
 fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
@@ -2661,6 +2852,15 @@ fn start_catalog_preparation(resource_id: &str) -> Result<(), String> {
         return preparation::start_hpo_live(preparation::HpoLiveRequest {
             resource_root,
             manifest,
+        });
+    }
+    if resource_id == "reactome" {
+        let resources = portable_paths()?.resources;
+        let release = reactome::resolve_latest_release()?;
+        let resource_root = resources.join("reactome").join(&release.version);
+        return preparation::start_reactome_live(preparation::ReactomeLiveRequest {
+            resource_root,
+            release,
         });
     }
     let release = resource_release(resource_id).map_err(|_| {
@@ -3437,23 +3637,43 @@ fn completed_run_query_inputs(
         "json",
     )
     .ok();
-    if let (Some(evidence), Some(catalog)) = (&evidence, &catalog) {
-        let phenotype_assets = phenotype::active_query_assets(runs_directory, requested_id)?;
-        favor::prepare_query_assets_with_gene(
-            evidence,
-            catalog,
-            phenotype_assets
-                .as_ref()
-                .map(|(gene_evidence, gene_catalog)| {
-                    (gene_evidence.as_path(), gene_catalog.as_path())
-                }),
-        )?;
-        return Ok((
-            Some(favor::effective_evidence(evidence)),
-            Some(favor::effective_catalog(catalog)),
-        ));
-    }
-    Ok((evidence, catalog))
+    Ok((
+        evidence.as_deref().map(favor::effective_evidence),
+        catalog.as_deref().map(favor::effective_catalog),
+    ))
+}
+
+fn prepare_completed_run_query_inputs(
+    runs_directory: &std::path::Path,
+    requested_id: &str,
+) -> Result<(), String> {
+    let evidence = completed_run_file(
+        runs_directory,
+        requested_id,
+        "evidenceFile",
+        "evidence.parquet",
+        "parquet",
+    )
+    .ok();
+    let catalog = completed_run_file(
+        runs_directory,
+        requested_id,
+        "fieldCatalogFile",
+        "field-catalog.json",
+        "json",
+    )
+    .ok();
+    let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
+        return Ok(());
+    };
+    let phenotype_assets = phenotype::active_query_assets(runs_directory, requested_id)?;
+    favor::prepare_query_assets_with_gene(
+        &evidence,
+        &catalog,
+        phenotype_assets
+            .as_ref()
+            .map(|(gene_evidence, gene_catalog)| (gene_evidence.as_path(), gene_catalog.as_path())),
+    )
 }
 
 #[derive(Clone, Serialize)]
@@ -4123,6 +4343,7 @@ mod profile_status_tests {
             FAVOR_ONLINE_JS,
             PHENOTYPES_JS,
             RESULT_FILTERS_JS,
+            RESULT_ORDERING_JS,
             UI_COMPONENTS_JS,
             VARIANT_PRESENTATION_JS,
         ]
@@ -4148,6 +4369,11 @@ mod profile_status_tests {
                 "./app/result-filters.js",
                 r#""/app/result-filters.js""#,
                 RESULT_FILTERS_JS,
+            ),
+            (
+                "./app/result-ordering.js",
+                r#""/app/result-ordering.js""#,
+                RESULT_ORDERING_JS,
             ),
             (
                 "./app/ui-components.js",
@@ -4481,7 +4707,7 @@ mod profile_status_tests {
     #[test]
     fn core_status_does_not_mislabel_engine_failure_as_missing_transcripts() {
         let app = web_app_source();
-        assert!(app.contains("!setup.engineReady?'Annotation engine needs repair'"));
+        assert!(app.contains("Annotation engine needs repair"));
         assert!(app.contains("!setup.transcriptCacheReady?'ensembl-gff3':null"));
     }
 
@@ -4571,7 +4797,8 @@ mod profile_status_tests {
         assert!(html.contains("id=\"jobs-list\""));
         assert!(html.contains("id=\"task-nav-status\""));
         assert_eq!(app.matches("$('#source-list').innerHTML=").count(), 1);
-        assert!(app.contains("(profile.sourceIds||[]).map"));
+        assert!(app.contains("profileInstallSourceIds(profile)"));
+        assert!(app.contains("profile?.knowledgeSourceIds||[]"));
         assert!(!app.contains("renderResourceTasks"));
         assert!(app.contains("const jobs=lastTaskSnapshots.map"));
         assert!(!app.contains("data-source-tasks"));
@@ -4900,7 +5127,7 @@ mod profile_status_tests {
     }
 
     #[test]
-    fn phenotype_knowledge_source_is_not_an_annotation_wizard_source() {
+    fn gene_knowledge_sources_are_not_annotation_wizard_sources() {
         let app = web_app_source();
         let html = include_str!("../../../web/index.html");
         assert!(app.contains(
@@ -4908,13 +5135,14 @@ mod profile_status_tests {
         ));
         assert!(app.contains("role=\"combobox\""));
         assert!(app.contains("aria-controls=\"phenotype-search-results\""));
-        assert!(app.contains("Add a feature or condition"));
+        assert!(app.contains("Add a feature, condition, pathway, or gene"));
         assert!(app.contains("MONDO subtypes"));
-        assert!(app.contains("It does not rank variants or estimate causality."));
+        assert!(app.contains("It does not rank variants."));
         assert!(!app.contains("candidateRank"));
         assert!(app.contains("event.composedPath()"));
-        assert!(app.contains("Export phenotype data?"));
+        assert!(app.contains("Export gene selections?"));
         assert!(app.contains("HPO terms"));
+        assert!(app.contains("Install Reactome to add pathways."));
         assert!(html.contains("Mondo Disease Ontology"));
         assert!(!app.contains("data-phenotype-sample"));
         assert!(!app.contains("sampleName:phenotypeSampleName"));

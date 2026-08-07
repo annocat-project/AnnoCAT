@@ -170,7 +170,12 @@ mod tests {
     #[test]
     fn profiles_reference_known_unique_sources() {
         for profile in &source_catalog::catalog().profiles {
-            for (index, source_id) in profile.source_ids.iter().enumerate() {
+            let source_ids = profile
+                .source_ids
+                .iter()
+                .chain(profile.knowledge_source_ids.iter())
+                .collect::<Vec<_>>();
+            for (index, source_id) in source_ids.iter().enumerate() {
                 assert!(
                     source_catalog::source(source_id).is_some(),
                     "profile {} references unknown source {}",
@@ -178,7 +183,7 @@ mod tests {
                     source_id
                 );
                 assert!(
-                    !profile.source_ids[..index].contains(source_id),
+                    !source_ids[..index].contains(source_id),
                     "profile {} repeats source {}",
                     profile.id,
                     source_id

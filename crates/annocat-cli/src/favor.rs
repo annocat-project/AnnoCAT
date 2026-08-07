@@ -29,6 +29,11 @@ fn write_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn query_asset_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnrichRequest {
@@ -471,50 +476,33 @@ pub fn prepare_query_assets_with_gene(
     canonical_catalog: &Path,
     gene_assets: Option<(&Path, &Path)>,
 ) -> Result<(), String> {
+    let _guard = query_asset_lock()
+        .lock()
+        .map_err(|_| "query evidence lock is unavailable")?;
     let run_directory = canonical_evidence
         .parent()
         .ok_or("completed evidence path has no parent")?;
     let favor_evidence = run_directory.join(EVIDENCE_FILE);
     let favor_catalog = run_directory.join(FIELD_CATALOG_FILE);
     let has_favor = favor_evidence.is_file() && favor_catalog.is_file();
-    if !has_favor && gene_assets.is_none() {
-        for stale in [
-            run_directory.join(QUERY_CATALOG_FILE),
-            run_directory.join(QUERY_GENE_EVIDENCE_FILE),
-            run_directory
-                .join(QUERY_DIRECTORY)
-                .join("canonical.parquet"),
-            run_directory.join(QUERY_DIRECTORY).join("favor.parquet"),
-            run_directory
-                .join(QUERY_DIRECTORY)
-                .join("phenotype-candidates.parquet"),
-        ] {
-            if stale.is_file() {
-                fs::remove_file(&stale)
-                    .map_err(|error| format!("cannot remove stale query evidence: {error}"))?;
-            }
-        }
-        let query_directory = run_directory.join(QUERY_DIRECTORY);
-        if query_directory.is_dir() {
-            fs::remove_dir(&query_directory)
-                .map_err(|error| format!("cannot remove empty query directory: {error}"))?;
-        }
-        return Ok(());
-    }
     let query_directory = run_directory.join(QUERY_DIRECTORY);
-    fs::create_dir_all(&query_directory)
-        .map_err(|error| format!("cannot create FAVOR query directory: {error}"))?;
-    publish_hard_link(
-        canonical_evidence,
-        &query_directory.join("canonical.parquet"),
-    )?;
     if has_favor {
+        fs::create_dir_all(&query_directory)
+            .map_err(|error| format!("cannot create FAVOR query directory: {error}"))?;
+        publish_hard_link(
+            canonical_evidence,
+            &query_directory.join("canonical.parquet"),
+        )?;
         publish_hard_link(&favor_evidence, &query_directory.join("favor.parquet"))?;
     } else {
-        let stale = query_directory.join("favor.parquet");
-        if stale.is_file() {
-            fs::remove_file(stale)
-                .map_err(|error| format!("cannot remove stale FAVOR evidence: {error}"))?;
+        for stale in [
+            query_directory.join("canonical.parquet"),
+            query_directory.join("favor.parquet"),
+        ] {
+            if stale.is_file() {
+                fs::remove_file(stale)
+                    .map_err(|error| format!("cannot remove stale query evidence: {error}"))?;
+            }
         }
     }
     let legacy_candidates = query_directory.join("phenotype-candidates.parquet");
@@ -534,6 +522,18 @@ pub fn prepare_query_assets_with_gene(
         }
         None
     };
+    if !has_favor && gene_catalog.is_none() {
+        let stale = run_directory.join(QUERY_CATALOG_FILE);
+        if stale.is_file() {
+            fs::remove_file(stale)
+                .map_err(|error| format!("cannot remove stale query catalog: {error}"))?;
+        }
+        if query_directory.is_dir() {
+            fs::remove_dir(&query_directory)
+                .map_err(|error| format!("cannot remove empty query directory: {error}"))?;
+        }
+        return Ok(());
+    }
     merge_query_catalogs(
         canonical_catalog,
         has_favor.then_some(favor_catalog.as_path()),
@@ -1418,6 +1418,9 @@ fn publish_table(connection: &Connection, table: &str, destination: &Path) -> Re
 }
 
 fn publish_hard_link(source: &Path, destination: &Path) -> Result<(), String> {
+    if same_file_version(source, destination) {
+        return Ok(());
+    }
     let temporary = destination.with_extension("parquet.partial");
     let _ = fs::remove_file(&temporary);
     fs::hard_link(source, &temporary).map_err(|error| {
@@ -1431,6 +1434,15 @@ fn publish_hard_link(source: &Path, destination: &Path) -> Result<(), String> {
         return Err(error);
     }
     Ok(())
+}
+
+fn same_file_version(source: &Path, destination: &Path) -> bool {
+    let (Ok(source), Ok(destination)) = (fs::metadata(source), fs::metadata(destination)) else {
+        return false;
+    };
+    source.len() == destination.len()
+        && source.modified().ok().is_some()
+        && source.modified().ok() == destination.modified().ok()
 }
 
 fn merge_query_catalogs(
@@ -1481,10 +1493,12 @@ fn merge_query_catalogs(
     } else if let Some(object) = canonical_value.as_object_mut() {
         object.remove("geneEvidenceFile");
     }
-    super::library_metadata::atomic_write(
-        destination,
-        &serde_json::to_vec_pretty(&canonical_value).map_err(|error| error.to_string())?,
-    )
+    let contents =
+        serde_json::to_vec_pretty(&canonical_value).map_err(|error| error.to_string())?;
+    if fs::read(destination).ok().as_deref() == Some(contents.as_slice()) {
+        return Ok(());
+    }
+    super::library_metadata::atomic_write(destination, &contents)
 }
 
 fn sql_path(path: &Path) -> String {
@@ -1842,6 +1856,69 @@ mod tests {
                 .all(|field| field["fieldPath"] != "legacyConditionMatches")
         );
         assert_eq!(catalog["geneEvidenceFile"], QUERY_GENE_EVIDENCE_FILE);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gene_evidence_does_not_wrap_unchanged_annotation_evidence() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "annocat-gene-query-assets-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let canonical_evidence = root.join("evidence.parquet");
+        let canonical_catalog = root.join("field-catalog.json");
+        let gene_evidence = root.join("gene-evidence.parquet");
+        let gene_catalog = root.join("gene-field-catalog.json");
+        fs::write(&canonical_evidence, b"canonical").unwrap();
+        fs::write(&gene_evidence, b"genes").unwrap();
+        fs::write(
+            &canonical_catalog,
+            serde_json::to_vec(&json!({
+                "fields": [{"sourceId": "clinvar", "fieldPath": "significance"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &gene_catalog,
+            serde_json::to_vec(&json!({
+                "fields": [{
+                    "sourceId": "hpo",
+                    "fieldPath": "geneMatch",
+                    "storageRelation": "geneEvidence"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        prepare_query_assets_with_gene(
+            &canonical_evidence,
+            &canonical_catalog,
+            Some((&gene_evidence, &gene_catalog)),
+        )
+        .unwrap();
+
+        assert_eq!(effective_evidence(&canonical_evidence), canonical_evidence);
+        assert!(
+            !root
+                .join(QUERY_DIRECTORY)
+                .join("canonical.parquet")
+                .exists()
+        );
+        assert!(root.join(QUERY_GENE_EVIDENCE_FILE).is_file());
+        assert!(root.join(QUERY_CATALOG_FILE).is_file());
+
+        prepare_query_assets_with_gene(&canonical_evidence, &canonical_catalog, None).unwrap();
+        assert!(!root.join(QUERY_GENE_EVIDENCE_FILE).exists());
+        assert!(!root.join(QUERY_CATALOG_FILE).exists());
+        assert!(!root.join(QUERY_DIRECTORY).exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

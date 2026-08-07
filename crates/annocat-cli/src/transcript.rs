@@ -1,5 +1,8 @@
+use flate2::read::MultiGzDecoder;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::collections::BTreeSet;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +10,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 static CANCEL: AtomicBool = AtomicBool::new(false);
+const GENE_DICTIONARY_FILENAME: &str = "gene-dictionary.tsv";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneIdentity {
+    pub symbol: String,
+    pub gene_id: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +140,105 @@ fn validate_installation(resources: &Path) -> Result<(), String> {
 
 pub fn cache_path(resources: &Path) -> PathBuf {
     resources.join("transcript-cache").join("ensembl-115.cache")
+}
+
+pub fn gene_dictionary(resources: &Path) -> Result<Vec<GeneIdentity>, String> {
+    let path = resources
+        .join("transcript-cache")
+        .join(GENE_DICTIONARY_FILENAME);
+    let metadata = fs::metadata(&path)
+        .map_err(|_| "the installed transcript cache has no gene dictionary".to_string())?;
+    if metadata.len() == 0 || metadata.len() > 16 * 1024 * 1024 {
+        return Err("the transcript gene dictionary has an invalid size".into());
+    }
+    let reader = BufReader::new(
+        File::open(&path).map_err(|error| format!("cannot open the gene dictionary: {error}"))?,
+    );
+    parse_gene_dictionary(reader)
+}
+
+fn parse_gene_dictionary(reader: impl BufRead) -> Result<Vec<GeneIdentity>, String> {
+    let mut genes = Vec::new();
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("cannot read the gene dictionary: {error}"))?;
+        let Some((symbol, gene_id)) = line.split_once('\t') else {
+            return Err("the transcript gene dictionary is invalid".into());
+        };
+        if symbol.is_empty()
+            || gene_id.is_empty()
+            || symbol.chars().any(char::is_control)
+            || !gene_id.starts_with("ENSG")
+        {
+            return Err("the transcript gene dictionary is invalid".into());
+        }
+        genes.push(GeneIdentity {
+            symbol: symbol.to_owned(),
+            gene_id: gene_id.to_owned(),
+        });
+    }
+    if genes.is_empty() {
+        return Err("the transcript gene dictionary is empty".into());
+    }
+    Ok(genes)
+}
+
+fn write_gene_dictionary(gff3: &Path, destination: &Path) -> Result<(), String> {
+    let reader = BufReader::new(MultiGzDecoder::new(
+        File::open(gff3).map_err(|error| format!("cannot open the Ensembl GFF3: {error}"))?,
+    ));
+    let mut genes = BTreeSet::new();
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("cannot read the Ensembl GFF3: {error}"))?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let columns = line.split('\t').collect::<Vec<_>>();
+        if columns.len() != 9 || columns[2] != "gene" {
+            continue;
+        }
+        let attributes = columns[8]
+            .split(';')
+            .filter_map(|value| value.split_once('='))
+            .collect::<std::collections::HashMap<_, _>>();
+        let Some(gene_id) = attributes
+            .get("ID")
+            .and_then(|value| value.strip_prefix("gene:"))
+            .filter(|value| value.starts_with("ENSG"))
+        else {
+            continue;
+        };
+        let symbol = attributes.get("Name").copied().unwrap_or(gene_id);
+        if !symbol.is_empty()
+            && !symbol.contains(['\t', '\n', '\r'])
+            && !gene_id.contains(['\t', '\n', '\r'])
+        {
+            genes.insert((symbol.to_ascii_uppercase(), gene_id.to_owned()));
+        }
+    }
+    if genes.is_empty() {
+        return Err("the Ensembl GFF3 did not contain a usable gene dictionary".into());
+    }
+    let mut output = File::create(destination)
+        .map_err(|error| format!("cannot create the transcript gene dictionary: {error}"))?;
+    for (symbol, gene_id) in genes {
+        writeln!(output, "{symbol}\t{gene_id}")
+            .map_err(|error| format!("cannot write the transcript gene dictionary: {error}"))?;
+    }
+    output
+        .flush()
+        .map_err(|error| format!("cannot flush the transcript gene dictionary: {error}"))?;
+    let dictionary = gene_dictionary_at(destination)?;
+    if dictionary.is_empty() {
+        return Err("the transcript gene dictionary did not pass verification".into());
+    }
+    Ok(())
+}
+
+fn gene_dictionary_at(path: &Path) -> Result<Vec<GeneIdentity>, String> {
+    let reader = BufReader::new(
+        File::open(path).map_err(|error| format!("cannot open the gene dictionary: {error}"))?,
+    );
+    parse_gene_dictionary(reader)
 }
 
 pub fn is_running() -> bool {
@@ -320,6 +429,7 @@ fn build(fastvep: &Path, gff3: &Path, fasta: &Path, resources: &Path) -> Result<
         ));
     }
     let cache_sha256 = crate::fastvep::sha256_file(&cache)?;
+    write_gene_dictionary(gff3, &staging.join(GENE_DICTIONARY_FILENAME))?;
     let manifest = serde_json::json!({
         "schemaVersion": 2,
         "resourceId": "transcript-cache",
@@ -420,7 +530,19 @@ fn publish_replacement(resources: &Path, staging: &Path, target: &Path) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn gene_dictionary_requires_symbols_and_stable_ensembl_ids() {
+        let genes = parse_gene_dictionary(Cursor::new(
+            b"BRCA1\tENSG00000012048\nTP53\tENSG00000141510\n",
+        ))
+        .unwrap();
+        assert_eq!(genes.len(), 2);
+        assert_eq!(genes[0].symbol, "BRCA1");
+        assert!(parse_gene_dictionary(Cursor::new(b"BRCA1\tbad-id\n")).is_err());
+    }
 
     #[test]
     fn verified_rebuild_replaces_an_invalid_installed_cache() {

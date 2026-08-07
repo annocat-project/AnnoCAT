@@ -1796,6 +1796,11 @@ pub struct HpoLiveRequest {
     pub manifest: crate::phenotype::HpoAssetManifest,
 }
 
+pub struct ReactomeLiveRequest {
+    pub resource_root: PathBuf,
+    pub release: crate::reactome::ResolvedRelease,
+}
+
 pub fn start_hpo_live(request: HpoLiveRequest) -> Result<(), String> {
     let expected_network_bytes = request.manifest.expected_bytes();
     let job = register_live_job(LivePreparationState {
@@ -1808,6 +1813,19 @@ pub fn start_hpo_live(request: HpoLiveRequest) -> Result<(), String> {
         ..LivePreparationState::default()
     })?;
     spawn_live_job(job, move || run_hpo_live(request))
+}
+
+pub fn start_reactome_live(request: ReactomeLiveRequest) -> Result<(), String> {
+    let job = register_live_job(LivePreparationState {
+        resource_id: Some("reactome".into()),
+        state: "running".into(),
+        phase: "starting".into(),
+        expected_network_bytes: request.release.bytes,
+        remaining_chromosomes: 1,
+        detail: "Starting the Reactome pathway installation".into(),
+        ..LivePreparationState::default()
+    })?;
+    spawn_live_job(job, move || run_reactome_live(request))
 }
 
 pub fn start_revel_live(request: RevelLiveRequest) -> Result<(), String> {
@@ -2125,6 +2143,66 @@ fn run_hpo_live(request: HpoLiveRequest) {
                 state.error = Some(error);
                 state.detail =
                     "Knowledge installation failed; incomplete assets were not promoted".into();
+            }
+        }
+    }
+}
+
+fn run_reactome_live(request: ReactomeLiveRequest) {
+    let cancelled = live_cancel();
+    let started = Instant::now();
+    let result = crate::reactome::install(
+        &request.resource_root,
+        &request.release,
+        cancelled.as_ref(),
+        |progress| {
+            if let Ok(mut state) = live_state().lock() {
+                state.phase = progress.phase;
+                state.detail = progress.detail;
+                state.network_bytes = progress.network_bytes;
+                state.expected_network_bytes = progress.expected_network_bytes;
+                state.parsed_records = progress.parsed_records;
+                state.prepared_bytes = progress.prepared_bytes;
+                state.percent = if progress.expected_network_bytes == 0 {
+                    0.0
+                } else {
+                    progress.network_bytes as f64 * 100.0 / progress.expected_network_bytes as f64
+                };
+                state.throughput_bytes_per_second =
+                    progress.network_bytes as f64 / started.elapsed().as_secs_f64().max(0.001);
+            }
+        },
+    );
+    if let Ok(mut state) = live_state().lock() {
+        match result {
+            Ok(ready) => {
+                state.state = "ready".into();
+                state.phase = "ready".into();
+                state.network_bytes = ready.asset_bytes;
+                state.expected_network_bytes = ready.asset_bytes;
+                state.parsed_records = ready.pathway_count as u64;
+                state.prepared_bytes = ready.prepared_bytes;
+                state.completed_chromosomes = 1;
+                state.remaining_chromosomes = 0;
+                state.percent = 100.0;
+                state.throughput_bytes_per_second = 0.0;
+                state.detail = format!(
+                    "Indexed {} pathways and {} gene symbols",
+                    ready.pathway_count, ready.gene_count
+                );
+            }
+            Err(_) if cancelled.load(Ordering::SeqCst) => {
+                state.state = "cancelled".into();
+                state.phase = "cancelled".into();
+                state.detail =
+                    "Reactome installation paused; the partial download was retained".into();
+            }
+            Err(error) => {
+                state.state = "failed".into();
+                state.phase = "failed".into();
+                state.error = Some(error);
+                state.detail =
+                    "Reactome installation failed; incomplete data was not promoted".into();
             }
         }
     }

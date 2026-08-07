@@ -56,6 +56,8 @@ pub struct Profile {
     pub purpose: String,
     pub source_ids: Vec<String>,
     #[serde(default)]
+    pub knowledge_source_ids: Vec<String>,
+    #[serde(default)]
     pub service_ids: Vec<String>,
 }
 
@@ -169,6 +171,7 @@ pub fn profiles_json() -> String {
                     "name": profile.name,
                     "purpose": profile.purpose,
                     "sourceIds": profile.source_ids,
+                    "knowledgeSourceIds": profile.knowledge_source_ids,
                     "serviceIds": profile.service_ids,
                     "requiredEngineIds": ["fastvep"],
                     "requiredResourceIds": ["grch38-reference", "ensembl-gff3"]
@@ -494,7 +497,9 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             || !profile_ids.insert(profile.id.as_str())
             || profile.name.trim().is_empty()
             || profile.purpose.trim().is_empty()
-            || profile.source_ids.is_empty() && profile.service_ids.is_empty()
+            || profile.source_ids.is_empty()
+                && profile.knowledge_source_ids.is_empty()
+                && profile.service_ids.is_empty()
         {
             return Err(format!("invalid or duplicate profile {}", profile.id));
         }
@@ -506,6 +511,17 @@ fn validate(catalog: &SourceCatalog) -> Result<(), String> {
             {
                 return Err(format!(
                     "profile {} references an unknown or duplicate source {}",
+                    profile.id, source_id
+                ));
+            }
+        }
+        for source_id in &profile.knowledge_source_ids {
+            if !catalog_source_ids.contains(source_id.as_str())
+                || !ids.contains(source_id.as_str())
+                || !profile_source_ids.insert(source_id.as_str())
+            {
+                return Err(format!(
+                    "profile {} references an unknown or duplicate knowledge source {}",
                     profile.id, source_id
                 ));
             }

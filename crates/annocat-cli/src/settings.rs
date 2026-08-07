@@ -68,6 +68,7 @@ fn contains_annotation_data(path: &Path) -> bool {
         "phylop",
         "spliceai",
         "hpo",
+        "reactome",
     ]
     .iter()
     .any(|name| path.join(name).is_dir())

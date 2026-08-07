@@ -1168,6 +1168,7 @@ fn verify_source(
             &paths.resources,
         ),
         "hpo" => phenotype::verify_assets(&paths.resources),
+        "reactome" => reactome::verify_assets(&paths.resources),
         _ => {
             if annocat_core::source_catalog::source(source_id).is_none() {
                 return Err(format!("annotation source '{source_id}' does not exist"));

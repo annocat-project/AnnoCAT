@@ -24,7 +24,7 @@ body:has(dialog[open]) {
   z-index: 80;
   display: grid;
   max-height: min(720px, calc(100vh - var(--space-5)));
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: var(--space-3);
   padding: var(--space-3);
   overflow: hidden;
@@ -46,8 +46,12 @@ body:has(dialog[open]) {
 
 .phenotype-popover__content {
   display: grid;
+  min-height: 0;
   gap: var(--space-3);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .phenotype-search-field {
@@ -55,12 +59,10 @@ body:has(dialog[open]) {
 }
 
 .phenotype-search-results.fui-popover {
-  position: absolute;
-  z-index: 1;
-  top: calc(100% + var(--space-1));
-  right: 0;
-  left: 0;
-  max-height: 240px;
+  position: static;
+  width: 100%;
+  max-height: min(32vh, 240px);
+  margin-top: var(--space-1);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -147,6 +149,43 @@ body:has(dialog[open]) {
   justify-content: flex-end;
 }
 
+.gene-paste {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-medium);
+  background: var(--color-surface);
+}
+
+.gene-paste .fui-textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.saved-gene-lists__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: var(--space-2);
+}
+
+.gene-paste .fui-field__label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.gene-paste .fui-field__label small,
+.gene-list-unresolved {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.gene-list-unresolved {
+  margin: 0;
+}
+
 .phenotype-unavailable {
   display: grid;
   gap: var(--space-3);
@@ -155,6 +194,28 @@ body:has(dialog[open]) {
 
 .phenotype-unavailable p {
   margin: 0;
+}
+
+@media (max-width: 560px) {
+  .saved-gene-lists__row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.fui-dialog .about-lead {
+  font-size: var(--font-size-base);
+  line-height: 1.55;
+}
+
+.fui-dialog .about-section h2 {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-body-1);
+}
+
+.fui-dialog .about-data-attribution {
+  color: var(--color-text-muted);
+  line-height: 1.5;
 }
 
 .profile-evidence-cell {
@@ -3113,8 +3174,6 @@ html.annocat-results-ui .about-header {
 html.annocat-results-ui .about-lead {
   max-width: none;
   margin: var(--space-2) 0 0;
-  font-size: var(--font-size-base);
-  line-height: 1.55;
 }
 
 html.annocat-results-ui .about-body {
@@ -3129,9 +3188,6 @@ html.annocat-results-ui .about-section {
 
 html.annocat-results-ui .about-section h2 {
   margin: 0;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-body-1);
 }
 
 html.annocat-results-ui .about-use-notice,
@@ -3142,11 +3198,6 @@ html.annocat-results-ui .about-version {
 
 html.annocat-results-ui .about-use-notice {
   max-width: none;
-}
-
-html.annocat-results-ui .about-data-attribution {
-  color: var(--color-text-muted);
-  line-height: 1.5;
 }
 
 html.annocat-results-ui .about-version {
