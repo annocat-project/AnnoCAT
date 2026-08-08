@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "4a02dc5fa98b552eb51bdad04aa29e5a443c6728",
-  "branch": "codex/merge-fastvep-upstream",
+  "commit": "4a2065f6ff20ab89b26eac8d73609f2e21de8724",
+  "branch": "codex/dense-sa-cache",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
   "upstreamVersion": "0.3.0",
   "license": "Apache-2.0",
-  "cargoLockSha256": "65e959e83dd65099df763e64da28cea6db69c1741dad2f4ec483e6e4bba979c7",
+  "cargoLockSha256": "5a600d65a25df9bcf38b8ab8382e2d164fee813c854269c9128ac9d1f0666c46",
   "changes": [
     {
       "commit": "6178fee7ad992dd5d3d1cbd1789cada41eb073ab",
@@ -120,16 +120,21 @@
     {
       "commit": "4a02dc5fa98b552eb51bdad04aa29e5a443c6728",
       "purpose": "Bound dbNSFP OSA2 genomic chunks so wide transcript-vector records stay below the verified decompression limit"
+    },
+    {
+      "commit": "4a2065f6ff20ab89b26eac8d73609f2e21de8724",
+      "upstreamCommit": "dde192c3921fabec019b4bba4f10e590d53969f0",
+      "purpose": "Share thread-scaled, byte-bounded OSA caches and read OSA2 chunks directly from mapped archives while preserving record lists, strict archive validation, and CRC checks"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 7150080,
-    "sha256": "a3308a979ad9c65499fe3d7750e37494ea4c90ab14c7b1278d84550c445be626",
+    "sizeBytes": 7151104,
+    "sha256": "31594296dd5b1ec917e55a905a8b6496413fd7d5d5343fe37763f6afea5828e9",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-08-03",
+  "reviewedOn": "2026-08-07",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP chunks, and record-list lookup for explicitly declared multi-record sources such as dbNSFP while ordinary sources retain deterministic first-match lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact."
+  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP chunks, record-list lookup for explicitly declared multi-record sources, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 chunks are read directly from mapped archives and still receive strict path, size, compression, and CRC validation. Ordinary sources retain deterministic first-match lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact."
 }
