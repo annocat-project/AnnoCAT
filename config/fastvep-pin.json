@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "4a2065f6ff20ab89b26eac8d73609f2e21de8724",
-  "branch": "codex/dense-sa-cache",
+  "commit": "087797922ce0b93f91d0e455c745a28704d300f3",
+  "branch": "codex/dense-sa-cache-parity",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
   "upstreamVersion": "0.3.0",
   "license": "Apache-2.0",
-  "cargoLockSha256": "5a600d65a25df9bcf38b8ab8382e2d164fee813c854269c9128ac9d1f0666c46",
+  "cargoLockSha256": "5fedd8cf8f0b301da6c3f95cf2e7518f6d08b08926ecf3a01008ad676eff96b5",
   "changes": [
     {
       "commit": "6178fee7ad992dd5d3d1cbd1789cada41eb073ab",
@@ -125,16 +125,24 @@
       "commit": "4a2065f6ff20ab89b26eac8d73609f2e21de8724",
       "upstreamCommit": "dde192c3921fabec019b4bba4f10e590d53969f0",
       "purpose": "Share thread-scaled, byte-bounded OSA caches and read OSA2 chunks directly from mapped archives while preserving record lists, strict archive validation, and CRC checks"
+    },
+    {
+      "commit": "4ca5c825f1e058ef92980ab851e990212b9de4f1",
+      "purpose": "Integrate the reviewed fastVEP release correctness, consequence, cache, output, and OSA updates with AnnoCAT's maintained fork"
+    },
+    {
+      "commit": "087797922ce0b93f91d0e455c745a28704d300f3",
+      "purpose": "Preserve gene-scoped SpliceAI and transcript-scoped REVEL records in OSA2, verify exact conversion parity, and project record lists safely"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 7151104,
-    "sha256": "31594296dd5b1ec917e55a905a8b6496413fd7d5d5343fe37763f6afea5828e9",
+    "sizeBytes": 7261184,
+    "sha256": "1c5db4f34974e7f6e3fe299ba46edb777af07436a05d1de7be1842bd28fac474",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-08-07",
+  "reviewedOn": "2026-08-08",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP chunks, record-list lookup for explicitly declared multi-record sources, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 chunks are read directly from mapped archives and still receive strict path, size, compression, and CRC validation. Ordinary sources retain deterministic first-match lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact."
+  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 chunks are read directly from mapped archives and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact."
 }

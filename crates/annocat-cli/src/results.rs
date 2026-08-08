@@ -1517,7 +1517,7 @@ fn parse_structured_record(
                     .get(*alternate)
                     .map(canonical_allele_id)
                     .unwrap_or_else(|| allele_id(&seq_region_name, start, reference, alternate));
-                if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+                if crate::evidence_resolution::is_record_list(source_id, value) {
                     merge_record_list(
                         &mut record_lists,
                         &mut conflicting_record_lists,
@@ -1715,7 +1715,7 @@ fn parse_structured_record(
         for (key, value) in consequence_object {
             if !CONSEQUENCE_FIELDS.contains(&key.as_str()) {
                 let source_id = structured_source_alias(source_aliases, key).unwrap_or(key);
-                if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+                if crate::evidence_resolution::is_record_list(source_id, value) {
                     merge_record_list(
                         &mut record_lists,
                         &mut conflicting_record_lists,
@@ -1814,7 +1814,7 @@ fn parse_structured_record(
             .unwrap_or_else(|| allele_id(&seq_region_name, start, reference, &alternate));
         for (key, value) in &allele_object {
             let source_id = structured_source_alias(source_aliases, key).unwrap_or(key);
-            if crate::evidence_resolution::is_bundled_record_list(source_id, value) {
+            if crate::evidence_resolution::is_record_list(source_id, value) {
                 merge_record_list(
                     &mut record_lists,
                     &mut conflicting_record_lists,
@@ -1883,7 +1883,7 @@ fn parse_structured_record(
         let Some(selected_index) = selected_consequences.get(&allele_id).copied() else {
             continue;
         };
-        let Some(resolved) = crate::evidence_resolution::resolve_bundled_record_list(
+        let Some(resolved) = crate::evidence_resolution::resolve_record_list(
             &source_id,
             &value,
             &structured_consequences[selected_index].1,
@@ -2369,8 +2369,9 @@ fn write_structured_catalog(
                 "observedTypes": entry.types,
                 "occurrences": entry.occurrences,
             });
-            if let Some(biological_scope) =
-                crate::evidence_resolution::bundled_record_field_scope(source_id, field_path)
+            if let Some(biological_scope) = (scope == "selected" || source_id == "dbnsfp")
+                .then(|| crate::evidence_resolution::record_field_scope(source_id, field_path))
+                .flatten()
             {
                 let selected = scope == "selected";
                 field["biologicalScope"] = Value::String(biological_scope.into());
@@ -2423,10 +2424,7 @@ fn write_structured_catalog(
         })
         .collect::<Vec<_>>();
     let alignment_groups = crate::evidence_resolution::catalog_alignment_groups(&fields);
-    let record_resolution_contracts =
-        crate::evidence_resolution::bundled_record_resolution_contract()
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
+    let record_resolution_contracts = crate::evidence_resolution::record_resolution_contracts();
     fs::write(
         catalog_json,
         serde_json::to_vec_pretty(&json!({
@@ -6059,7 +6057,7 @@ fn selected_evidence_columns(
     let fields = catalog["fields"]
         .as_array()
         .ok_or("field catalog has no fields array")?;
-    let current_record_contract = crate::evidence_resolution::bundled_record_resolution_contract();
+    let current_record_contracts = crate::evidence_resolution::record_resolution_contracts();
     indices
         .iter()
         .map(|index| {
@@ -6096,14 +6094,13 @@ fn selected_evidence_columns(
                 )
                 .is_some();
             let record_aligned =
-                crate::evidence_resolution::bundled_record_field_is_aligned(source_id, field_path);
+                crate::evidence_resolution::record_field_is_aligned(source_id, field_path);
             let record_contract_is_current =
-                current_record_contract
-                    .as_ref()
-                    .is_some_and(|(contract_source, contract_id)| {
-                        contract_source == source_id
-                            && catalog["recordResolutionContracts"][source_id].as_str()
-                                == Some(contract_id)
+                current_record_contracts
+                    .get(source_id)
+                    .is_some_and(|contract_id| {
+                        catalog["recordResolutionContracts"][source_id].as_str()
+                            == Some(contract_id.as_str())
                     });
             let resolution_policy = field["resolutionPolicy"].as_str();
             let resolution = if resolution_policy == Some("derivedSpliceAiMaximum") {
@@ -10671,6 +10668,83 @@ mod tests {
                     && !value.contains("revel")
                     && !value.contains("spliceai"))
         );
+    }
+
+    #[test]
+    fn structured_record_lists_resolve_the_selected_gene_and_transcript() {
+        let record = StructuredRecord {
+            line_number: 1,
+            line: json!({
+                "allele_string": "A/G",
+                "start": 100,
+                "seq_region_name": "1",
+                "spliceai": [
+                    {"gene": "GENE1", "dsAg": 0.1, "dpAg": 8},
+                    {"gene": "GENE2", "dsAg": 0.9, "dpAg": -49}
+                ],
+                "revel": [
+                    {"transcriptId": "ENST1", "aaRef": "R", "aaAlt": "H", "score": 0.2},
+                    {"transcriptId": "ENST2", "aaRef": "Arg", "aaAlt": "His", "score": 0.8}
+                ],
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "transcript_id": "ENST1",
+                    "gene_symbol": "GENE1",
+                    "canonical": 1,
+                    "amino_acids": "R/H",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }, {
+                    "variant_allele": "G",
+                    "transcript_id": "ENST2.4",
+                    "gene_symbol": "GENE2",
+                    "mane_select": "NM_2",
+                    "amino_acids": "R/H",
+                    "consequence_terms": ["missense_variant"],
+                    "impact": "MODERATE"
+                }]
+            })
+            .to_string(),
+            canonical_alleles: BTreeMap::new(),
+        };
+
+        let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
+        let selected_value = |source: &str, field: &str| {
+            parsed
+                .evidence
+                .source_id
+                .iter()
+                .enumerate()
+                .find_map(|(index, candidate)| {
+                    (candidate == source
+                        && parsed.evidence.field_path[index] == field
+                        && parsed.evidence.scope[index] == "selected")
+                        .then_some(
+                            parsed.evidence.number_value[index]
+                                .or(parsed.evidence.integer_value[index].map(|value| value as f64)),
+                        )
+                })
+                .flatten()
+        };
+        assert_eq!(selected_value("spliceai", "dsAg"), Some(0.9));
+        assert_eq!(selected_value("spliceai", "dpAg"), Some(-49.0));
+        assert_eq!(selected_value("revel", "score"), Some(0.8));
+        for source in ["spliceai", "revel"] {
+            assert_eq!(
+                parsed
+                    .evidence
+                    .source_id
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, candidate)| {
+                        *candidate == source
+                            && parsed.evidence.scope[*index] == "source_records"
+                            && parsed.evidence.field_path[*index] == "__recordList"
+                    })
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

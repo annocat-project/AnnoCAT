@@ -1013,7 +1013,7 @@ pub(crate) fn resolve_record_evidence(
         let scope = row["scope"].as_str().unwrap_or_default();
         !(record_sources.contains(source_id)
             && matches!(scope, "selected" | "transcript")
-            && crate::evidence_resolution::bundled_record_field_is_selected(
+            && crate::evidence_resolution::record_field_is_selected(
                 source_id,
                 row["fieldPath"].as_str().unwrap_or_default(),
             ))
@@ -1030,26 +1030,22 @@ pub(crate) fn resolve_record_evidence(
         .collect::<Vec<_>>();
     for (source_id, records) in &record_lists {
         for (consequence_id, consequence) in &contexts {
-            let Some(resolved) = crate::evidence_resolution::resolve_bundled_record_list(
-                source_id,
-                records,
-                consequence,
-            )?
+            let Some(resolved) =
+                crate::evidence_resolution::resolve_record_list(source_id, records, consequence)?
             else {
                 continue;
             };
             for field in resolved.fields.into_iter().filter(|field| {
                 field.scope == crate::evidence_resolution::ResolvedRecordScope::Selected
             }) {
-                let source_cardinality =
-                    if crate::evidence_resolution::bundled_record_field_is_aligned(
-                        source_id,
-                        &field.field_path,
-                    ) {
-                        "alignedVector"
-                    } else {
-                        "recordScalar"
-                    };
+                let source_cardinality = if crate::evidence_resolution::record_field_is_aligned(
+                    source_id,
+                    &field.field_path,
+                ) {
+                    "alignedVector"
+                } else {
+                    "recordScalar"
+                };
                 let value_type = match &field.value {
                     Value::String(_) => "string",
                     Value::Number(value) if value.is_i64() || value.is_u64() => "integer",

@@ -91,22 +91,29 @@
     },
     {
       "resourceId": "spliceai",
-      "contractId": "spliceai-fastvep-fields-v1",
+      "contractId": "spliceai-fastvep-fields-v2",
       "groups": [
+        {
+          "id": "identity",
+          "label": "Gene matching",
+          "default": true,
+          "required": true,
+          "fields": ["gene"]
+        },
         {
           "id": "predictions",
           "label": "SpliceAI predictions",
           "default": true,
-          "fields": ["gene", "dsAg", "dsAl", "dsDg", "dsDl", "dpAg", "dpAl", "dpDg", "dpDl"]
+          "fields": ["dsAg", "dsAl", "dsDg", "dsDl", "dpAg", "dpAl", "dpDg", "dpDl"]
         }
       ]
     },
     {
       "resourceId": "revel",
-      "contractId": "revel-fastvep-fields-v1",
+      "contractId": "revel-fastvep-fields-v2",
       "groups": [
-        { "id": "current", "label": "Current AnnoCAT fields", "default": true, "fields": ["score", "transcriptId"] },
-        { "id": "additional", "label": "Additional amino-acid fields", "default": false, "fields": ["aaRef", "aaAlt"] }
+        { "id": "identity", "label": "Transcript matching", "default": true, "required": true, "fields": ["transcriptId", "aaRef", "aaAlt"] },
+        { "id": "score", "label": "REVEL score", "default": true, "fields": ["score"] }
       ]
     }
   ]

@@ -501,12 +501,12 @@
       "id": "spliceai",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
-      "preferredCacheFormat": "osa",
-      "adapterContract": "annocat-spliceai-v1",
+      "preferredCacheFormat": "osa2",
+      "adapterContract": "annocat-spliceai-record-list-v2",
       "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
         "manifestRef": "config/supplementary-source-fields.json",
-        "contractId": "spliceai-fastvep-fields-v1"
+        "contractId": "spliceai-fastvep-fields-v2"
       },
       "release": {
         "version": "ensembl-mane-v1.4-masked-snv",
@@ -527,11 +527,11 @@
       "assembly": "GRCh38",
       "delivery": "stream-cache",
       "preferredCacheFormat": "osa2",
-      "adapterContract": "annocat-revel-v1",
+      "adapterContract": "annocat-revel-record-list-v2",
       "manifestRef": "config/revel-1.3-archives.json",
       "fieldContract": {
         "manifestRef": "config/supplementary-source-fields.json",
-        "contractId": "revel-fastvep-fields-v1"
+        "contractId": "revel-fastvep-fields-v2"
       },
       "release": {
         "version": "1.3",

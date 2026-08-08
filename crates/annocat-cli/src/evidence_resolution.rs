@@ -120,11 +120,18 @@ struct RecordResolutionSpec {
     id: String,
     source_id: String,
     raw_field_path: String,
+    selector: RecordSelector,
     transcript_ids_unversioned: bool,
     stable_transcript_match_requires_peptide_compatibility: bool,
     missing_values: Vec<String>,
     identity: RecordIdentityContract,
     fields: BTreeMap<String, RecordFieldSpec>,
+}
+
+#[derive(Clone, Debug)]
+enum RecordSelector {
+    Transcript,
+    Gene { field: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +173,8 @@ pub(crate) struct RequestedField {
 
 static BUNDLED_SPEC: OnceLock<Result<AlignmentSpec, String>> = OnceLock::new();
 static BUNDLED_RECORD_SPEC: OnceLock<Result<RecordResolutionSpec, String>> = OnceLock::new();
+static SPLICEAI_RECORD_SPEC: OnceLock<RecordResolutionSpec> = OnceLock::new();
+static REVEL_RECORD_SPEC: OnceLock<RecordResolutionSpec> = OnceLock::new();
 static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn bundled_spec() -> Result<AlignmentSpec, String> {
@@ -220,167 +229,265 @@ fn bundled_spec() -> Result<AlignmentSpec, String> {
         .clone()
 }
 
-fn bundled_record_spec() -> Result<RecordResolutionSpec, String> {
-    BUNDLED_RECORD_SPEC
-        .get_or_init(|| {
-            let contract: Contract = serde_json::from_str(include_str!(
-                "../../../config/dbnsfp-4.9a-curated-fields.json"
-            ))
-            .map_err(|error| format!("invalid bundled record resolution contract: {error}"))?;
-            let resolution = contract.record_resolution;
-            if resolution.raw_field_path.is_empty()
-                || resolution.raw_field_path.len() > 200
-                || resolution.missing_values.len() > 16
+fn bundled_record_spec() -> Result<&'static RecordResolutionSpec, String> {
+    match BUNDLED_RECORD_SPEC.get_or_init(|| {
+        let contract: Contract = serde_json::from_str(include_str!(
+            "../../../config/dbnsfp-4.9a-curated-fields.json"
+        ))
+        .map_err(|error| format!("invalid bundled record resolution contract: {error}"))?;
+        let resolution = contract.record_resolution;
+        if resolution.raw_field_path.is_empty()
+            || resolution.raw_field_path.len() > 200
+            || resolution.missing_values.len() > 16
+        {
+            return Err("bundled record resolution contract is unsupported".into());
+        }
+        let excluded = contract
+            .legacy_transcript_alignment
+            .excluded_fields
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let expected = contract
+            .groups
+            .into_iter()
+            .flat_map(|group| group.fields)
+            .filter(|field| !excluded.contains(field))
+            .collect::<BTreeSet<_>>();
+        let mut fields = BTreeMap::new();
+        for group in resolution.field_groups {
+            if group.cardinality == RecordCardinality::AlignedVector
+                && (group.identity_field.as_deref().is_none_or(str::is_empty)
+                    || group
+                        .identity_separator
+                        .as_deref()
+                        .is_none_or(str::is_empty)
+                    || group.value_separator.as_deref().is_none_or(str::is_empty))
             {
-                return Err("bundled record resolution contract is unsupported".into());
+                return Err("aligned record fields require identity and delimiters".into());
             }
-            let excluded = contract
-                .legacy_transcript_alignment
-                .excluded_fields
-                .into_iter()
-                .collect::<HashSet<_>>();
-            let expected = contract
-                .groups
-                .into_iter()
-                .flat_map(|group| group.fields)
-                .filter(|field| !excluded.contains(field))
-                .collect::<BTreeSet<_>>();
-            let mut fields = BTreeMap::new();
-            for group in resolution.field_groups {
-                if group.cardinality == RecordCardinality::AlignedVector
-                    && (group.identity_field.as_deref().is_none_or(str::is_empty)
-                        || group
-                            .identity_separator
-                            .as_deref()
-                            .is_none_or(str::is_empty)
-                        || group.value_separator.as_deref().is_none_or(str::is_empty))
+            for separator in [
+                group.identity_separator.as_deref(),
+                group.value_separator.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if separator.len() > 4 {
+                    return Err("record field delimiter is too long".into());
+                }
+            }
+            for field in group.fields {
+                if fields
+                    .insert(
+                        field,
+                        RecordFieldSpec {
+                            cardinality: group.cardinality,
+                            identity_field: group.identity_field.clone(),
+                            identity_separator: group.identity_separator.clone(),
+                            value_separator: group.value_separator.clone(),
+                        },
+                    )
+                    .is_some()
                 {
-                    return Err("aligned record fields require identity and delimiters".into());
-                }
-                for separator in [
-                    group.identity_separator.as_deref(),
-                    group.value_separator.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if separator.len() > 4 {
-                        return Err("record field delimiter is too long".into());
-                    }
-                }
-                for field in group.fields {
-                    if fields
-                        .insert(
-                            field,
-                            RecordFieldSpec {
-                                cardinality: group.cardinality,
-                                identity_field: group.identity_field.clone(),
-                                identity_separator: group.identity_separator.clone(),
-                                value_separator: group.value_separator.clone(),
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(
-                            "record resolution contract classifies a field more than once".into(),
-                        );
-                    }
+                    return Err(
+                        "record resolution contract classifies a field more than once".into(),
+                    );
                 }
             }
-            let actual = fields.keys().cloned().collect::<BTreeSet<_>>();
-            if actual != expected {
-                return Err("record resolution contract does not cover retained fields".into());
+        }
+        let actual = fields.keys().cloned().collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err("record resolution contract does not cover retained fields".into());
+        }
+        for identity_field in [
+            &resolution.record_identity.transcript_field,
+            &resolution.record_identity.protein_field,
+            &resolution.record_identity.uniprot_accession_field,
+            &resolution.record_identity.uniprot_entry_field,
+            &resolution.record_identity.reference_amino_acid_field,
+            &resolution.record_identity.alternate_amino_acid_field,
+            &resolution.record_identity.amino_acid_position_field,
+            &resolution.record_identity.hgvsp_field,
+        ] {
+            if !fields.contains_key(identity_field) {
+                return Err("record resolution identity field is not retained".into());
             }
-            for identity_field in [
-                &resolution.record_identity.transcript_field,
-                &resolution.record_identity.protein_field,
-                &resolution.record_identity.uniprot_accession_field,
-                &resolution.record_identity.uniprot_entry_field,
-                &resolution.record_identity.reference_amino_acid_field,
-                &resolution.record_identity.alternate_amino_acid_field,
-                &resolution.record_identity.amino_acid_position_field,
-                &resolution.record_identity.hgvsp_field,
-            ] {
-                if !fields.contains_key(identity_field) {
-                    return Err("record resolution identity field is not retained".into());
-                }
-            }
-            Ok(RecordResolutionSpec {
-                id: resolution.id,
-                source_id: resolution.source_id,
-                raw_field_path: resolution.raw_field_path,
-                transcript_ids_unversioned: resolution.transcript_ids_unversioned,
-                stable_transcript_match_requires_peptide_compatibility: resolution
-                    .stable_transcript_match_requires_peptide_compatibility,
-                missing_values: resolution.missing_values,
-                identity: resolution.record_identity,
-                fields,
-            })
+        }
+        Ok(RecordResolutionSpec {
+            id: resolution.id,
+            source_id: resolution.source_id,
+            raw_field_path: resolution.raw_field_path,
+            selector: RecordSelector::Transcript,
+            transcript_ids_unversioned: resolution.transcript_ids_unversioned,
+            stable_transcript_match_requires_peptide_compatibility: resolution
+                .stable_transcript_match_requires_peptide_compatibility,
+            missing_values: resolution.missing_values,
+            identity: resolution.record_identity,
+            fields,
         })
-        .clone()
+    }) {
+        Ok(spec) => Ok(spec),
+        Err(error) => Err(error.clone()),
+    }
 }
 
-pub(crate) fn bundled_record_resolution_contract() -> Option<(String, String)> {
-    bundled_record_spec()
-        .ok()
-        .map(|spec| (spec.source_id, spec.id))
+fn simple_record_fields(selected: &[&str], opaque: &[&str]) -> BTreeMap<String, RecordFieldSpec> {
+    selected
+        .iter()
+        .map(|field| {
+            (
+                (*field).to_owned(),
+                RecordFieldSpec {
+                    cardinality: RecordCardinality::RecordScalar,
+                    identity_field: None,
+                    identity_separator: None,
+                    value_separator: None,
+                },
+            )
+        })
+        .chain(opaque.iter().map(|field| {
+            (
+                (*field).to_owned(),
+                RecordFieldSpec {
+                    cardinality: RecordCardinality::OpaqueList,
+                    identity_field: None,
+                    identity_separator: None,
+                    value_separator: None,
+                },
+            )
+        }))
+        .collect()
 }
 
-pub(crate) fn is_bundled_record_list(source_id: &str, value: &Value) -> bool {
-    bundled_record_spec().is_ok_and(|spec| {
-        spec.source_id == source_id
+fn empty_record_identity(transcript_field: &str) -> RecordIdentityContract {
+    RecordIdentityContract {
+        transcript_field: transcript_field.into(),
+        protein_field: String::new(),
+        uniprot_accession_field: String::new(),
+        uniprot_entry_field: String::new(),
+        reference_amino_acid_field: String::new(),
+        alternate_amino_acid_field: String::new(),
+        amino_acid_position_field: String::new(),
+        hgvsp_field: String::new(),
+    }
+}
+
+fn spliceai_record_spec() -> &'static RecordResolutionSpec {
+    SPLICEAI_RECORD_SPEC.get_or_init(|| RecordResolutionSpec {
+        id: "spliceai-gene-record-resolution-v1".into(),
+        source_id: "spliceai".into(),
+        raw_field_path: "__recordList".into(),
+        selector: RecordSelector::Gene {
+            field: "gene".into(),
+        },
+        transcript_ids_unversioned: false,
+        stable_transcript_match_requires_peptide_compatibility: false,
+        missing_values: vec!["".into(), ".".into(), "-".into()],
+        identity: empty_record_identity(""),
+        fields: simple_record_fields(
+            &[
+                "dsAg", "dsAl", "dsDg", "dsDl", "dpAg", "dpAl", "dpDg", "dpDl",
+            ],
+            &["gene"],
+        ),
+    })
+}
+
+fn revel_record_spec() -> &'static RecordResolutionSpec {
+    REVEL_RECORD_SPEC.get_or_init(|| {
+        let mut identity = empty_record_identity("transcriptId");
+        identity.reference_amino_acid_field = "aaRef".into();
+        identity.alternate_amino_acid_field = "aaAlt".into();
+        RecordResolutionSpec {
+            id: "revel-transcript-record-resolution-v1".into(),
+            source_id: "revel".into(),
+            raw_field_path: "__recordList".into(),
+            selector: RecordSelector::Transcript,
+            transcript_ids_unversioned: true,
+            stable_transcript_match_requires_peptide_compatibility: true,
+            missing_values: vec!["".into(), ".".into(), "-".into(), "NA".into()],
+            identity,
+            fields: simple_record_fields(&["score"], &["transcriptId", "aaRef", "aaAlt"]),
+        }
+    })
+}
+
+fn record_spec(source_id: &str) -> Result<Option<&'static RecordResolutionSpec>, String> {
+    match source_id {
+        "dbnsfp" => bundled_record_spec().map(Some),
+        "spliceai" => Ok(Some(spliceai_record_spec())),
+        "revel" => Ok(Some(revel_record_spec())),
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn record_resolution_contracts() -> BTreeMap<String, String> {
+    ["dbnsfp", "spliceai", "revel"]
+        .into_iter()
+        .filter_map(|source_id| {
+            record_spec(source_id)
+                .ok()
+                .flatten()
+                .map(|spec| (spec.source_id.clone(), spec.id.clone()))
+        })
+        .collect()
+}
+
+pub(crate) fn is_record_list(source_id: &str, value: &Value) -> bool {
+    record_spec(source_id).is_ok_and(|spec| {
+        spec.is_some()
             && value
                 .as_array()
                 .is_some_and(|records| records.iter().all(Value::is_object))
     })
 }
 
-pub(crate) fn bundled_record_field_scope(
-    source_id: &str,
-    field_path: &str,
-) -> Option<&'static str> {
-    let spec = bundled_record_spec().ok()?;
-    let field = (spec.source_id == source_id)
-        .then(|| spec.fields.get(field_path))
-        .flatten()?;
+pub(crate) fn record_field_scope(source_id: &str, field_path: &str) -> Option<&'static str> {
+    let spec = record_spec(source_id).ok()??;
+    let field = spec.fields.get(field_path)?;
     match field.cardinality {
         RecordCardinality::AlleleScalar => Some("allele"),
-        RecordCardinality::RecordScalar | RecordCardinality::AlignedVector => Some("transcript"),
+        RecordCardinality::RecordScalar | RecordCardinality::AlignedVector => {
+            Some(match &spec.selector {
+                RecordSelector::Gene { .. } => "gene",
+                RecordSelector::Transcript => "transcript",
+            })
+        }
         RecordCardinality::OpaqueList => None,
     }
 }
 
-pub(crate) fn bundled_record_field_is_aligned(source_id: &str, field_path: &str) -> bool {
-    bundled_record_spec().is_ok_and(|spec| {
-        spec.source_id == source_id
-            && spec
-                .fields
+pub(crate) fn record_field_is_aligned(source_id: &str, field_path: &str) -> bool {
+    record_spec(source_id).is_ok_and(|spec| {
+        spec.is_some_and(|spec| {
+            spec.fields
                 .get(field_path)
                 .is_some_and(|field| field.cardinality == RecordCardinality::AlignedVector)
+        })
     })
 }
 
-pub(crate) fn bundled_record_field_is_selected(source_id: &str, field_path: &str) -> bool {
-    bundled_record_spec().is_ok_and(|spec| {
-        spec.source_id == source_id
-            && spec.fields.get(field_path).is_some_and(|field| {
+pub(crate) fn record_field_is_selected(source_id: &str, field_path: &str) -> bool {
+    record_spec(source_id).is_ok_and(|spec| {
+        spec.is_some_and(|spec| {
+            spec.fields.get(field_path).is_some_and(|field| {
                 matches!(
                     field.cardinality,
                     RecordCardinality::RecordScalar | RecordCardinality::AlignedVector
                 )
             })
+        })
     })
 }
 
-pub(crate) fn resolve_bundled_record_list(
+pub(crate) fn resolve_record_list(
     source_id: &str,
     value: &Value,
     selected_consequence: &Map<String, Value>,
 ) -> Result<Option<ResolvedRecordList>, String> {
-    let spec = bundled_record_spec()?;
-    if spec.source_id != source_id {
+    let Some(spec) = record_spec(source_id)? else {
         return Ok(None);
-    }
+    };
     let records = value
         .as_array()
         .ok_or("record-list source payload is not an array")?;
@@ -400,14 +507,11 @@ pub(crate) fn resolve_bundled_record_list(
         raw_records.push(Value::Object(record));
     }
 
-    let transcript = consequence_string(selected_consequence, "transcript_id");
-    let eligible = transcript.map_or_else(Vec::new, |transcript| {
-        records
-            .iter()
-            .filter_map(Value::as_object)
-            .filter_map(|record| eligible_record(&spec, record, transcript, selected_consequence))
-            .collect::<Vec<_>>()
-    });
+    let eligible = records
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|record| eligible_record(&spec, record, selected_consequence))
+        .collect::<Vec<_>>();
     let mut fields = Vec::new();
     for (field_path, field_spec) in &spec.fields {
         let resolved = match field_spec.cardinality {
@@ -438,7 +542,7 @@ pub(crate) fn resolve_bundled_record_list(
         }
     }
     Ok(Some(ResolvedRecordList {
-        raw_field_path: spec.raw_field_path,
+        raw_field_path: spec.raw_field_path.clone(),
         raw_value: Value::Array(raw_records),
         fields,
     }))
@@ -453,9 +557,20 @@ struct EligibleRecord<'a> {
 fn eligible_record<'a>(
     spec: &RecordResolutionSpec,
     record: &'a Map<String, Value>,
-    selected_transcript: &str,
     selected_consequence: &Map<String, Value>,
 ) -> Option<EligibleRecord<'a>> {
+    if let RecordSelector::Gene { field } = &spec.selector {
+        let source_gene = record_nonmissing_string(spec, record, field)?;
+        let matches = ["gene_symbol", "gene_id"]
+            .into_iter()
+            .filter_map(|key| consequence_string(selected_consequence, key))
+            .any(|candidate| source_gene.eq_ignore_ascii_case(candidate));
+        return matches.then_some(EligibleRecord {
+            object: record,
+            transcript_index: 0,
+        });
+    }
+    let selected_transcript = consequence_string(selected_consequence, "transcript_id")?;
     let transcripts = split_record_field(spec, record.get(&spec.identity.transcript_field)?, ";")?;
     let transcript_index = unique_identity_index(
         &transcripts,
@@ -488,9 +603,9 @@ fn peptide_context_matches(
 ) -> bool {
     if let Some((reference, alternate)) = consequence_amino_acids(selected) {
         if record_nonmissing_string(spec, record, &spec.identity.reference_amino_acid_field)
-            .is_some_and(|value| !value.eq_ignore_ascii_case(reference))
+            .is_some_and(|value| !amino_acids_match(value, reference))
             || record_nonmissing_string(spec, record, &spec.identity.alternate_amino_acid_field)
-                .is_some_and(|value| !value.eq_ignore_ascii_case(alternate))
+                .is_some_and(|value| !amino_acids_match(value, alternate))
         {
             return false;
         }
@@ -740,9 +855,7 @@ fn unique_identity_index(values: &[&str], target: &str, allow_stable: bool) -> O
     let matches = values
         .iter()
         .enumerate()
-        .filter(|(_, value)| {
-            stable_transcript_id(value) == stable && (!value.contains('.') || **value == target)
-        })
+        .filter(|(_, value)| stable_transcript_id(value) == stable)
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     (matches.len() == 1).then(|| matches[0])
@@ -769,6 +882,40 @@ fn consequence_u64(consequence: &Map<String, Value>, field: &str) -> Option<u64>
 
 fn consequence_amino_acids(consequence: &Map<String, Value>) -> Option<(&str, &str)> {
     consequence_string(consequence, "amino_acids")?.split_once('/')
+}
+
+fn amino_acids_match(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || amino_acid_code(left)
+            .zip(amino_acid_code(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn amino_acid_code(value: &str) -> Option<char> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "A" | "ALA" => Some('A'),
+        "R" | "ARG" => Some('R'),
+        "N" | "ASN" => Some('N'),
+        "D" | "ASP" => Some('D'),
+        "C" | "CYS" => Some('C'),
+        "E" | "GLU" => Some('E'),
+        "Q" | "GLN" => Some('Q'),
+        "G" | "GLY" => Some('G'),
+        "H" | "HIS" => Some('H'),
+        "I" | "ILE" => Some('I'),
+        "L" | "LEU" => Some('L'),
+        "K" | "LYS" => Some('K'),
+        "M" | "MET" => Some('M'),
+        "F" | "PHE" => Some('F'),
+        "P" | "PRO" => Some('P'),
+        "S" | "SER" => Some('S'),
+        "T" | "THR" => Some('T'),
+        "W" | "TRP" => Some('W'),
+        "Y" | "TYR" => Some('Y'),
+        "V" | "VAL" => Some('V'),
+        "*" | "TER" | "STOP" => Some('*'),
+        _ => None,
+    }
 }
 
 fn record_nonmissing_string<'a>(
@@ -2028,7 +2175,7 @@ mod tests {
             "CADD_phred": "20",
             "Interpro_domain": "raw-only"
         }]);
-        let resolved = resolve_bundled_record_list("dbnsfp", &payload, &selected_consequence())
+        let resolved = resolve_record_list("dbnsfp", &payload, &selected_consequence())
             .unwrap()
             .unwrap();
 
@@ -2086,7 +2233,7 @@ mod tests {
             .as_object()
             .cloned()
             .unwrap();
-            let resolved = resolve_bundled_record_list("dbnsfp", &payload, &selected)
+            let resolved = resolve_record_list("dbnsfp", &payload, &selected)
                 .unwrap()
                 .unwrap();
 
@@ -2136,7 +2283,7 @@ mod tests {
                 "CADD_phred": "20.0"
             }
         ]);
-        let resolved = resolve_bundled_record_list("dbnsfp", &payload, &selected_consequence())
+        let resolved = resolve_record_list("dbnsfp", &payload, &selected_consequence())
             .unwrap()
             .unwrap();
 
@@ -2161,7 +2308,7 @@ mod tests {
             "AlphaMissense_score": "0.9",
             "CADD_phred": "25"
         }]);
-        let resolved = resolve_bundled_record_list("dbnsfp", &payload, &selected_consequence())
+        let resolved = resolve_record_list("dbnsfp", &payload, &selected_consequence())
             .unwrap()
             .unwrap();
 
@@ -2171,5 +2318,73 @@ mod tests {
             resolved_field(&resolved, "CADD_phred").map(|field| field.scope),
             Some(ResolvedRecordScope::Allele)
         );
+    }
+
+    #[test]
+    fn spliceai_record_lists_follow_the_selected_gene() {
+        let payload = json!([
+            {"gene": "MTOR", "dsAg": 0.9, "dpAg": -49},
+            {"gene": "KIF5B", "dsAg": 0.04, "dpAg": 8}
+        ]);
+        let selected = json!({"gene_symbol": "MTOR"}).as_object().cloned().unwrap();
+        let resolved = resolve_record_list("spliceai", &payload, &selected)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved_field(&resolved, "dsAg").map(|field| &field.value),
+            Some(&json!(0.9))
+        );
+        assert_eq!(
+            resolved_field(&resolved, "dpAg").map(|field| &field.value),
+            Some(&json!(-49))
+        );
+        assert!(resolved_field(&resolved, "gene").is_none());
+        assert_eq!(record_field_scope("spliceai", "dsAg"), Some("gene"));
+    }
+
+    #[test]
+    fn spliceai_record_lists_omit_conflicting_gene_values() {
+        let payload = json!([
+            {"gene": "MTOR", "dsAg": 0.9},
+            {"gene": "MTOR", "dsAg": 0.4}
+        ]);
+        let selected = json!({"gene_symbol": "MTOR"}).as_object().cloned().unwrap();
+        let resolved = resolve_record_list("spliceai", &payload, &selected)
+            .unwrap()
+            .unwrap();
+
+        assert!(resolved_field(&resolved, "dsAg").is_none());
+    }
+
+    #[test]
+    fn revel_record_lists_require_the_selected_transcript_and_peptide() {
+        let payload = json!([
+            {"transcriptId": "ENST1", "aaRef": "Arg", "aaAlt": "His", "score": 0.1},
+            {"transcriptId": "ENST2.3", "aaRef": "Arg", "aaAlt": "His", "score": 0.8}
+        ]);
+        let resolved = resolve_record_list("revel", &payload, &selected_consequence())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved_field(&resolved, "score").map(|field| &field.value),
+            Some(&json!(0.8))
+        );
+
+        let mut mismatch = selected_consequence();
+        mismatch.insert("amino_acids".into(), json!("R/Q"));
+        let unresolved = resolve_record_list("revel", &payload, &mismatch)
+            .unwrap()
+            .unwrap();
+        assert!(resolved_field(&unresolved, "score").is_none());
+    }
+
+    #[test]
+    fn record_resolution_contracts_are_source_keyed() {
+        let contracts = record_resolution_contracts();
+        assert_eq!(contracts.len(), 3);
+        assert!(contracts.contains_key("dbnsfp"));
+        assert!(contracts.contains_key("spliceai"));
+        assert!(contracts.contains_key("revel"));
     }
 }
