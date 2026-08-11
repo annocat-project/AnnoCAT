@@ -4318,9 +4318,9 @@ fn append_evidence_field_parameters(
 fn evidence_sort_parameters(sort: &EvidenceSortSpec) -> Vec<SqlValue> {
     let mut parameters = sort.evidence_parameters.clone();
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect
-        || (sort.field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
-            && !is_query_projection(Path::new(&sort.evidence)))
-        || uses_resolution_sidecar(sort.field.resolution)
+        || (!is_query_projection(Path::new(&sort.evidence))
+            && (sort.field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+                || uses_resolution_sidecar(sort.field.resolution)))
     {
         parameters.push(sort.field.source_id.clone().into());
         parameters.push(sort.field.field_path.clone().into());
@@ -4388,20 +4388,6 @@ fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
             ),
         );
     }
-    if uses_resolution_sidecar(sort.field.resolution) {
-        let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
-        return evidence_sort_sql(
-            sort,
-            format!(
-                "(SELECT {} FROM read_parquet(?) ev_sort
-              WHERE ev_sort.allele_id = v.allele_id
-                AND ev_sort.source_id = ? AND ev_sort.field_path = ?
-                AND {}
-              LIMIT 1)",
-                sort.value_expression, resolution
-            ),
-        );
-    }
     let field_condition =
         evidence_field_condition(&sort.field, "ev_sort", Path::new(&sort.evidence));
     if is_query_projection(Path::new(&sort.evidence)) {
@@ -4413,6 +4399,20 @@ fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
                 AND ev_sort.alt_index = v.alt_index AND {}
               LIMIT 1)",
                 sort.value_expression, field_condition
+            ),
+        );
+    }
+    if uses_resolution_sidecar(sort.field.resolution) {
+        let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "(SELECT {} FROM read_parquet(?) ev_sort
+              WHERE ev_sort.allele_id = v.allele_id
+                AND ev_sort.source_id = ? AND ev_sort.field_path = ?
+                AND {}
+              LIMIT 1)",
+                sort.value_expression, resolution
             ),
         );
     }
@@ -4476,22 +4476,6 @@ fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
             ),
         );
     }
-    if uses_resolution_sidecar(sort.field.resolution) {
-        let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
-        return evidence_sort_sql(
-            sort,
-            format!(
-                "WITH scored_evidence AS (
-               SELECT allele_id, {} AS sort_value
-               FROM read_parquet(?) ev_sort
-               WHERE ev_sort.source_id = ? AND ev_sort.field_path = ?
-                 AND {}
-                 AND {} IS NOT NULL
-             )",
-                sort.value_expression, resolution, sort.value_expression
-            ),
-        );
-    }
     let field_condition =
         evidence_field_condition(&sort.field, "ev_sort", Path::new(&sort.evidence));
     if is_query_projection(Path::new(&sort.evidence)) {
@@ -4509,6 +4493,22 @@ fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
                FROM evidence_values WHERE sort_value IS NOT NULL
              )",
                 sort.value_expression, field_condition
+            ),
+        );
+    }
+    if uses_resolution_sidecar(sort.field.resolution) {
+        let resolution = resolution_kind_condition(sort.field.resolution, "ev_sort");
+        return evidence_sort_sql(
+            sort,
+            format!(
+                "WITH scored_evidence AS (
+               SELECT allele_id, {} AS sort_value
+               FROM read_parquet(?) ev_sort
+               WHERE ev_sort.source_id = ? AND ev_sort.field_path = ?
+                 AND {}
+                 AND {} IS NOT NULL
+             )",
+                sort.value_expression, resolution, sort.value_expression
             ),
         );
     }
@@ -5020,7 +5020,7 @@ fn evidence_filter_rules_sql(
             parameters.extend(values);
             continue;
         }
-        if uses_resolution_sidecar(field.resolution) {
+        if uses_resolution_sidecar(field.resolution) && !is_query_projection(evidence) {
             let resolved =
                 crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
                     .ok_or("transcript evidence index is not ready")?;
@@ -5168,9 +5168,9 @@ fn displayed_field_search_sql(
                     field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
                         && !is_query_projection(evidence)
                 });
-            let (resolved_fields, raw): (Vec<_>, Vec<_>) = fields
-                .into_iter()
-                .partition(|field| uses_resolution_sidecar(field.resolution));
+            let (resolved_fields, raw): (Vec<_>, Vec<_>) = fields.into_iter().partition(|field| {
+                uses_resolution_sidecar(field.resolution) && !is_query_projection(evidence)
+            });
             if !gene_fields.is_empty() {
                 connection
                     .execute_batch(
@@ -5384,7 +5384,22 @@ fn prepare_requested_evidence_resolution(
         return Ok(None);
     }
     let selected = selected_evidence_columns(catalog, &indices)?;
-    let requested = selected
+    let requested = requested_resolution_fields(selected);
+    if requested.is_empty() {
+        return Ok(None);
+    }
+    crate::evidence_resolution::prepare(
+        variants,
+        &canonical_evidence_path(evidence),
+        catalog,
+        &requested,
+    )
+}
+
+fn requested_resolution_fields(
+    selected: impl IntoIterator<Item = SelectedEvidenceColumn>,
+) -> Vec<crate::evidence_resolution::RequestedField> {
+    selected
         .into_iter()
         .filter_map(|field| {
             let kind = match field.resolution {
@@ -5410,16 +5425,7 @@ fn prepare_requested_evidence_resolution(
                 kind,
             })
         })
-        .collect::<Vec<_>>();
-    if requested.is_empty() {
-        return Ok(None);
-    }
-    crate::evidence_resolution::prepare(
-        variants,
-        &canonical_evidence_path(evidence),
-        catalog,
-        &requested,
-    )
+        .collect()
 }
 
 fn page_json_with_evidence_internal(
@@ -6233,11 +6239,169 @@ fn append_legacy_spliceai_maximum(catalog: &mut Value) -> Result<(), String> {
 
 fn query_projection_field_is_eligible(field: &SelectedEvidenceColumn) -> bool {
     field.resolution != EvidenceResolutionStrategy::GeneDirect
-        && !uses_resolution_sidecar(field.resolution)
+}
+
+fn catalog_source_is(source_id: &str, expected: &str) -> bool {
+    let source_id = source_id.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+    source_id == expected
+        || source_id
+            .strip_prefix(&expected)
+            .is_some_and(|suffix| matches!(suffix.as_bytes().first(), Some(b'-' | b'@')))
+}
+
+fn catalog_field_leaf(field: &Value) -> String {
+    field["fieldPath"]
+        .as_str()
+        .unwrap_or_default()
+        .split(['.', '[', ']'])
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .map(normalized_evidence_key)
+        .unwrap_or_default()
+}
+
+fn recommended_query_projection_indices(catalog: &Value) -> Result<Vec<usize>, String> {
+    let fields = catalog["fields"]
+        .as_array()
+        .ok_or("field catalog has no fields array")?;
+    let entries = fields
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| {
+            if field["selectable"].as_bool() == Some(false) {
+                return false;
+            }
+            let source_id = field["sourceId"].as_str().unwrap_or_default();
+            let field_path = field["fieldPath"].as_str().unwrap_or_default();
+            if catalog_source_is(source_id, "spliceai") && catalog_field_leaf(field) == "gene" {
+                return false;
+            }
+            field["scope"].as_str() != Some("transcript")
+                || !fields
+                    .iter()
+                    .enumerate()
+                    .any(|(candidate_index, candidate)| {
+                        candidate_index != *index
+                            && candidate["scope"].as_str() == Some("allele")
+                            && candidate["sourceId"].as_str() == Some(source_id)
+                            && candidate["fieldPath"].as_str() == Some(field_path)
+                    })
+        })
+        .collect::<Vec<_>>();
+    let find = |source: &dyn Fn(&str) -> bool, leaves: &[&str], scope: Option<&str>| {
+        entries.iter().find_map(|(index, field)| {
+            let source_id = field["sourceId"].as_str()?;
+            (source(source_id)
+                && scope.is_none_or(|scope| field["scope"].as_str() == Some(scope))
+                && leaves.contains(&catalog_field_leaf(field).as_str()))
+            .then_some(*index)
+        })
+    };
+    let source =
+        |expected: &'static str| move |candidate: &str| catalog_source_is(candidate, expected);
+    let favor = source("favor-online");
+    let mut selected = Vec::new();
+    let mut push = |index: Option<usize>| {
+        if let Some(index) = index
+            && !selected.contains(&index)
+        {
+            selected.push(index);
+        }
+    };
+    push(
+        find(&source("clinvar"), &["significance"], Some("allele"))
+            .or_else(|| find(&favor, &["clinicalsignificance"], None)),
+    );
+    push(
+        find(
+            &|candidate| candidate.to_ascii_lowercase().contains("gnomad"),
+            &["allaf", "af", "allelefrequency"],
+            None,
+        )
+        .or_else(|| find(&favor, &["gnomadaf"], None)),
+    );
+    push(
+        find(&source("phylop"), &["score", "value"], None)
+            .or_else(|| {
+                find(
+                    &source("dbnsfp"),
+                    &["phylop100way", "phylop100wayscore"],
+                    None,
+                )
+            })
+            .or_else(|| find(&favor, &["codingphylop100way"], None))
+            .or_else(|| find(&favor, &["apcconservation"], None)),
+    );
+    push(
+        find(&source("cadd"), &["phred"], None)
+            .or_else(|| find(&source("dbnsfp"), &["caddphred"], None))
+            .or_else(|| find(&favor, &["codingcaddphred", "caddphred"], None)),
+    );
+    push(
+        find(&source("revel"), &["score"], None)
+            .or_else(|| find(&source("dbnsfp"), &["revelscore"], None))
+            .or_else(|| find(&favor, &["codingrevelscore", "revel"], None)),
+    );
+    push(
+        find(&source("dbnsfp"), &["alphamissensescore"], None)
+            .or_else(|| find(&favor, &["codingalphamissensescore", "alphamissense"], None)),
+    );
+    push(
+        find(&source("spliceai"), &["maxdeltascore"], None)
+            .or_else(|| find(&favor, &["spliceaidsmax"], None)),
+    );
+    Ok(selected)
+}
+
+pub(crate) fn prepare_recommended_query_projections(
+    variants: &Path,
+    evidence: &Path,
+    catalog: &Path,
+) -> Result<usize, String> {
+    let indices = recommended_query_projection_indices(&query_field_catalog(catalog)?)?;
+    let fields = selected_evidence_columns(catalog, &indices)?
+        .into_iter()
+        .filter(query_projection_field_is_eligible)
+        .collect::<Vec<_>>();
+    if fields.is_empty() {
+        return Ok(0);
+    }
+    let requested = requested_resolution_fields(fields.iter().cloned());
+    if !requested.is_empty() {
+        crate::evidence_resolution::prepare(
+            variants,
+            &canonical_evidence_path(evidence),
+            catalog,
+            &requested,
+        )?;
+    }
+    prepare_query_projection(evidence, catalog, &fields)?;
+    Ok(fields.len())
+}
+
+fn query_projection_source(
+    evidence: &Path,
+    catalog: &Path,
+    field: &SelectedEvidenceColumn,
+) -> Result<PathBuf, String> {
+    if uses_resolution_sidecar(field.resolution) {
+        return crate::evidence_resolution::available_path(&canonical_evidence_path(evidence))
+            .ok_or_else(|| "transcript evidence index is not ready".into());
+    }
+    if field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect {
+        return gene_evidence_path(catalog)?
+            .ok_or_else(|| "gene match evidence is not ready".into());
+    }
+    Ok(evidence.to_path_buf())
 }
 
 fn visible_evidence_files(evidence: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = if is_composite_evidence(evidence) {
+    let name = evidence
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("result evidence has an invalid file name")?;
+    let mut files = if let Some((prefix, suffix)) = name.split_once('*') {
         let directory = evidence
             .parent()
             .ok_or("evidence wildcard has no directory")?;
@@ -6245,7 +6409,11 @@ fn visible_evidence_files(evidence: &Path) -> Result<Vec<PathBuf>, String> {
             .map_err(|error| format!("cannot inspect supplemental evidence: {error}"))?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("parquet"))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.starts_with(prefix) && value.ends_with(suffix))
+            })
             .collect::<Vec<_>>()
     } else {
         vec![evidence.to_path_buf()]
@@ -6289,11 +6457,7 @@ fn query_projection_fingerprint(
             digest.update(value.as_bytes());
         }
     }
-    let source = if field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect {
-        gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?
-    } else {
-        evidence.to_path_buf()
-    };
+    let source = query_projection_source(evidence, catalog, field)?;
     let mut source_files = visible_evidence_files(&source)?;
     source_files.push(
         catalog
@@ -6404,23 +6568,29 @@ fn build_query_projection(
         )
         .map_err(|error| format!("cannot configure query projection: {error}"))?;
     let escape = |value: &str| value.replace('\'', "''");
-    let conditions = fields
-        .into_iter()
-        .map(|(_, scope, source_id, field_path)| {
-            format!(
-                "(ev.scope='{}' AND ev.source_id='{}' AND ev.field_path='{}')",
-                escape(&scope),
-                escape(&source_id),
-                escape(&field_path)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let source = if field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect {
-        gene_evidence_path(catalog)?.ok_or("gene match evidence is not ready")?
+    let resolved = uses_resolution_sidecar(field.resolution);
+    let conditions = if resolved {
+        format!(
+            "ev.source_id='{}' AND ev.field_path='{}' AND {}",
+            escape(&field.source_id),
+            escape(&field.field_path),
+            resolution_kind_condition(field.resolution, "ev")
+        )
     } else {
-        evidence.to_path_buf()
+        fields
+            .into_iter()
+            .map(|(_, scope, source_id, field_path)| {
+                format!(
+                    "(ev.scope='{}' AND ev.source_id='{}' AND ev.field_path='{}')",
+                    escape(&scope),
+                    escape(&source_id),
+                    escape(&field_path)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ")
     };
+    let source = query_projection_source(evidence, catalog, field)?;
     let variants = catalog
         .parent()
         .ok_or("field catalog has no result folder")?
@@ -6431,17 +6601,26 @@ fn build_query_projection(
     let evidence_sql = source.to_string_lossy().replace('\'', "''");
     let variants_sql = variants.to_string_lossy().replace('\'', "''");
     let partial_sql = partial.to_string_lossy().replace('\'', "''");
+    let values = if resolved {
+        "ev.resolved_string AS string_value,
+         CAST(NULL AS BIGINT) AS integer_value,
+         ev.resolved_number AS number_value,
+         try_cast(ev.resolved_string AS BOOLEAN) AS boolean_value,
+         CAST(NULL AS VARCHAR) AS json_value"
+    } else {
+        "ev.string_value,
+         ev.integer_value,
+         ev.number_value,
+         ev.boolean_value,
+         ev.json_value"
+    };
     connection
         .execute_batch(&format!(
             "COPY (
                  SELECT v.record_number,
                         v.alt_index,
                         CAST({} AS INTEGER) AS field_index,
-                        ev.string_value,
-                        ev.integer_value,
-                        ev.number_value,
-                        ev.boolean_value,
-                        ev.json_value
+                        {values}
                  FROM read_parquet('{evidence_sql}') ev
                  JOIN read_parquet('{variants_sql}') v USING(allele_id)
                  WHERE {conditions}
@@ -6533,18 +6712,7 @@ fn request_query_projection_fields(
     if indices.is_empty() {
         return Ok(None);
     }
-    let fields = selected_evidence_columns(catalog, &indices)?;
-    for field in &fields {
-        if field.resolution == EvidenceResolutionStrategy::GeneDirect
-            || uses_resolution_sidecar(field.resolution)
-        {
-            continue;
-        }
-        if !query_projection_field_is_eligible(&field) {
-            return Ok(None);
-        }
-    }
-    let fields = fields
+    let fields = selected_evidence_columns(catalog, &indices)?
         .into_iter()
         .filter(query_projection_field_is_eligible)
         .collect::<Vec<_>>();
@@ -7283,8 +7451,11 @@ fn evidence_sort_spec(
     let catalog = catalog.ok_or("this AnnoCAT result has no field catalog")?;
     let mut selected = selected_evidence_columns(catalog, &[index])?;
     let field = selected.pop().ok_or("unknown evidence sort column")?;
+    let projected = is_query_projection(evidence);
     let resolved = uses_resolution_sidecar(field.resolution);
-    let evidence_path = if matches!(
+    let evidence_path = if projected {
+        evidence.to_path_buf()
+    } else if matches!(
         field.resolution,
         EvidenceResolutionStrategy::GeneDirect | EvidenceResolutionStrategy::AlleleGeneDirect
     ) {
@@ -7295,28 +7466,42 @@ fn evidence_sort_spec(
     } else {
         evidence.to_path_buf()
     };
-    let value_expression = match field.value_type.as_str() {
-        "integer" | "number" if resolved => "ev_sort.resolved_number",
-        "integer" | "number" => {
+    let value_expression = match (projected, field.value_type.as_str()) {
+        (true, "integer" | "number") => {
             "coalesce(ev_sort.number_value, CAST(ev_sort.integer_value AS DOUBLE), try_cast(ev_sort.string_value AS DOUBLE))"
         }
-        "boolean" if resolved => "ev_sort.resolved_string",
-        "boolean" => "ev_sort.boolean_value",
-        _ if resolved && evidence_field_is_numeric(&field) => "ev_sort.resolved_number",
-        _ if resolved => "ev_sort.resolved_string",
-        _ if evidence_field_is_numeric(&field) => {
+        (true, "boolean") => "ev_sort.boolean_value",
+        (true, _) if evidence_field_is_numeric(&field) => {
+            "coalesce(ev_sort.number_value, CAST(ev_sort.integer_value AS DOUBLE), try_cast(ev_sort.string_value AS DOUBLE))"
+        }
+        (true, _) => {
+            "coalesce(ev_sort.string_value, CAST(ev_sort.integer_value AS VARCHAR), CAST(ev_sort.number_value AS VARCHAR), CAST(ev_sort.boolean_value AS VARCHAR), ev_sort.json_value)"
+        }
+        (false, "integer" | "number") if resolved => "ev_sort.resolved_number",
+        (false, "integer" | "number") => {
+            "coalesce(ev_sort.number_value, CAST(ev_sort.integer_value AS DOUBLE), try_cast(ev_sort.string_value AS DOUBLE))"
+        }
+        (false, "boolean") if resolved => "ev_sort.resolved_string",
+        (false, "boolean") => "ev_sort.boolean_value",
+        (false, _) if resolved && evidence_field_is_numeric(&field) => {
+            "ev_sort.resolved_number"
+        }
+        (false, _) if resolved => "ev_sort.resolved_string",
+        (false, _) if evidence_field_is_numeric(&field) => {
             "coalesce(ev_sort.number_value, CAST(ev_sort.integer_value AS DOUBLE),
                       try_cast(nullif(trim(split_part(ev_sort.string_value, ';', 1)), '.') AS DOUBLE))"
         }
-        _ => {
+        (false, _) => {
             "coalesce(ev_sort.string_value, CAST(ev_sort.integer_value AS VARCHAR), CAST(ev_sort.number_value AS VARCHAR), CAST(ev_sort.boolean_value AS VARCHAR), ev_sort.json_value)"
         }
     };
-    let direct_files = (!resolved
-        && !matches!(
-            field.resolution,
-            EvidenceResolutionStrategy::GeneDirect | EvidenceResolutionStrategy::AlleleGeneDirect
-        ))
+    let direct_files = (projected
+        || (!resolved
+            && !matches!(
+                field.resolution,
+                EvidenceResolutionStrategy::GeneDirect
+                    | EvidenceResolutionStrategy::AlleleGeneDirect
+            )))
     .then_some(evidence_files)
     .flatten();
     let (evidence_read, evidence_parameters) =
@@ -10924,6 +11109,12 @@ mod tests {
         .unwrap();
         let variants = root.join("variants.parquet");
         convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        let request = PageRequest {
+            evidence_columns: vec![score_index, position_index, maximum_index],
+            sort_evidence: Some(maximum_index),
+            direction: "desc".into(),
+            ..PageRequest::default()
+        };
         let page: Value = serde_json::from_str(
             &page_json_with_evidence(
                 &variants,
@@ -10931,12 +11122,7 @@ mod tests {
                 Some(&catalog),
                 0,
                 10,
-                &PageRequest {
-                    evidence_columns: vec![score_index, position_index, maximum_index],
-                    sort_evidence: Some(maximum_index),
-                    direction: "desc".into(),
-                    ..PageRequest::default()
-                },
+                &request,
             )
             .unwrap(),
         )
@@ -10961,6 +11147,22 @@ mod tests {
         assert_eq!(
             page["rows"][0]["evidenceResolution"][maximum_index.to_string()]["kind"],
             "derived_maximum"
+        );
+        let projection_fields = request_query_projection_fields(&catalog, &request)
+            .unwrap()
+            .unwrap();
+        prepare_query_projection(&legacy_evidence, &catalog, &projection_fields).unwrap();
+        let maximum_projection_prefix = format!("{QUERY_PROJECTION_PREFIX}{maximum_index}-");
+        assert!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(&maximum_projection_prefix))
+                })
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -12968,6 +13170,42 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            prepare_recommended_query_projections(&variants, &evidence, &catalog).unwrap(),
+            1
+        );
+        let resolution_cache = crate::evidence_resolution::available_path(&evidence);
+        let projection_caches = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| is_query_projection(path))
+            .collect::<Vec<_>>();
+        assert_eq!(projection_caches.len(), 1);
+        assert!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".annocat-representatives-"))
+        );
+        let cache_state = |paths: &[PathBuf]| {
+            paths
+                .iter()
+                .map(|path| {
+                    let metadata = fs::metadata(path).unwrap();
+                    (path.clone(), metadata.len(), metadata.modified().unwrap())
+                })
+                .collect::<Vec<_>>()
+        };
+        let cache_paths = resolution_cache
+            .into_iter()
+            .chain(projection_caches)
+            .collect::<Vec<_>>();
+        let prewarmed_state = cache_state(&cache_paths);
+
         let sorted: Value = serde_json::from_str(
             &page_json_with_evidence(
                 &variants,
@@ -12998,6 +13236,11 @@ mod tests {
             sorted["rows"][0]["evidenceResolution"][score_index.to_string()]["kind"],
             "exact_consequence"
         );
+        assert_eq!(
+            prepare_recommended_query_projections(&variants, &evidence, &catalog).unwrap(),
+            1
+        );
+        assert_eq!(cache_state(&cache_paths), prewarmed_state);
 
         let alternate_transcript_filter: Value = serde_json::from_str(
             &page_json_with_evidence(
@@ -13736,6 +13979,28 @@ mod tests {
         let (read, parameters) = evidence_read(&path, None);
         assert_eq!(read, "read_parquet(?)");
         assert_eq!(parameters.len(), 1);
+    }
+
+    #[test]
+    fn recommended_projections_follow_the_default_viewer_fields() {
+        let catalog = json!({
+            "fields": [
+                {"scope":"allele","sourceId":"clinvar@20260810","fieldPath":"significance"},
+                {"scope":"allele","sourceId":"gnomad-genomes","fieldPath":"allAF"},
+                {"scope":"allele","sourceId":"phylop","fieldPath":"value"},
+                {"scope":"allele","sourceId":"cadd","fieldPath":"phred"},
+                {"scope":"selected","sourceId":"revel","fieldPath":"score"},
+                {"scope":"selected","sourceId":"dbnsfp","fieldPath":"AlphaMissense_score"},
+                {"scope":"selected","sourceId":"spliceai","fieldPath":"maxDeltaScore"},
+                {"scope":"gene","sourceId":"spliceai","fieldPath":"gene"},
+                {"scope":"allele","sourceId":"clinvar","fieldPath":"review_status"},
+                {"scope":"transcript","sourceId":"gnomad-genomes","fieldPath":"allAF"}
+            ]
+        });
+        assert_eq!(
+            recommended_query_projection_indices(&catalog).unwrap(),
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
     }
 
     #[test]

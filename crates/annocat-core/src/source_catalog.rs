@@ -1582,10 +1582,10 @@ mod tests {
 
     #[test]
     fn osa2_rollout_is_limited_to_verified_source_encodings() {
-        for resource_id in ["dbnsfp", "phylop", "revel", "spliceai"] {
+        for resource_id in ["dbnsfp", "phylop", "cadd", "revel"] {
             assert_eq!(preferred_cache_format(resource_id), Some("osa2"));
         }
-        for resource_id in ["clinvar", "dbsnp", "gnomad", "gnomad-genomes", "cadd"] {
+        for resource_id in ["clinvar", "dbsnp", "gnomad", "gnomad-genomes", "spliceai"] {
             assert_eq!(preferred_cache_format(resource_id), Some("osa"));
         }
     }

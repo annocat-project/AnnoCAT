@@ -12,6 +12,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 static PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static BATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 const PERFORMANCE_FILE: &str = "annotation-performance.json";
+const FASTVEP_PERFORMANCE_FILE: &str = "fastvep-performance.json";
 const PERFORMANCE_PROFILE_ENV: &str = "ANNOCAT_PROFILE_ANNOTATION";
 const CHECKPOINT_SCHEMA_VERSION: u16 = 2;
 const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v1";
@@ -170,6 +171,7 @@ struct PipelinePerformance {
     run_id: String,
     diagnostic_profiling: bool,
     stages: Vec<StagePerformance>,
+    fastvep: Option<serde_json::Value>,
 }
 
 impl PipelinePerformance {
@@ -178,6 +180,7 @@ impl PipelinePerformance {
             run_id: run_id.into(),
             diagnostic_profiling: diagnostic_profiling_enabled(),
             stages: Vec::new(),
+            fastvep: None,
         }
     }
 
@@ -205,8 +208,39 @@ impl PipelinePerformance {
         self.stages.push(stage);
     }
 
+    fn capture_fastvep(&mut self, directory: &Path) {
+        if !self.diagnostic_profiling {
+            return;
+        }
+        let path = directory.join(FASTVEP_PERFORMANCE_FILE);
+        let profile = fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+            });
+        match profile {
+            Ok(value) if value["aggregateOnly"] == true => self.fastvep = Some(value),
+            Ok(_) => crate::terminal_log(
+                "performance",
+                format!(
+                    "{} ignored a fastVEP profile that was not aggregate-only",
+                    self.run_id
+                ),
+            ),
+            Err(error) => crate::terminal_log(
+                "performance",
+                format!(
+                    "{} could not read the fastVEP profile: {error}",
+                    self.run_id
+                ),
+            ),
+        }
+        let _ = fs::remove_file(path);
+    }
+
     fn persist(&self, directory: &Path) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut report = serde_json::json!({
             "schemaVersion": 1,
             "runId": self.run_id,
             "generatedAt": current_timestamp(),
@@ -217,8 +251,15 @@ impl PipelinePerformance {
                 "averageCpuCores": "CPU time divided by wall time; values can exceed 1 for parallel work"
             },
             "stages": self.stages
-        }))
-        .map_err(|error| format!("cannot serialize annotation performance data: {error}"))?;
+        });
+        if let Some(fastvep) = self.fastvep.as_ref() {
+            report
+                .as_object_mut()
+                .ok_or("annotation performance report is not an object")?
+                .insert("fastvep".into(), fastvep.clone());
+        }
+        let bytes = serde_json::to_vec_pretty(&report)
+            .map_err(|error| format!("cannot serialize annotation performance data: {error}"))?;
         super::library_metadata::atomic_write(&directory.join(PERFORMANCE_FILE), &bytes)
     }
 }
@@ -1261,7 +1302,7 @@ fn execute_vcf_review(
         return fail_staging(staging, format!("VCF review validation failed: {error}"));
     }
 
-    prepare_report_indexes(run_id, &parquet, &consequences, &evidence)?;
+    prepare_detail_index(run_id, &parquet, &consequences, &evidence)?;
     check_cancel(staging)?;
     set_phase("publishing", "Saving the AnnoCAT result");
 
@@ -1339,13 +1380,13 @@ fn execute_vcf_review(
         super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
     );
     object.insert("inputContentSha256".into(), input_content_sha256.into());
-    let _ = fs::remove_file(staging.join("annotation-state.json"));
-    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    let _ = fs::remove_file(staging.join("annotation-state.json"));
+    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::rename(staging, final_directory)
         .map_err(|error| format!("cannot publish completed VCF review: {error}"))?;
     Ok((canonical.rows, result_bytes))
@@ -1723,6 +1764,14 @@ fn run_fastvep(
             "--buffer-size",
             "4096",
         ]);
+    if !request.include_annotated_vcf {
+        command.arg("--omit-supplementary-vcf");
+    }
+    if diagnostic_profiling {
+        let profile = staging.join(FASTVEP_PERFORMANCE_FILE);
+        let _ = fs::remove_file(&profile);
+        command.arg("--profile-output").arg(profile);
+    }
     if let Some(directory) = provider_directory.as_ref() {
         command.arg("--sa-dir").arg(directory);
     }
@@ -1893,6 +1942,7 @@ fn finalize_outputs(
         output,
         structured_output,
     } = context;
+    performance.capture_fastvep(staging);
     let annotated_vcf_bytes = file_bytes(output)?;
     let verification_measurement = StageMeasurement::current(performance.diagnostic_profiling);
     set_phase(
@@ -2106,7 +2156,7 @@ fn finalize_outputs(
         0.0,
     );
     let indexing_measurement = StageMeasurement::current(performance.diagnostic_profiling);
-    prepare_report_indexes(run_id, &parquet, &consequences, &evidence)?;
+    prepare_detail_index(run_id, &parquet, &consequences, &evidence)?;
     let detail_index_bytes = fs::metadata(staging.join("detail-row-groups.json"))
         .map(|value| value.len())
         .unwrap_or(0);
@@ -2262,21 +2312,29 @@ fn finalize_outputs(
             format!("cannot remove temporary structured output: {error}"),
         );
     }
-    let _ = fs::remove_file(staging.join("annotation-state.json"));
-    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    fs::rename(staging, final_directory)
-        .map_err(|error| format!("cannot save the AnnoCAT result: {error}"))?;
     performance.record(publishing_measurement.finish_current(
         "publishing",
         input_summary.records,
         canonical_result_bytes,
         canonical_result_bytes.saturating_add(detail_index_bytes),
     ));
+    let viewer_measurement = StageMeasurement::current(performance.diagnostic_profiling);
+    prepare_common_viewer_columns(run_id, &parquet, &evidence, &field_catalog)?;
+    performance.record(viewer_measurement.finish_current(
+        "viewer-projections",
+        input_summary.records,
+        canonical_result_bytes,
+        0,
+    ));
+    let _ = fs::remove_file(staging.join("annotation-state.json"));
+    let _ = fs::remove_file(staging.join("annotation-state.json.tmp"));
+    fs::rename(staging, final_directory)
+        .map_err(|error| format!("cannot save the AnnoCAT result: {error}"))?;
     if let Err(error) = performance.persist(final_directory) {
         crate::terminal_log(
             "performance",
@@ -2292,7 +2350,7 @@ fn file_bytes(path: &Path) -> Result<u64, String> {
         .map_err(|error| format!("cannot measure {}: {error}", path.display()))
 }
 
-fn prepare_report_indexes(
+fn prepare_detail_index(
     run_id: &str,
     variants: &Path,
     consequences: &Path,
@@ -2306,6 +2364,30 @@ fn prepare_report_indexes(
             "annotation",
             format!("{run_id} completed without the optional fast variant lookup index: {error}"),
         );
+    }
+    Ok(())
+}
+
+fn prepare_common_viewer_columns(
+    run_id: &str,
+    variants: &Path,
+    evidence: &Path,
+    field_catalog: &Path,
+) -> Result<(), String> {
+    if CANCEL.load(Ordering::SeqCst) {
+        return Err("cancelled".into());
+    }
+    set_phase("report-indexing", "Preparing common viewer columns");
+    match super::results::prepare_recommended_query_projections(variants, evidence, field_catalog) {
+        Ok(count) if count > 0 => crate::terminal_log(
+            "annotation",
+            format!("{run_id} prepared {count} common viewer column caches"),
+        ),
+        Ok(_) => {}
+        Err(error) => crate::terminal_log(
+            "annotation",
+            format!("{run_id} completed without optional common viewer column caches: {error}"),
+        ),
     }
     if CANCEL.load(Ordering::SeqCst) {
         return Err("cancelled".into());
@@ -2771,6 +2853,9 @@ fn resolve_source_root(resources: &Path, source_id: &str) -> Result<PathBuf, Str
     let chromosomes = crate::resource_chromosomes(source_id);
     let mut issue = None;
     for candidate in candidates.into_iter().rev() {
+        if !source_root_matches_verified_release(&candidate, source_id, &chromosomes) {
+            continue;
+        }
         let status =
             super::preparation::verified_storage_status(source_id, &candidate, &chromosomes);
         if status.state == "ready" {
@@ -2786,6 +2871,31 @@ fn resolve_source_root(resources: &Path, source_id: &str) -> Result<PathBuf, Str
         }
         _ => format!("{source_id} is selected but has no complete verified fastSA provider"),
     })
+}
+
+fn source_root_matches_verified_release(
+    source_root: &Path,
+    source_id: &str,
+    chromosomes: &[String],
+) -> bool {
+    let Some(directory_release) = source_root.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    chromosomes
+        .iter()
+        .find_map(|chromosome| {
+            let verification = source_root
+                .join("shards")
+                .join(format!("chr{chromosome}"))
+                .join("verified.json");
+            fs::read(verification).ok().and_then(|bytes| {
+                serde_json::from_slice::<super::preparation::PreparationCheckpoint>(&bytes).ok()
+            })
+        })
+        .is_some_and(|checkpoint| {
+            checkpoint.identity.resource_id == source_id
+                && checkpoint.identity.release == directory_release
+        })
 }
 
 fn compose_provider_set(
@@ -3125,6 +3235,40 @@ mod tests {
     }
 
     #[test]
+    fn annotation_performance_embeds_the_aggregate_fastvep_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-fastvep-profile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(FASTVEP_PERFORMANCE_FILE),
+            br#"{"schemaVersion":1,"aggregateOnly":true,"variants":12}"#,
+        )
+        .unwrap();
+        let mut performance = PipelinePerformance {
+            run_id: "run-profile".into(),
+            diagnostic_profiling: true,
+            stages: Vec::new(),
+            fastvep: None,
+        };
+
+        performance.capture_fastvep(&root);
+        performance.persist(&root).unwrap();
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(PERFORMANCE_FILE)).unwrap()).unwrap();
+        assert_eq!(report["fastvep"]["aggregateOnly"], true);
+        assert_eq!(report["fastvep"]["variants"], 12);
+        assert!(!root.join(FASTVEP_PERFORMANCE_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn names_are_safe_and_bounded() {
         assert_eq!(safe_name("HG002 / chr 22"), "HG002---chr-22");
         assert_eq!(safe_name("***"), "annotation");
@@ -3402,6 +3546,24 @@ mod tests {
                 .join("20260715")
                 .join("clinvar.osa-shards.json"),
             br#"{"schemaVersion":1,"shards":[{"chromosome":"all","file":"shards/chrall/source.osa"}]}"#,
+        )
+        .unwrap();
+        let retained_root = root.join("clinvar").join("20260715.osa1-retained");
+        let retained_shard = retained_root.join("shards").join("chrall");
+        fs::create_dir_all(&retained_shard).unwrap();
+        for file in [
+            "source.osa",
+            "source.osa.idx",
+            "verified.json",
+            "cache-contract-v2.json",
+        ] {
+            fs::copy(shard.join(file), retained_shard.join(file)).unwrap();
+        }
+        fs::copy(
+            root.join("clinvar")
+                .join("20260715")
+                .join("clinvar.osa-shards.json"),
+            retained_root.join("clinvar.osa-shards.json"),
         )
         .unwrap();
         let newer_shard = root

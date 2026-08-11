@@ -451,7 +451,7 @@
       "id": "cadd",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
-      "preferredCacheFormat": "osa",
+      "preferredCacheFormat": "osa2",
       "adapterContract": "annocat-cadd-v1",
       "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
@@ -501,7 +501,7 @@
       "id": "spliceai",
       "assembly": "GRCh38",
       "delivery": "stream-cache",
-      "preferredCacheFormat": "osa2",
+      "preferredCacheFormat": "osa",
       "adapterContract": "annocat-spliceai-record-list-v2",
       "manifestRef": "config/indexed-sources.json",
       "fieldContract": {
