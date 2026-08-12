@@ -388,11 +388,15 @@ fn validate_supplementary_field_selection(
         .as_str()
         .ok_or("supplementary contract has no ID")?;
     let (allowed, _, required) = supplementary_contract_fields(&contract)?;
-    if selection.schema_version != 1 || selection.contract_id != contract_id {
+    if selection.schema_version != 1 {
         return Err(format!(
             "{resource_id} field selection uses an unsupported contract"
         ));
     }
+    // Contract revisions can change cache adapters without changing the field
+    // menu. The field and required-field checks below prove whether an older
+    // selection is still compatible; cache contracts are validated separately.
+    selection.contract_id = contract_id.into();
     let supplied = selection.fields.iter().collect::<HashSet<_>>();
     if supplied.is_empty()
         || supplied.len() != selection.fields.len()
@@ -564,4 +568,35 @@ pub fn supplementary_schema_identity(
     }
     let digest = format!("{:x}", hasher.finalize());
     Ok(format!("{base}:{}", &digest[..16]))
+}
+
+#[cfg(test)]
+mod supplementary_selection_tests {
+    use super::{SupplementaryFieldSelection, validate_supplementary_field_selection};
+
+    #[test]
+    fn compatible_legacy_contract_is_normalized() {
+        let selection = SupplementaryFieldSelection {
+            schema_version: 1,
+            contract_id: "spliceai-fastvep-fields-v1".into(),
+            fields: ["gene", "dsAg", "dsAl", "dsDg", "dsDl"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        };
+
+        let normalized = validate_supplementary_field_selection("spliceai", selection).unwrap();
+        assert_eq!(normalized.contract_id, "spliceai-fastvep-fields-v2");
+    }
+
+    #[test]
+    fn legacy_contract_does_not_bypass_field_validation() {
+        let selection = SupplementaryFieldSelection {
+            schema_version: 1,
+            contract_id: "spliceai-fastvep-fields-v1".into(),
+            fields: ["gene", "unknown"].into_iter().map(str::to_owned).collect(),
+        };
+
+        assert!(validate_supplementary_field_selection("spliceai", selection).is_err());
+    }
 }

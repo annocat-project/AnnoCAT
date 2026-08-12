@@ -1782,6 +1782,18 @@ body:has(dialog[open]) {
 .fui-workspace-header__identity {
   grid-template-rows: var(--line-height-caption-1) var(--line-height-subtitle-1);
   row-gap: var(--space-1);
+  overflow: visible;
+}
+
+.fui-workspace-header__back {
+  min-width: 0;
+  justify-content: flex-start;
+  margin-left: calc(-1 * var(--control-padding-inline-small));
+  padding-left: var(--control-padding-inline-small);
+}
+
+.fui-workspace-header__back>.ui-icon {
+  margin-left: -3px;
 }
 
 .fui-workspace-header__title {

@@ -2826,10 +2826,27 @@ fn validate_report_tables_mode(
                  FROM read_parquet(?) v
                  JOIN read_parquet(?) c USING (allele_id)
                  WHERE c.selected AND (
-                   trim(coalesce(v.transcript_id, ''))
-                     <> trim(coalesce(c.transcript_id, c.feature_id, ''))
-                   OR trim(coalesce(v.gene_id, '')) <> trim(coalesce(c.gene_id, ''))
-                   OR trim(coalesce(v.consequence, ''))
+                   CASE
+                     WHEN upper(trim(coalesce(v.transcript_id, ''))) IN
+                       ('', '.', '-', 'NA', 'N/A', 'NONE', 'NULL') THEN ''
+                     ELSE trim(v.transcript_id)
+                   END
+                     <> CASE
+                       WHEN upper(trim(coalesce(c.transcript_id, c.feature_id, ''))) IN
+                         ('', '.', '-', 'NA', 'N/A', 'NONE', 'NULL') THEN ''
+                       ELSE trim(coalesce(c.transcript_id, c.feature_id))
+                     END
+                   OR CASE
+                     WHEN upper(trim(coalesce(v.gene_id, ''))) IN
+                       ('', '.', '-', 'NA', 'N/A', 'NONE', 'NULL') THEN ''
+                     ELSE trim(v.gene_id)
+                   END
+                     <> CASE
+                       WHEN upper(trim(coalesce(c.gene_id, ''))) IN
+                         ('', '.', '-', 'NA', 'N/A', 'NONE', 'NULL') THEN ''
+                       ELSE trim(c.gene_id)
+                     END
+                   OR split_part(trim(coalesce(v.consequence, '')), '&', 1)
                      <> trim(coalesce(c.primary_consequence, ''))
                  )",
                     params![
@@ -2929,7 +2946,10 @@ fn validate_report_tables_mode(
         )
         .map_err(|error| format!("cannot validate selected evidence linkage: {error}"))?;
     if duplicate_selected != 0 || orphan_selected_links != 0 {
-        return Err("the AnnoCAT result contains duplicate or unlinked selected evidence".into());
+        return Err(format!(
+            "the AnnoCAT result contains {duplicate_selected} duplicate selected evidence fields \
+             and {orphan_selected_links} unlinked selected evidence rows"
+        ));
     }
 
     let metadata = fs::metadata(catalog)
@@ -8457,6 +8477,9 @@ fn materialize_selected_evidence(
     let mut scalar_matches =
         BTreeMap::<(String, String, String), (u8, usize, EvidenceValue, bool)>::new();
     for index in 0..raw_rows {
+        if evidence.scope[index] == "selected" {
+            continue;
+        }
         let Some(selected_index) = selected.get(&evidence.allele_id[index]).copied() else {
             continue;
         };
@@ -8529,6 +8552,9 @@ fn materialize_selected_evidence(
     let mut aligned_rows = BTreeMap::<(String, String, String, String), (usize, bool)>::new();
     for index in 0..raw_rows {
         let scope = &evidence.scope[index];
+        if scope == "selected" {
+            continue;
+        }
         let source = &evidence.source_id[index];
         let field = &evidence.field_path[index];
         if crate::evidence_resolution::bundled_alignment_group(scope, source, field).is_some() {
@@ -10627,6 +10653,60 @@ mod tests {
     }
 
     #[test]
+    fn validation_accepts_full_vcf_terms_and_missing_placeholders() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-consequence-validation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vcf = root.join("input.vcf");
+        fs::write(
+            &vcf,
+            concat!(
+                "##fileformat=VCFv4.2\n",
+                "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature\">\n",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+                "1\t100\t.\tA\tG\t50\tPASS\tCSQ=G|intron_variant&non_coding_transcript_variant|MODIFIER|GENE1|ENSG1|Transcript|ENST1\n",
+                "1\t200\t.\tA\tG\t50\tPASS\tCSQ=G|intergenic_variant|MODIFIER|-|-|Intergenic|-\n"
+            ),
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        convert_vcf(&vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+
+        let structured = root.join("fastvep.ndjson");
+        fs::write(
+            &structured,
+            concat!(
+                r#"{"allele_string":"A/G","start":100,"seq_region_name":"1","transcript_consequences":[{"variant_allele":"G","consequence_terms":["intron_variant","non_coding_transcript_variant"],"impact":"MODIFIER","gene_symbol":"GENE1","gene_id":"ENSG1","transcript_id":"ENST1"}]}"#,
+                "\n",
+                r#"{"allele_string":"A/G","start":200,"seq_region_name":"1","intergenic_consequences":[{"variant_allele":"G","consequence_terms":["intergenic_variant"],"impact":"MODIFIER","gene_symbol":"-","gene_id":"-"}]}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        convert_structured(
+            &structured,
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+
+        validate_report_tables(&variants, &consequences, &evidence, &catalog, 2).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn multiallelic_records_keep_an_allele_without_a_csq_entry() {
         let root = std::env::temp_dir().join(format!(
             "annocat-parquet-partial-csq-{}-{}",
@@ -10894,6 +10974,15 @@ mod tests {
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
+        let mut selected_fields = HashSet::new();
+        for index in 0..parsed.evidence.len() {
+            if parsed.evidence.scope[index] == "selected" {
+                assert!(selected_fields.insert((
+                    parsed.evidence.source_id[index].clone(),
+                    parsed.evidence.field_path[index].clone(),
+                )));
+            }
+        }
         let selected_value = |source: &str, field: &str| {
             parsed
                 .evidence
