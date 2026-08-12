@@ -4,6 +4,33 @@
     {
       "resourceId": "clinvar",
       "contractId": "clinvar-fastvep-fields-v1",
+      "categoricalFields": [
+        {
+          "field": "significance",
+          "matchMode": "set",
+          "parser": "json",
+          "discoverObserved": true,
+          "values": [
+            { "value": "Benign", "label": "Benign" },
+            { "value": "Likely_benign", "label": "Likely benign" },
+            { "value": "Benign/Likely_benign", "label": "Benign / likely benign" },
+            { "value": "Uncertain_significance", "label": "Uncertain significance" },
+            { "value": "Likely_pathogenic", "label": "Likely pathogenic" },
+            { "value": "Pathogenic", "label": "Pathogenic" },
+            { "value": "Pathogenic/Likely_pathogenic", "label": "Pathogenic / likely pathogenic" },
+            { "value": "Conflicting_classifications_of_pathogenicity", "label": "Conflicting classifications" },
+            { "value": "risk_factor", "label": "Risk factor" },
+            { "value": "association", "label": "Association" },
+            { "value": "drug_response", "label": "Drug response" },
+            { "value": "protective", "label": "Protective" },
+            { "value": "affects", "label": "Affects" },
+            { "value": "other", "label": "Other" },
+            { "value": "not_provided", "label": "Not provided" }
+          ]
+        },
+        { "field": "reviewStatus", "matchMode": "scalar", "parser": "scalar", "discoverObserved": true },
+        { "field": "variantClass", "matchMode": "scalar", "parser": "scalar", "discoverObserved": true }
+      ],
       "groups": [
         {
           "id": "current",
@@ -28,6 +55,9 @@
     {
       "resourceId": "dbsnp",
       "contractId": "dbsnp-fastvep-fields-v1",
+      "categoricalFields": [
+        { "field": "variantType", "matchMode": "scalar", "parser": "scalar", "discoverObserved": true }
+      ],
       "groups": [
         { "id": "current", "label": "Current AnnoCAT fields", "default": true, "fields": ["id", "globalMaf"] },
         { "id": "additional", "label": "Additional dbSNP fields", "default": false, "fields": ["variantType", "common"] }

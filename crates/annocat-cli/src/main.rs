@@ -1662,6 +1662,41 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
     }
     if let Some(run_id) = path
         .strip_prefix("/api/runs/")
+        .and_then(|value| value.strip_suffix("/filter-values"))
+        .filter(|value| !value.is_empty() && !value.contains('/'))
+    {
+        let response = portable_paths().and_then(|paths| {
+            let variants = completed_run_result(&paths.runs, run_id)?;
+            let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
+            let core_column = query_parameter(query, "coreColumn").transpose()?;
+            let evidence_index = query_parameter(query, "evidenceIndex")
+                .transpose()?
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "evidenceIndex must be a non-negative integer".to_string())
+                })
+                .transpose()?;
+            results::categorical_filter_values_json(
+                &variants,
+                evidence.as_deref(),
+                catalog.as_deref(),
+                core_column.as_deref(),
+                evidence_index,
+            )
+        });
+        let (status, body) = match response {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "409 Conflict",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        };
+        return write_http_response(stream, status, "application/json", &body);
+    }
+    if let Some(run_id) = path
+        .strip_prefix("/api/runs/")
         .and_then(|value| value.strip_suffix("/fields"))
         .filter(|value| !value.is_empty() && !value.contains('/'))
     {

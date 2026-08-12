@@ -31,13 +31,38 @@ const coreColumnDetails={
   canonical:['Canonical transcript','Whether the selected transcript is marked canonical by Ensembl.'],
   maneSelect:['MANE Select','Matched Annotation from NCBI and EMBL-EBI transcript when one is available.']
 };
+const consequenceFilterValues=[
+  'transcript_ablation','splice_acceptor_variant','splice_donor_variant','stop_gained',
+  'frameshift_variant','stop_lost','start_lost','transcript_amplification','feature_elongation',
+  'feature_truncation','inframe_insertion','inframe_deletion','missense_variant',
+  'protein_altering_variant','splice_region_variant','splice_donor_5th_base_variant',
+  'splice_donor_region_variant','splice_polypyrimidine_tract_variant',
+  'incomplete_terminal_codon_variant','start_retained_variant','stop_retained_variant',
+  'synonymous_variant','coding_sequence_variant','mature_miRNA_variant','5_prime_UTR_variant',
+  '3_prime_UTR_variant','non_coding_transcript_exon_variant','intron_variant',
+  'NMD_transcript_variant','non_coding_transcript_variant','coding_transcript_variant',
+  'upstream_gene_variant','downstream_gene_variant','TFBS_ablation','TFBS_amplification',
+  'TF_binding_site_variant','regulatory_region_ablation','regulatory_region_amplification',
+  'regulatory_region_variant','intergenic_variant','sequence_variant','copy_number_change',
+  'copy_number_increase','copy_number_decrease','short_tandem_repeat_change',
+  'short_tandem_repeat_expansion','short_tandem_repeat_contraction',
+  'unidirectional_gene_fusion','transcript_variant'
+];
 const coreFilterColumns=[
   {key:'chromosome',label:'Chromosome',type:'text'},{key:'position',label:'Position',type:'number'},
   {key:'reference',label:'Reference',type:'text'},{key:'alternate',label:'Alternate',type:'text'},
   {key:'variantId',label:'Variant ID',type:'text'},{key:'quality',label:'QUAL',type:'number'},
-  {key:'filter',label:'VCF FILTER',type:'text'},{key:'gene',label:'Gene / gene list',type:'text'},
+  {key:'filter',label:'VCF FILTER',type:'text',categorical:{matchMode:'set',values:[{value:'PASS',label:'PASS'}],canDiscover:true}},
+  {key:'zygosity',label:'Zygosity',type:'text',categorical:{matchMode:'scalar',values:[
+    {value:'Reference',label:'Reference'},{value:'Other alternate',label:'Other alternate'},
+    {value:'Heterozygous',label:'Heterozygous'},{value:'Homozygous alternate',label:'Homozygous alternate'},
+    {value:'Haploid alternate',label:'Haploid alternate'},{value:'Mixed alternate',label:'Mixed alternate'},
+    {value:'Partially called',label:'Partially called'},{value:'Not called',label:'Not called'},
+    {value:'Invalid genotype',label:'Invalid genotype'},{value:'Multiple sample calls',label:'Multiple sample calls'}
+  ],canDiscover:false}},
+  {key:'gene',label:'Gene / gene list',type:'text'},
   {key:'geneId',label:'Gene ID',type:'text'},{key:'transcriptId',label:'Transcript',type:'text'},
-  {key:'consequence',label:'Consequence',type:'text'},{key:'impact',label:'Impact',type:'text'},
+  {key:'consequence',label:'Consequence',type:'text',categorical:{matchMode:'set',values:consequenceFilterValues,canDiscover:true}},{key:'impact',label:'Impact',type:'text',categorical:{matchMode:'scalar',values:[{value:'HIGH',label:'High'},{value:'MODERATE',label:'Moderate'},{value:'LOW',label:'Low'},{value:'MODIFIER',label:'Modifier'}],canDiscover:false}},
   {key:'canonical',label:'Canonical',type:'boolean'},{key:'maneSelect',label:'MANE Select',type:'text'}
 ];
 const filterOperators=[['equals','='],['not_equals','≠'],['gt','>'],['gte','≥'],['lt','<'],['lte','≤'],['contains','contains'],['not_contains','does not contain'],['in','is any of'],['not_in','is none of']];

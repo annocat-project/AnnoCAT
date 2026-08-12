@@ -3,13 +3,14 @@ use annocat_core::normalization::{
     canonicalize,
 };
 use duckdb::arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
 };
 use duckdb::arrow::datatypes::{Field, Schema};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::types::Value as SqlValue;
 use duckdb::{Connection, InterruptHandle, appender_params_from_iter, params, params_from_iter};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -33,6 +34,7 @@ pub const REPRESENTATIVE_SELECTION_CONTRACT: &str = "allele-gene-severity-v1";
 const QUERY_PROJECTION_CONTRACT: &str = "field-indexed-evidence-v4";
 const QUERY_PROJECTION_PREFIX: &str = ".annocat-query-v3-";
 const LEGACY_QUERY_PROJECTION_PREFIXES: [&str; 2] = [".annocat-query-v1-", ".annocat-query-v2-"];
+const SAMPLE_CALL_PROJECTION_PREFIX: &str = ".annocat-sample-calls-v1-";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +113,7 @@ struct ActivePageQuery {
 static ACTIVE_PAGE_QUERIES: OnceLock<Mutex<HashMap<String, ActivePageQuery>>> = OnceLock::new();
 static REPRESENTATIVE_OVERRIDE_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
 static QUERY_PROJECTION_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
+static SAMPLE_CALL_PROJECTION_BUILD: OnceLock<Mutex<()>> = OnceLock::new();
 #[derive(Clone, Debug, PartialEq)]
 struct CachedResultRow {
     record_number: i64,
@@ -133,6 +136,8 @@ struct CachedResultRow {
     alternate_count: i32,
     format: Option<String>,
     samples_json: String,
+    zygosity: Option<String>,
+    zygosity_sort: Option<i32>,
 }
 
 static MATCHED_ROW_CACHE: OnceLock<Mutex<VecDeque<(String, Arc<Vec<CachedResultRow>>)>>> =
@@ -277,7 +282,24 @@ struct VariantBatch {
     sample_names_json: Vec<String>,
     format: Vec<Option<String>>,
     samples_json: Vec<String>,
+    zygosity: Vec<Option<String>>,
+    zygosity_sort: Vec<Option<i32>>,
     consequences_json: Vec<String>,
+}
+
+#[derive(Default)]
+struct SampleCallProjectionBatch {
+    record_number: Vec<i64>,
+    alt_index: Vec<i32>,
+    zygosity: Vec<Option<String>>,
+    zygosity_sort: Vec<Option<i32>>,
+}
+
+struct LegacySampleCallRow {
+    record_number: i64,
+    alt_index: i32,
+    format: Option<String>,
+    samples_json: String,
 }
 
 #[derive(Default)]
@@ -486,6 +508,12 @@ impl VariantBatch {
                 Arc::new(StringArray::from(self.samples_json)),
                 false,
             ),
+            ("zygosity", Arc::new(StringArray::from(self.zygosity)), true),
+            (
+                "zygosity_sort",
+                Arc::new(Int32Array::from(self.zygosity_sort)),
+                true,
+            ),
             (
                 "consequences_json",
                 Arc::new(StringArray::from(self.consequences_json)),
@@ -524,8 +552,64 @@ impl VariantBatch {
         self.sample_names_json.append(&mut other.sample_names_json);
         self.format.append(&mut other.format);
         self.samples_json.append(&mut other.samples_json);
+        self.zygosity.append(&mut other.zygosity);
+        self.zygosity_sort.append(&mut other.zygosity_sort);
         self.consequences_json.append(&mut other.consequences_json);
     }
+}
+
+impl SampleCallProjectionBatch {
+    fn len(&self) -> usize {
+        self.record_number.len()
+    }
+
+    fn into_record_batch(self) -> Result<RecordBatch, String> {
+        record_batch(vec![
+            (
+                "record_number",
+                Arc::new(Int64Array::from(self.record_number)),
+                false,
+            ),
+            (
+                "alt_index",
+                Arc::new(Int32Array::from(self.alt_index)),
+                false,
+            ),
+            ("zygosity", Arc::new(StringArray::from(self.zygosity)), true),
+            (
+                "zygosity_sort",
+                Arc::new(Int32Array::from(self.zygosity_sort)),
+                true,
+            ),
+        ])
+    }
+}
+
+fn append_legacy_sample_call_group(
+    output: &mut SampleCallProjectionBatch,
+    rows: &mut Vec<LegacySampleCallRow>,
+) -> Result<(), String> {
+    let alternate_count = rows
+        .iter()
+        .map(|row| row.alt_index)
+        .max()
+        .ok_or("legacy result sample-call group is empty")?;
+    if alternate_count < 1 {
+        return Err("legacy result has an invalid alternate allele index".into());
+    }
+    for row in rows.drain(..) {
+        let (zygosity, zygosity_sort) = zygosity_from_samples_json(
+            row.format.as_deref(),
+            &row.samples_json,
+            row.alt_index,
+            alternate_count,
+        );
+        output.record_number.push(row.record_number);
+        output.alt_index.push(row.alt_index);
+        output.zygosity.push(zygosity);
+        output.zygosity_sort.push(zygosity_sort);
+    }
+    Ok(())
 }
 
 impl ConsequenceBatch {
@@ -919,6 +1003,42 @@ fn append_variant_batch(
     )
 }
 
+fn zygosity_label_and_sort(
+    sample_name: Option<&str>,
+    format: Option<&str>,
+    sample_value: Option<&str>,
+    sample_count: usize,
+    alt_index: usize,
+    alternate_count: usize,
+) -> (Option<String>, Option<i32>) {
+    if sample_count == 0 {
+        return (None, None);
+    }
+    if sample_count > 1 {
+        return (Some("Multiple sample calls".into()), None);
+    }
+    let call = annocat_core::sample_call::parse_sample_call(
+        sample_name.unwrap_or_default(),
+        format,
+        sample_value.unwrap_or("."),
+        alt_index,
+        alternate_count,
+    );
+    use annocat_core::sample_call::GenotypeRelation;
+    match call.genotype_relation {
+        GenotypeRelation::Reference => (Some("Reference".into()), Some(0)),
+        GenotypeRelation::OtherAlternate => (Some("Other alternate".into()), Some(1)),
+        GenotypeRelation::Heterozygous => (Some("Heterozygous".into()), Some(2)),
+        GenotypeRelation::HaploidAlternate => (Some("Haploid alternate".into()), Some(3)),
+        GenotypeRelation::MixedAlternate => (Some("Mixed alternate".into()), Some(4)),
+        GenotypeRelation::HomozygousAlternate => (Some("Homozygous alternate".into()), Some(5)),
+        GenotypeRelation::PartiallyCalled => (Some("Partially called".into()), None),
+        GenotypeRelation::NotCalled => (Some("Not called".into()), None),
+        GenotypeRelation::Invalid => (Some("Invalid genotype".into()), None),
+        GenotypeRelation::Unavailable => (None, None),
+    }
+}
+
 fn parse_variant_record(
     input: &VariantRecord,
     fields: Option<&[String]>,
@@ -1018,10 +1138,19 @@ fn parse_variant_record(
             .mane_select
             .push(best_value(&["MANE_SELECT", "mane_select", "MANE", "mane"]));
         batch.sample_names_json.push(sample_names_json.to_owned());
-        batch
-            .format
-            .push(columns.get(8).and_then(|value| optional_vcf(value)));
+        let format = columns.get(8).and_then(|value| optional_vcf(value));
+        let (zygosity, zygosity_sort) = zygosity_label_and_sort(
+            sample_names.first().map(String::as_str),
+            format.as_deref(),
+            columns.get(9).copied(),
+            sample_names.len(),
+            alt_offset + 1,
+            alternate_count,
+        );
+        batch.format.push(format);
         batch.samples_json.push(samples_json.clone());
+        batch.zygosity.push(zygosity);
+        batch.zygosity_sort.push(zygosity_sort);
         batch.consequences_json.push(
             serde_json::to_string(&best.into_iter().collect::<Vec<_>>())
                 .map_err(|error| error.to_string())?,
@@ -1241,6 +1370,10 @@ pub struct CoreFilterRuleRequest {
     pub operator: String,
     #[serde(default)]
     pub value: String,
+    #[serde(default)]
+    pub values: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_missing: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1252,12 +1385,46 @@ pub struct EvidenceFilterRequest {
     pub value: String,
     #[serde(default)]
     pub value2: String,
+    #[serde(default)]
+    pub values: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_missing: Option<bool>,
 }
 
-#[derive(Default)]
 struct CatalogEntry {
     types: BTreeSet<&'static str>,
     occurrences: u64,
+    observed_categories: BTreeMap<String, String>,
+    observed_categories_complete: bool,
+}
+
+impl Default for CatalogEntry {
+    fn default() -> Self {
+        Self {
+            types: BTreeSet::new(),
+            occurrences: 0,
+            observed_categories: BTreeMap::new(),
+            observed_categories_complete: true,
+        }
+    }
+}
+
+const MAX_CATEGORICAL_VALUES: usize = 100;
+const MAX_CATEGORICAL_VALUE_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CategoricalParser {
+    Scalar,
+    Json,
+}
+
+struct CategoricalContract {
+    source_id: String,
+    field_name: String,
+    match_mode: String,
+    parser: CategoricalParser,
+    values: Vec<Value>,
+    discover_observed: bool,
 }
 
 struct StructuredRecord {
@@ -1971,6 +2138,10 @@ fn merge_catalog(
         let target_entry = target.entry(key).or_default();
         target_entry.types.extend(entry.types);
         target_entry.occurrences = target_entry.occurrences.saturating_add(entry.occurrences);
+        target_entry.observed_categories_complete &= entry.observed_categories_complete;
+        for value in entry.observed_categories.into_values() {
+            insert_observed_category(target_entry, &value);
+        }
     }
 }
 
@@ -2369,6 +2540,13 @@ fn write_structured_catalog(
                 "observedTypes": entry.types,
                 "occurrences": entry.occurrences,
             });
+            if let Some(contract) = categorical_contract_for_field(source_id, field_path)? {
+                field["categorical"] = json!({
+                    "matchMode": contract.match_mode,
+                    "observedValues": entry.observed_categories.values().collect::<Vec<_>>(),
+                    "observedValuesComplete": entry.observed_categories_complete,
+                });
+            }
             if let Some(biological_scope) = (scope == "selected" || source_id == "dbnsfp")
                 .then(|| crate::evidence_resolution::record_field_scope(source_id, field_path))
                 .flatten()
@@ -2420,9 +2598,9 @@ fn write_structured_catalog(
                     field["selectionOrigin"] = Value::String("report".into());
                 }
             }
-            field
+            Ok(field)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let alignment_groups = crate::evidence_resolution::catalog_alignment_groups(&fields);
     let record_resolution_contracts = crate::evidence_resolution::record_resolution_contracts();
     fs::write(
@@ -3001,6 +3179,7 @@ fn core_filter_column(column: &str) -> Option<(&'static str, FilterValueKind)> {
         "variantId" => Some(("v.variant_id", FilterValueKind::Text)),
         "quality" => Some(("v.quality", FilterValueKind::Number)),
         "filter" => Some(("v.filter", FilterValueKind::Text)),
+        "zygosity" => Some(("v.zygosity", FilterValueKind::Text)),
         "gene" => Some((
             "coalesce(v.gene_symbol, v.gene_id, v.transcript_id)",
             FilterValueKind::Text,
@@ -3013,6 +3192,36 @@ fn core_filter_column(column: &str) -> Option<(&'static str, FilterValueKind)> {
         "maneSelect" => Some(("v.mane_select", FilterValueKind::Text)),
         _ => None,
     }
+}
+
+fn validate_closed_core_category(column: &str, values: &[String]) -> Result<(), String> {
+    let allowed: &[&str] = match column {
+        "impact" => &["HIGH", "MODERATE", "LOW", "MODIFIER"],
+        "zygosity" => &[
+            "Reference",
+            "Other alternate",
+            "Heterozygous",
+            "Homozygous alternate",
+            "Haploid alternate",
+            "Mixed alternate",
+            "Partially called",
+            "Not called",
+            "Invalid genotype",
+            "Multiple sample calls",
+        ],
+        _ => return Ok(()),
+    };
+    if let Some(value) = values.iter().find(|value| {
+        let key = categorical_value_key(value);
+        !allowed
+            .iter()
+            .any(|allowed| categorical_value_key(allowed) == key)
+    }) {
+        return Err(format!(
+            "unsupported {column} filter value: {value}; choose a listed value"
+        ));
+    }
+    Ok(())
 }
 
 fn comma_filter_values(value: &str) -> Result<Vec<String>, String> {
@@ -3247,6 +3456,138 @@ fn comparison_sql(
     }
 }
 
+struct CategoricalSelection {
+    values: Vec<String>,
+    include_missing: bool,
+}
+
+fn categorical_selection(
+    values: &Option<Vec<String>>,
+    include_missing: Option<bool>,
+) -> Result<Option<CategoricalSelection>, String> {
+    if values.is_none() && include_missing.is_none() {
+        return Ok(None);
+    }
+    let mut selected = BTreeMap::new();
+    for value in values.as_deref().unwrap_or_default() {
+        let value = bounded_page_text(
+            value,
+            "categorical filter value",
+            MAX_CATEGORICAL_VALUE_BYTES,
+        )?
+        .trim();
+        if value.is_empty() {
+            return Err("categorical filter values cannot be empty".into());
+        }
+        selected
+            .entry(categorical_value_key(value))
+            .or_insert_with(|| value.to_owned());
+    }
+    if selected.len() > MAX_CATEGORICAL_VALUES {
+        return Err(format!(
+            "at most {MAX_CATEGORICAL_VALUES} categorical values can be selected"
+        ));
+    }
+    let include_missing = include_missing.unwrap_or(false);
+    if selected.is_empty() && !include_missing {
+        return Err("select at least one categorical value or include missing values".into());
+    }
+    Ok(Some(CategoricalSelection {
+        values: selected.into_values().collect(),
+        include_missing,
+    }))
+}
+
+fn normalized_categorical_match_sql(
+    expression: &str,
+    kind: FilterValueKind,
+    values: &[String],
+) -> (String, Vec<SqlValue>) {
+    if values.is_empty() {
+        return ("FALSE".into(), Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", values.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let normalize =
+        |value: &str| format!("replace(replace(lower(trim({value})), '_', ' '), '-', ' ')");
+    let condition = if kind == FilterValueKind::Json {
+        format!(
+            "EXISTS (
+                SELECT 1
+                FROM unnest(json_extract_string(coalesce({expression}, '[]'), '$[*]')) AS category_items(value)
+                WHERE {} IN ({placeholders})
+            )",
+            normalize("category_items.value")
+        )
+    } else {
+        format!(
+            "{} IN ({placeholders})",
+            normalize(&format!("CAST({expression} AS VARCHAR)"))
+        )
+    };
+    (
+        condition,
+        values
+            .iter()
+            .map(|value| categorical_value_key(value).into())
+            .collect(),
+    )
+}
+
+fn delimited_categorical_match_sql(
+    expression: &str,
+    delimiter: char,
+    values: &[String],
+) -> (String, Vec<SqlValue>) {
+    if values.is_empty() {
+        return ("FALSE".into(), Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", values.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        format!(
+            "EXISTS (
+                SELECT 1
+                FROM unnest(string_split(coalesce(CAST({expression} AS VARCHAR), ''), '{delimiter}')) AS category_items(value)
+                WHERE replace(replace(lower(trim(category_items.value)), '_', ' '), '-', ' ')
+                    IN ({placeholders})
+            )"
+        ),
+        values
+            .iter()
+            .map(|value| categorical_value_key(value).into())
+            .collect(),
+    )
+}
+
+fn categorical_present_sql(expression: &str, kind: FilterValueKind) -> String {
+    if kind == FilterValueKind::Json {
+        format!("json_array_length(coalesce({expression}, '[]')) > 0")
+    } else {
+        format!(
+            "nullif(trim(CAST({expression} AS VARCHAR)), '') IS NOT NULL
+             AND trim(CAST({expression} AS VARCHAR)) <> '.'"
+        )
+    }
+}
+
+fn categorical_condition_sql(
+    present: &str,
+    matched: &str,
+    operator: &str,
+    include_missing: bool,
+) -> Result<String, String> {
+    match (operator, include_missing) {
+        ("in", false) => Ok(format!("({present}) AND ({matched})")),
+        ("in", true) => Ok(format!("NOT ({present}) OR ({matched})")),
+        ("not_in", false) => Ok(format!("({present}) AND NOT ({matched})")),
+        ("not_in", true) => Ok(format!("NOT ({matched})")),
+        _ => Err("categorical filters use 'is any of' or 'is none of'".into()),
+    }
+}
+
 fn core_filter_rules_sql(request: &PageRequest) -> Result<(String, Vec<SqlValue>), String> {
     if request.filter_rules.len() > 24 {
         return Err("at most 24 filter rules can be applied at once".into());
@@ -3257,12 +3598,31 @@ fn core_filter_rules_sql(request: &PageRequest) -> Result<(String, Vec<SqlValue>
         let (expression, kind) = core_filter_column(rule.column.trim())
             .ok_or_else(|| format!("unknown filter column: {}", rule.column))?;
         let operator = rule.operator.trim();
-        let (condition, values) =
-            if rule.column.trim() == "consequence" && matches!(operator, "in" | "not_in") {
-                text_contains_list_sql(expression, operator, &rule.value)?
-            } else {
-                comparison_sql(expression, kind, operator, &rule.value)?
+        let categorical = categorical_selection(&rule.values, rule.include_missing)?;
+        let (condition, values) = if let Some(selection) = categorical {
+            validate_closed_core_category(rule.column.trim(), &selection.values)?;
+            let delimiter = match rule.column.trim() {
+                "consequence" => Some('&'),
+                "filter" => Some(';'),
+                "impact" | "zygosity" => None,
+                _ => return Err(format!("{} is not a categorical filter", rule.column)),
             };
+            let (matched, values) = delimiter.map_or_else(
+                || normalized_categorical_match_sql(expression, kind, &selection.values),
+                |delimiter| {
+                    delimited_categorical_match_sql(expression, delimiter, &selection.values)
+                },
+            );
+            let present = categorical_present_sql(expression, kind);
+            (
+                categorical_condition_sql(&present, &matched, operator, selection.include_missing)?,
+                values,
+            )
+        } else if rule.column.trim() == "consequence" && matches!(operator, "in" | "not_in") {
+            text_contains_list_sql(expression, operator, &rule.value)?
+        } else {
+            comparison_sql(expression, kind, operator, &rule.value)?
+        };
         sql.push_str(" AND (");
         sql.push_str(&condition);
         sql.push(')');
@@ -3460,6 +3820,7 @@ fn page_json_internal(
     request: &PageRequest,
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
+    prepare_sample_call_projection(parquet, request)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
     let query = PageQuery {
@@ -4026,6 +4387,8 @@ fn install_matched_rows(connection: &Connection, rows: &[CachedResultRow]) -> Re
                 alternate_count INTEGER NOT NULL,
                 format VARCHAR,
                 samples_json VARCHAR NOT NULL,
+                zygosity VARCHAR,
+                zygosity_sort INTEGER,
                 PRIMARY KEY(record_number, alt_index)
             )",
         )
@@ -4055,6 +4418,8 @@ fn install_matched_rows(connection: &Connection, rows: &[CachedResultRow]) -> Re
             SqlValue::Int(row.alternate_count),
             row.format.clone().map_or(SqlValue::Null, Into::into),
             row.samples_json.clone().into(),
+            row.zygosity.clone().map_or(SqlValue::Null, Into::into),
+            row.zygosity_sort.map_or(SqlValue::Null, SqlValue::Int),
         ];
         appender
             .append_row(appender_params_from_iter(values))
@@ -4082,6 +4447,7 @@ fn bounded_matched_rows(
                 v.reference, v.alternate, v.variant_id, v.quality, v.filter,
                 v.gene_symbol, v.gene_id, v.transcript_id, v.consequence, v.impact,
                 v.canonical, v.mane_select, v.alternate_count, v.format, v.samples_json
+                , v.zygosity, v.zygosity_sort
          FROM annocat_variants(?) v
          WHERE {where_sql}
          LIMIT {}",
@@ -4121,6 +4487,8 @@ fn bounded_matched_rows(
                 alternate_count: row.get(17)?,
                 format: row.get(18)?,
                 samples_json: row.get(19)?,
+                zygosity: row.get(20)?,
+                zygosity_sort: row.get(21)?,
             })
         })
         .map_err(|error| format!("cannot read bounded result query: {error}"))?;
@@ -4959,6 +5327,256 @@ fn is_query_projection(evidence: &Path) -> bool {
         .is_some_and(|name| name.starts_with(QUERY_PROJECTION_PREFIX) && name.ends_with(".parquet"))
 }
 
+fn request_uses_zygosity(request: &PageRequest) -> bool {
+    request
+        .filter_rules
+        .iter()
+        .any(|rule| rule.column.trim() == "zygosity")
+        || request.sort.trim() == "zygosity"
+        || request
+            .sorts
+            .iter()
+            .any(|sort| sort.column.trim() == "zygosity")
+}
+
+fn parquet_row_count(path: &Path) -> Result<i64, String> {
+    let file =
+        File::open(path).map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    Ok(reader.metadata().file_metadata().num_rows())
+}
+
+fn sample_call_projection_path(variants: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::metadata(variants)
+        .map_err(|error| format!("cannot inspect {}: {error}", variants.display()))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |value| value.as_nanos());
+    let root = variants
+        .parent()
+        .ok_or("result variant table has no directory")?;
+    Ok(root.join(format!(
+        "{SAMPLE_CALL_PROJECTION_PREFIX}{:x}-{modified:x}.parquet",
+        metadata.len()
+    )))
+}
+
+fn sample_call_projection_is_valid(path: &Path, variants: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(reader) = ParquetRecordBatchReaderBuilder::try_new(file) else {
+        return false;
+    };
+    let schema = reader.schema();
+    ["record_number", "alt_index", "zygosity", "zygosity_sort"]
+        .iter()
+        .all(|name| schema.field_with_name(name).is_ok())
+        && parquet_row_count(variants)
+            .is_ok_and(|rows| rows == reader.metadata().file_metadata().num_rows())
+}
+
+fn remove_stale_sample_call_projections(variants: &Path, keep: &Path) {
+    let Some(root) = variants.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path != keep
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(SAMPLE_CALL_PROJECTION_PREFIX) && name.ends_with(".parquet")
+                })
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn available_sample_call_projection(variants: &Path) -> Option<PathBuf> {
+    let path = sample_call_projection_path(variants).ok()?;
+    sample_call_projection_is_valid(&path, variants).then_some(path)
+}
+
+fn build_sample_call_projection(variants: &Path, destination: &Path) -> Result<(), String> {
+    let file = File::open(variants)
+        .map_err(|error| format!("cannot read {}: {error}", variants.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|error| format!("cannot read result sample calls: {error}"))?;
+    let schema = builder.schema();
+    let has_alternate_count = schema.field_with_name("alternate_count").is_ok();
+    let mut columns = vec!["record_number", "alt_index", "format", "samples_json"];
+    if has_alternate_count {
+        columns.push("alternate_count");
+    }
+    let indices = columns
+        .into_iter()
+        .map(|name| {
+            schema
+                .index_of(name)
+                .map_err(|_| format!("result sample calls have no {name} column"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let projection = ProjectionMask::roots(builder.parquet_schema(), indices);
+    let reader = builder
+        .with_projection(projection)
+        .with_batch_size(VARIANT_CHUNK_RECORDS)
+        .build()
+        .map_err(|error| format!("cannot stream result sample calls: {error}"))?;
+
+    let partial = crate::library_metadata::unique_temporary_path(destination)?;
+    let projection_schema = SampleCallProjectionBatch::default()
+        .into_record_batch()?
+        .schema();
+    let mut writer = parquet_writer(&partial, projection_schema)?;
+    let mut pending_legacy_record = Vec::<LegacySampleCallRow>::new();
+    for batch in reader {
+        let batch = batch.map_err(|error| format!("cannot read result sample calls: {error}"))?;
+        let record_numbers = batch
+            .column_by_name("record_number")
+            .and_then(|array| array.as_any().downcast_ref::<Int64Array>())
+            .ok_or("result sample calls have an invalid record_number column")?;
+        let alt_indices = batch
+            .column_by_name("alt_index")
+            .and_then(|array| array.as_any().downcast_ref::<Int32Array>())
+            .ok_or("result sample calls have an invalid alt_index column")?;
+        let alternate_counts = batch.column_by_name("alternate_count").map(|array| {
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or("result sample calls have an invalid alternate_count column")
+        });
+        let alternate_counts = alternate_counts.transpose()?;
+        let formats = batch
+            .column_by_name("format")
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+            .ok_or("result sample calls have an invalid format column")?;
+        let samples = batch
+            .column_by_name("samples_json")
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+            .ok_or("result sample calls have an invalid samples_json column")?;
+        let mut output = SampleCallProjectionBatch::default();
+        for row in 0..batch.num_rows() {
+            let format = (!formats.is_null(row)).then(|| formats.value(row));
+            let record_number = record_numbers.value(row);
+            let alt_index = alt_indices.value(row);
+            if let Some(alternate_counts) = alternate_counts {
+                let (zygosity, zygosity_sort) = zygosity_from_samples_json(
+                    format,
+                    samples.value(row),
+                    alt_index,
+                    alternate_counts.value(row),
+                );
+                output.record_number.push(record_number);
+                output.alt_index.push(alt_index);
+                output.zygosity.push(zygosity);
+                output.zygosity_sort.push(zygosity_sort);
+                continue;
+            }
+            if pending_legacy_record
+                .first()
+                .is_some_and(|pending| pending.record_number != record_number)
+            {
+                if pending_legacy_record[0].record_number > record_number {
+                    return Err("legacy result sample calls are not ordered by record".into());
+                }
+                append_legacy_sample_call_group(&mut output, &mut pending_legacy_record)?;
+            }
+            pending_legacy_record.push(LegacySampleCallRow {
+                record_number,
+                alt_index,
+                format: format.map(str::to_owned),
+                samples_json: samples.value(row).to_owned(),
+            });
+        }
+        if output.len() > 0 {
+            writer
+                .write(&output.into_record_batch()?)
+                .map_err(|error| format!("cannot write sample-call projection: {error}"))?;
+        }
+    }
+    if !pending_legacy_record.is_empty() {
+        let mut output = SampleCallProjectionBatch::default();
+        append_legacy_sample_call_group(&mut output, &mut pending_legacy_record)?;
+        writer
+            .write(&output.into_record_batch()?)
+            .map_err(|error| format!("cannot write sample-call projection: {error}"))?;
+    }
+    writer
+        .close()
+        .map_err(|error| format!("cannot finish sample-call projection: {error}"))?;
+    if !sample_call_projection_is_valid(&partial, variants) {
+        let _ = fs::remove_file(&partial);
+        return Err("sample-call projection failed validation".into());
+    }
+    crate::library_metadata::publish_cache_file(&partial, destination, |path| {
+        sample_call_projection_is_valid(path, variants)
+    })
+}
+
+fn prepare_sample_call_projection(
+    variants: &Path,
+    request: &PageRequest,
+) -> Result<Option<PathBuf>, String> {
+    // Reject invalid closed-category values before legacy compatibility work starts.
+    let _ = core_filter_rules_sql(request)?;
+    if !request_uses_zygosity(request)
+        || (parquet_has_column(variants, "zygosity")?
+            && parquet_has_column(variants, "zygosity_sort")?)
+    {
+        return Ok(None);
+    }
+    if let Some(path) = available_sample_call_projection(variants) {
+        return Ok(Some(path));
+    }
+    let _guard = SAMPLE_CALL_PROJECTION_BUILD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "sample-call projection lock failed")?;
+    let destination = sample_call_projection_path(variants)?;
+    if !sample_call_projection_is_valid(&destination, variants) {
+        build_sample_call_projection(variants, &destination)?;
+    }
+    remove_stale_sample_call_projections(variants, &destination);
+    Ok(Some(destination))
+}
+
+fn categorical_subquery_sql(
+    read_sql: &str,
+    base_condition: &str,
+    expression: &str,
+    kind: FilterValueKind,
+    operator: &str,
+    selection: &CategoricalSelection,
+) -> Result<(String, Vec<SqlValue>), String> {
+    let (matched, mut parameters) =
+        normalized_categorical_match_sql(expression, kind, &selection.values);
+    let aggregate = match operator {
+        "in" => format!("bool_or({matched})"),
+        "not_in" => format!("NOT bool_or({matched})"),
+        _ => return Err("categorical filters use 'is any of' or 'is none of'".into()),
+    };
+    let present = categorical_present_sql(expression, kind);
+    parameters.push(selection.include_missing.into());
+    Ok((
+        format!(
+            "COALESCE((
+                SELECT {aggregate}
+                FROM {read_sql}
+                WHERE ({base_condition}) AND ({present})
+            ), CAST(? AS BOOLEAN))"
+        ),
+        parameters,
+    ))
+}
+
 fn evidence_filter_rules_sql(
     evidence: Option<&Path>,
     evidence_files: Option<&[PathBuf]>,
@@ -4991,6 +5609,15 @@ fn evidence_filter_rules_sql(
             _ if evidence_field_is_numeric(&field) => FilterValueKind::Number,
             _ => FilterValueKind::Text,
         };
+        let categorical = categorical_selection(&filter.values, filter.include_missing)?;
+        if categorical.is_some()
+            && categorical_contract_for_field(&field.source_id, &field.field_path)?.is_none()
+        {
+            return Err(format!(
+                "{} is not a categorical annotation field",
+                field.field_path
+            ));
+        }
         if field.resolution == EvidenceResolutionStrategy::GeneDirect
             || (field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
                 && !is_query_projection(evidence))
@@ -5007,6 +5634,29 @@ fn evidence_filter_rules_sql(
                     "coalesce(ge.string_value, CAST(ge.integer_value AS VARCHAR), CAST(ge.number_value AS VARCHAR), CAST(ge.boolean_value AS VARCHAR), ge.json_value, '')"
                 }
             };
+            if let Some(selection) = categorical.as_ref() {
+                let identity = if field.resolution == EvidenceResolutionStrategy::GeneDirect {
+                    "upper(ge.gene_symbol)=upper(v.gene_symbol)"
+                } else {
+                    "ge.allele_id=v.allele_id"
+                };
+                let (condition, values) = categorical_subquery_sql(
+                    "read_parquet(?) ge",
+                    &format!("{identity} AND ge.source_id=? AND ge.field_path=?"),
+                    expression,
+                    kind,
+                    &filter.operator,
+                    selection,
+                )?;
+                sql.push_str(" AND (");
+                sql.push_str(&condition);
+                sql.push(')');
+                parameters.push(gene_evidence.to_string_lossy().into_owned().into());
+                parameters.push(field.source_id.into());
+                parameters.push(field.field_path.into());
+                parameters.extend(values);
+                continue;
+            }
             let negative = matches!(
                 filter.operator.as_str(),
                 "not_equals" | "not_contains" | "not_in"
@@ -5050,6 +5700,27 @@ fn evidence_filter_rules_sql(
                     "er.resolved_string"
                 }
             };
+            if let Some(selection) = categorical.as_ref() {
+                let (condition, values) = categorical_subquery_sql(
+                    "read_parquet(?) er",
+                    &format!(
+                        "er.allele_id = v.allele_id AND er.source_id=? AND er.field_path=? AND {}",
+                        resolution_kind_condition(field.resolution, "er")
+                    ),
+                    expression,
+                    kind,
+                    &filter.operator,
+                    selection,
+                )?;
+                sql.push_str(" AND (");
+                sql.push_str(&condition);
+                sql.push(')');
+                parameters.push(resolved.to_string_lossy().into_owned().into());
+                parameters.push(field.source_id.into());
+                parameters.push(field.field_path.into());
+                parameters.extend(values);
+                continue;
+            }
             let negative = matches!(
                 filter.operator.as_str(),
                 "not_equals" | "not_contains" | "not_in"
@@ -5092,6 +5763,31 @@ fn evidence_filter_rules_sql(
                 "coalesce(ev.string_value, CAST(ev.integer_value AS VARCHAR), CAST(ev.number_value AS VARCHAR), CAST(ev.boolean_value AS VARCHAR), ev.json_value, '')"
             }
         };
+        if let Some(selection) = categorical.as_ref() {
+            let (read_sql, mut read_parameters) =
+                evidence_read_for_fields(evidence, evidence_files, [field.index]);
+            let identity = if is_query_projection(evidence) {
+                "ev.record_number = v.record_number AND ev.alt_index = v.alt_index"
+            } else {
+                "ev.allele_id = v.allele_id"
+            };
+            let field_condition = evidence_field_condition(&field, "ev", evidence);
+            let (condition, values) = categorical_subquery_sql(
+                &format!("{read_sql} ev"),
+                &format!("{identity} AND {field_condition}"),
+                value_expression,
+                kind,
+                &filter.operator,
+                selection,
+            )?;
+            sql.push_str(" AND (");
+            sql.push_str(&condition);
+            sql.push(')');
+            parameters.append(&mut read_parameters);
+            append_evidence_field_parameters(&mut parameters, &field, evidence)?;
+            parameters.extend(values);
+            continue;
+        }
         let negative = matches!(
             filter.operator.as_str(),
             "not_equals" | "not_contains" | "not_in"
@@ -5457,6 +6153,7 @@ fn page_json_with_evidence_internal(
     request: &PageRequest,
     candidate_ids: Option<&[String]>,
 ) -> Result<String, String> {
+    prepare_sample_call_projection(variants, request)?;
     prepare_requested_evidence_resolution(variants, evidence, catalog, request)?;
     with_query_evidence(
         evidence,
@@ -6035,6 +6732,7 @@ pub fn page_json_with_details_for_candidates(
 }
 
 fn page_json_with_details_query(query_key: &str, query: PageQuery<'_>) -> Result<String, String> {
+    prepare_sample_call_projection(query.variants, query.request)?;
     prepare_requested_evidence_resolution(
         query.variants,
         query.evidence,
@@ -6203,11 +6901,123 @@ fn query_field_catalog(catalog: &Path) -> Result<Value, String> {
     )
     .map_err(|error| format!("invalid field catalog: {error}"))?;
     append_legacy_spliceai_maximum(&mut catalog)?;
+    enrich_categorical_contracts(&mut catalog)?;
     Ok(catalog)
 }
 
 pub(crate) fn field_catalog_json(catalog: &Path) -> Result<String, String> {
     serde_json::to_string(&query_field_catalog(catalog)?).map_err(|error| error.to_string())
+}
+
+pub(crate) fn categorical_filter_values_json(
+    variants: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    core_column: Option<&str>,
+    evidence_index: Option<usize>,
+) -> Result<String, String> {
+    if core_column.is_some() == evidence_index.is_some() {
+        return Err("specify one core column or one annotation field".into());
+    }
+    let connection = Connection::open_in_memory()
+        .map_err(|error| format!("cannot initialize categorical value discovery: {error}"))?;
+    let (query, parameters) = if let Some(column) = core_column {
+        let (expression, delimiter) = match column {
+            "impact" => ("coalesce(CAST(v.impact AS VARCHAR), '')", None),
+            "consequence" => ("coalesce(CAST(v.consequence AS VARCHAR), '')", Some('&')),
+            "filter" => ("coalesce(CAST(v.filter AS VARCHAR), '')", Some(';')),
+            _ => return Err(format!("{column} is not a categorical core column")),
+        };
+        let values = delimiter.map_or_else(
+            || format!("SELECT {expression} AS value FROM read_parquet(?) v"),
+            |delimiter| {
+                format!(
+                    "SELECT category.value
+                     FROM read_parquet(?) v,
+                     unnest(string_split({expression}, '{delimiter}')) AS category(value)"
+                )
+            },
+        );
+        (
+            format!(
+                "SELECT DISTINCT trim(value) AS value FROM ({values}) discovered
+                 WHERE nullif(trim(value), '') IS NOT NULL AND trim(value) <> '.'
+                 ORDER BY lower(value), value LIMIT {}",
+                MAX_CATEGORICAL_VALUES + 1
+            ),
+            vec![variants.to_string_lossy().into_owned().into()],
+        )
+    } else {
+        let evidence = evidence.ok_or("this AnnoCAT result has no evidence table")?;
+        let catalog = catalog.ok_or("this AnnoCAT result has no field catalog")?;
+        let field = selected_evidence_columns(catalog, &[evidence_index.unwrap()])?
+            .into_iter()
+            .next()
+            .ok_or("annotation field is missing")?;
+        if categorical_contract_for_field(&field.source_id, &field.field_path)?.is_none() {
+            return Err(format!(
+                "{} is not a categorical annotation field",
+                field.field_path
+            ));
+        }
+        if field.resolution == EvidenceResolutionStrategy::GeneDirect
+            || field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
+            || uses_resolution_sidecar(field.resolution)
+        {
+            return Err("this field has fixed choices and does not need value discovery".into());
+        }
+        let evidence = canonical_evidence_path(evidence);
+        let kind = if field.value_type == "json" {
+            FilterValueKind::Json
+        } else {
+            FilterValueKind::Text
+        };
+        let expression = if kind == FilterValueKind::Json {
+            "ev.json_value"
+        } else {
+            "coalesce(ev.string_value, CAST(ev.integer_value AS VARCHAR), CAST(ev.number_value AS VARCHAR), CAST(ev.boolean_value AS VARCHAR), '')"
+        };
+        let field_condition = evidence_field_condition(&field, "ev", &evidence);
+        let values = if kind == FilterValueKind::Json {
+            format!(
+                "SELECT category.value
+                 FROM read_parquet(?) ev,
+                 unnest(json_extract_string(coalesce({expression}, '[]'), '$[*]')) AS category(value)
+                 WHERE {field_condition}"
+            )
+        } else {
+            format!(
+                "SELECT {expression} AS value FROM read_parquet(?) ev
+                 WHERE {field_condition}"
+            )
+        };
+        let mut parameters = vec![evidence.to_string_lossy().into_owned().into()];
+        append_evidence_field_parameters(&mut parameters, &field, &evidence)?;
+        (
+            format!(
+                "SELECT DISTINCT trim(value) AS value FROM ({values}) discovered
+                 WHERE nullif(trim(value), '') IS NOT NULL AND trim(value) <> '.'
+                 ORDER BY lower(value), value LIMIT {}",
+                MAX_CATEGORICAL_VALUES + 1
+            ),
+            parameters,
+        )
+    };
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| format!("cannot prepare categorical value discovery: {error}"))?;
+    let rows = statement
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| format!("cannot discover categorical values: {error}"))?;
+    let mut values = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("cannot read categorical values: {error}"))?;
+    let complete = values.len() <= MAX_CATEGORICAL_VALUES;
+    values.truncate(MAX_CATEGORICAL_VALUES);
+    serde_json::to_string(&json!({ "values": values, "complete": complete }))
+        .map_err(|error| error.to_string())
 }
 
 fn append_legacy_spliceai_maximum(catalog: &mut Value) -> Result<(), String> {
@@ -6875,6 +7685,7 @@ pub fn export_filtered_rows_with_details(
     request: &PageRequest,
     columns: &[String],
 ) -> Result<u64, String> {
+    prepare_sample_call_projection(parquet, request)?;
     prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
     with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
         export_filtered_rows_with_details_once(
@@ -7189,6 +8000,7 @@ pub fn export_filtered_genes_with_details(
     destination: &Path,
     request: &PageRequest,
 ) -> Result<u64, String> {
+    prepare_sample_call_projection(parquet, request)?;
     prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
     with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
         export_filtered_genes_with_details_once(
@@ -7613,10 +8425,7 @@ fn page_sort_expression(sort: &str) -> Result<(&'static str, &'static str), Stri
         "variantId" => Ok(("variantId", "variant_id")),
         "quality" => Ok(("quality", "quality")),
         "filter" => Ok(("filter", "filter")),
-        "zygosity" => Ok((
-            "zygosity",
-            "annocat_zygosity_sort(format, samples_json, alt_index, alternate_count)",
-        )),
+        "zygosity" => Ok(("zygosity", "zygosity_sort")),
         "gene" => Ok(("gene", "coalesce(gene_symbol, gene_id, transcript_id)")),
         "geneId" => Ok(("geneId", "gene_id")),
         "transcriptId" => Ok(("transcriptId", "transcript_id")),
@@ -8020,6 +8829,23 @@ struct RawSampleCall {
     value: String,
 }
 
+fn zygosity_from_samples_json(
+    format: Option<&str>,
+    samples_json: &str,
+    alt_index: i32,
+    alternate_count: i32,
+) -> (Option<String>, Option<i32>) {
+    let samples = serde_json::from_str::<Vec<RawSampleCall>>(samples_json).unwrap_or_default();
+    zygosity_label_and_sort(
+        samples.first().map(|sample| sample.name.as_str()),
+        format,
+        samples.first().map(|sample| sample.value.as_str()),
+        samples.len(),
+        usize::try_from(alt_index).unwrap_or_default(),
+        usize::try_from(alternate_count).unwrap_or_default(),
+    )
+}
+
 fn table_zygosity(
     format: Option<&str>,
     samples_json: &str,
@@ -8391,6 +9217,9 @@ fn append_evidence_tree(
         .or_default();
     entry.types.insert(value_type);
     entry.occurrences += 1;
+    if let Some(contract) = categorical_contract_for_field(context.source_id, field_path)? {
+        collect_observed_categories(entry, contract, value);
+    }
     Ok(1)
 }
 
@@ -8400,6 +9229,165 @@ fn normalized_evidence_key(value: &str) -> String {
         .filter(u8::is_ascii_alphanumeric)
         .map(|byte| byte.to_ascii_lowercase() as char)
         .collect()
+}
+
+fn categorical_value_key(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn bundled_categorical_contracts() -> &'static Result<Vec<CategoricalContract>, String> {
+    static CONTRACTS: OnceLock<Result<Vec<CategoricalContract>, String>> = OnceLock::new();
+    CONTRACTS.get_or_init(|| {
+        let supplementary: Value = serde_json::from_str(include_str!(
+            "../../../config/supplementary-source-fields.json"
+        ))
+        .map_err(|error| format!("invalid categorical field contract: {error}"))?;
+        let mut contracts = Vec::new();
+        for source in supplementary["sources"]
+            .as_array()
+            .ok_or("supplementary field contract has no sources")?
+        {
+            let Some(source_id) = source["resourceId"].as_str() else {
+                continue;
+            };
+            for field in source["categoricalFields"].as_array().into_iter().flatten() {
+                let field_name = field["field"]
+                    .as_str()
+                    .ok_or("categorical field contract has no field name")?;
+                let match_mode = field["matchMode"]
+                    .as_str()
+                    .ok_or("categorical field contract has no match mode")?;
+                let parser = match field["parser"].as_str().unwrap_or("scalar") {
+                    "scalar" => CategoricalParser::Scalar,
+                    "json" => CategoricalParser::Json,
+                    value => return Err(format!("unknown categorical parser: {value}")),
+                };
+                contracts.push(CategoricalContract {
+                    source_id: source_id.to_owned(),
+                    field_name: field_name.to_owned(),
+                    match_mode: match_mode.to_owned(),
+                    parser,
+                    values: field["values"].as_array().cloned().unwrap_or_default(),
+                    discover_observed: field["discoverObserved"].as_bool().unwrap_or(false),
+                });
+            }
+        }
+
+        let calibrations: Value =
+            serde_json::from_str(include_str!("../../../config/evidence-calibrations.json"))
+                .map_err(|error| format!("invalid categorical prediction contract: {error}"))?;
+        for field in calibrations["categoricalPredictions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let Some(source_id) = field["sourceId"].as_str() else {
+                continue;
+            };
+            let Some(field_name) = field["fieldName"].as_str() else {
+                continue;
+            };
+            contracts.push(CategoricalContract {
+                source_id: source_id.to_owned(),
+                field_name: field_name.to_owned(),
+                match_mode: "scalar".into(),
+                parser: CategoricalParser::Scalar,
+                values: field["codes"].as_array().cloned().unwrap_or_default(),
+                discover_observed: false,
+            });
+        }
+        Ok(contracts)
+    })
+}
+
+fn categorical_contract_for_field(
+    source_id: &str,
+    field_path: &str,
+) -> Result<Option<&'static CategoricalContract>, String> {
+    let contracts = bundled_categorical_contracts()
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let field_key = normalized_evidence_key(field_path.rsplit('.').next().unwrap_or(field_path));
+    Ok(contracts.iter().find(|contract| {
+        catalog_source_is(source_id, &contract.source_id)
+            && field_key == normalized_evidence_key(&contract.field_name)
+    }))
+}
+
+fn insert_observed_category(entry: &mut CatalogEntry, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || value == "." || value.len() > MAX_CATEGORICAL_VALUE_BYTES {
+        return;
+    }
+    let key = categorical_value_key(value);
+    if key.is_empty() {
+        return;
+    }
+    entry
+        .observed_categories
+        .entry(key)
+        .and_modify(|existing| {
+            if value < existing.as_str() {
+                *existing = value.to_owned();
+            }
+        })
+        .or_insert_with(|| value.to_owned());
+    if entry.observed_categories.len() > MAX_CATEGORICAL_VALUES {
+        entry.observed_categories.pop_last();
+        entry.observed_categories_complete = false;
+    }
+}
+
+fn collect_observed_categories(
+    entry: &mut CatalogEntry,
+    contract: &CategoricalContract,
+    value: &Value,
+) {
+    if !contract.discover_observed {
+        return;
+    }
+    match (contract.parser, value) {
+        (CategoricalParser::Json, Value::Array(values)) => {
+            for value in values.iter().filter_map(Value::as_str) {
+                insert_observed_category(entry, value);
+            }
+        }
+        (CategoricalParser::Scalar, Value::String(value)) => {
+            insert_observed_category(entry, value);
+        }
+        _ => {}
+    }
+}
+
+fn enrich_categorical_contracts(catalog: &mut Value) -> Result<(), String> {
+    let fields = catalog["fields"]
+        .as_array_mut()
+        .ok_or("field catalog has no fields array")?;
+    for field in fields {
+        let (Some(source_id), Some(field_path)) =
+            (field["sourceId"].as_str(), field["fieldPath"].as_str())
+        else {
+            continue;
+        };
+        let Some(contract) = categorical_contract_for_field(source_id, field_path)? else {
+            continue;
+        };
+        let observed = field["categorical"].clone();
+        field["categorical"] = json!({
+            "matchMode": contract.match_mode,
+            "values": contract.values,
+            "canDiscover": contract.discover_observed,
+            "observedValues": observed["observedValues"].clone(),
+            "observedValuesComplete": observed["observedValuesComplete"].as_bool().unwrap_or(false),
+        });
+    }
+    Ok(())
 }
 
 fn spliceai_maximum_delta(object: &Map<String, Value>) -> Option<f64> {
@@ -9737,14 +10725,84 @@ fn register_sample_call_macros(connection: &Connection) -> Result<(), String> {
                  THEN 2
                  ELSE 4
                END
+             );
+             CREATE OR REPLACE TEMP MACRO annocat_zygosity_label(
+               format_value, samples_value, alt_index_value, alternate_count_value
+             ) AS (
+               CASE
+                 WHEN coalesce(json_array_length(try_cast(samples_value AS JSON)), 0) = 0
+                 THEN NULL
+                 WHEN json_array_length(try_cast(samples_value AS JSON)) > 1
+                 THEN 'Multiple sample calls'
+                 WHEN annocat_sample_gt(format_value, samples_value) IS NULL
+                 THEN NULL
+                 WHEN NOT regexp_full_match(
+                   annocat_sample_gt(format_value, samples_value),
+                   '(\\.|[0-9]+)([|/](\\.|[0-9]+))*'
+                 )
+                   OR alt_index_value < 1
+                   OR alt_index_value > alternate_count_value
+                   OR coalesce(list_max(list_transform(
+                     list_filter(
+                       annocat_gt_alleles(format_value, samples_value),
+                       allele -> allele <> '.'
+                     ),
+                     allele -> try_cast(allele AS INTEGER)
+                   )), 0) > alternate_count_value
+                 THEN 'Invalid genotype'
+                 WHEN list_count(list_filter(
+                   annocat_gt_alleles(format_value, samples_value),
+                   allele -> allele <> '.'
+                 )) = 0
+                 THEN 'Not called'
+                 WHEN list_count(list_filter(
+                   annocat_gt_alleles(format_value, samples_value),
+                   allele -> allele = '.'
+                 )) > 0
+                 THEN 'Partially called'
+                 ELSE CASE annocat_zygosity_sort(
+                   format_value, samples_value, alt_index_value, alternate_count_value
+                 )
+                   WHEN 0 THEN 'Reference'
+                   WHEN 1 THEN 'Other alternate'
+                   WHEN 2 THEN 'Heterozygous'
+                   WHEN 3 THEN 'Haploid alternate'
+                   WHEN 4 THEN 'Mixed alternate'
+                   WHEN 5 THEN 'Homozygous alternate'
+                 END
+               END
              )",
         )
         .map_err(|error| format!("cannot prepare sample-call result helpers: {error}"))
 }
 
 fn register_report_variants(connection: &Connection, variants: &Path) -> Result<(), String> {
-    let relation = resolved_variants_relation(variants)?;
     register_sample_call_macros(connection)?;
+    let mut relation = resolved_variants_relation(variants)?;
+    let has_stored_zygosity =
+        parquet_has_column(variants, "zygosity")? && parquet_has_column(variants, "zygosity_sort")?;
+    if !has_stored_zygosity {
+        relation = if let Some(projection) = available_sample_call_projection(variants) {
+            let projection = projection.to_string_lossy().replace('\'', "''");
+            format!(
+                "(SELECT v.*, calls.zygosity, calls.zygosity_sort
+                  FROM {relation} v
+                  LEFT JOIN read_parquet('{projection}') calls
+                    USING(record_number, alt_index))"
+            )
+        } else {
+            format!(
+                "(SELECT v.*,
+                         annocat_zygosity_label(
+                           v.format, v.samples_json, v.alt_index, v.alternate_count
+                         ) AS zygosity,
+                         annocat_zygosity_sort(
+                           v.format, v.samples_json, v.alt_index, v.alternate_count
+                         ) AS zygosity_sort
+                  FROM {relation} v)"
+            )
+        };
+    }
     connection
         .execute_batch(&format!(
             "CREATE OR REPLACE TEMP MACRO annocat_variants(path) AS TABLE
@@ -9828,6 +10886,71 @@ fn canonical_allele_id(allele: &CanonicalAllele) -> String {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn categorical_filters_preserve_exact_values_and_missing_semantics() {
+        let selection = categorical_selection(
+            &Some(vec![
+                " Pathogenic ".into(),
+                "pathogenic".into(),
+                "A, B".into(),
+            ]),
+            Some(false),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection.values, ["A, B", "Pathogenic"]);
+        assert!(!selection.include_missing);
+
+        let (matched, parameters) =
+            normalized_categorical_match_sql("value", FilterValueKind::Json, &selection.values);
+        assert_eq!(
+            parameters,
+            [
+                SqlValue::Text("a, b".into()),
+                SqlValue::Text("pathogenic".into())
+            ]
+        );
+        let present = categorical_present_sql("value", FilterValueKind::Json);
+        let condition = categorical_condition_sql(&present, &matched, "in", false).unwrap();
+        let connection = Connection::open_in_memory().unwrap();
+        let query = format!(
+            "SELECT value FROM (VALUES ('[\"Pathogenic\"]'), ('[\"Uncertain_pathogenicity\"]'),
+             ('[\"A, B\"]'), (NULL)) categories(value) WHERE {condition} ORDER BY value"
+        );
+        let mut statement = connection.prepare(&query).unwrap();
+        let matches = statement
+            .query_map(params_from_iter(parameters.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(matches, ["[\"A, B\"]", "[\"Pathogenic\"]"]);
+        assert_eq!(
+            categorical_condition_sql("present", "matched", "not_in", true).unwrap(),
+            "NOT (matched)"
+        );
+
+        let contract = CategoricalContract {
+            source_id: "clinvar".into(),
+            field_name: "significance".into(),
+            match_mode: "set".into(),
+            parser: CategoricalParser::Json,
+            values: Vec::new(),
+            discover_observed: true,
+        };
+        let mut entry = CatalogEntry::default();
+        collect_observed_categories(
+            &mut entry,
+            &contract,
+            &serde_json::json!(["Pathogenic", "pathogenic", "Likely_pathogenic"]),
+        );
+        assert_eq!(
+            entry.observed_categories.into_values().collect::<Vec<_>>(),
+            ["Likely_pathogenic", "Pathogenic"]
+        );
+    }
 
     #[test]
     fn projected_field_reads_do_not_open_unrelated_sidecars() {
@@ -10478,6 +11601,8 @@ mod tests {
                         column: "gene".into(),
                         operator: "in".into(),
                         value: "gene_g, missing_gene".into(),
+                        values: None,
+                        include_missing: None,
                     }],
                     ..PageRequest::default()
                 },
@@ -12344,6 +13469,8 @@ mod tests {
                         operator: "gte".into(),
                         value: "0.3".into(),
                         value2: String::new(),
+                        values: None,
+                        include_missing: None,
                     }],
                     ..PageRequest::default()
                 },
@@ -12365,6 +13492,8 @@ mod tests {
                         operator: "contains".into(),
                         value: "pathogenic".into(),
                         value2: String::new(),
+                        values: None,
+                        include_missing: None,
                     }],
                     ..PageRequest::default()
                 },
@@ -12387,6 +13516,8 @@ mod tests {
                             operator: operator.into(),
                             value: "Pathogenic".into(),
                             value2: String::new(),
+                            values: None,
+                            include_missing: None,
                         }],
                         ..PageRequest::default()
                     },
@@ -12600,6 +13731,8 @@ mod tests {
                         operator: "gte".into(),
                         value: "0".into(),
                         value2: String::new(),
+                        values: None,
+                        include_missing: None,
                     }],
                     ..PageRequest::default()
                 },
@@ -12801,6 +13934,180 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn zygosity_filter_labels_use_the_selected_alternate_allele() {
+        let connection = Connection::open_in_memory().unwrap();
+        register_sample_call_macros(&connection).unwrap();
+        let label = |format: Option<&str>, samples: &str, alt_index, alternate_count| {
+            connection
+                .query_row(
+                    "SELECT annocat_zygosity_label(?, ?, ?, ?)",
+                    params![format, samples, alt_index, alternate_count],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"0/1"}]"#, 1, 2),
+            Some("Heterozygous".into())
+        );
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"0/2"}]"#, 1, 2),
+            Some("Other alternate".into())
+        );
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"1/1"}]"#, 1, 2),
+            Some("Homozygous alternate".into())
+        );
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"./."}]"#, 1, 2),
+            Some("Not called".into())
+        );
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"0/."}]"#, 1, 2),
+            Some("Partially called".into())
+        );
+        assert_eq!(
+            label(Some("GT"), r#"[{"name":"S","value":"x/y"}]"#, 1, 2),
+            Some("Invalid genotype".into())
+        );
+        assert_eq!(
+            label(
+                Some("GT"),
+                r#"[{"name":"S1","value":"0/1"},{"name":"S2","value":"1/1"}]"#,
+                1,
+                2,
+            ),
+            Some("Multiple sample calls".into())
+        );
+        assert_eq!(label(Some("GT"), "[]", 1, 2), None);
+    }
+
+    #[test]
+    fn zygosity_is_a_categorical_core_filter() {
+        let request = PageRequest {
+            filter_rules: vec![CoreFilterRuleRequest {
+                column: "zygosity".into(),
+                operator: "in".into(),
+                value: String::new(),
+                values: Some(vec!["Heterozygous".into()]),
+                include_missing: Some(false),
+            }],
+            ..PageRequest::default()
+        };
+        let (sql, values) = core_filter_rules_sql(&request).unwrap();
+        assert!(sql.contains("v.zygosity"));
+        assert!(!sql.contains("annocat_zygosity_label"));
+        assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn zygosity_filter_rejects_unknown_values_before_querying() {
+        let request = PageRequest {
+            filter_rules: vec![CoreFilterRuleRequest {
+                column: "zygosity".into(),
+                operator: "in".into(),
+                value: String::new(),
+                values: Some(vec!["haploid".into()]),
+                include_missing: Some(false),
+            }],
+            ..PageRequest::default()
+        };
+        assert_eq!(
+            core_filter_rules_sql(&request).unwrap_err(),
+            "unsupported zygosity filter value: haploid; choose a listed value"
+        );
+    }
+
+    #[test]
+    fn legacy_zygosity_filter_builds_one_bounded_projection_after_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-legacy-zygosity-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let vcf = root.join("sample.vcf");
+        fs::write(
+            &vcf,
+            "##fileformat=VCFv4.2\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature|UPLOADED_ALLELE\">\n##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tCASE\n1\t100\t.\tA\tG\t50\tPASS\tCSQ=G|intron_variant|MODIFIER|GENE1|ENSG00000000001|ENST00000000001|A/G\tGT\t1\n",
+        )
+        .unwrap();
+        let current = root.join("current.parquet");
+        convert_vcf(&vcf, &current, || false, |_, _, _, _, _| {}).unwrap();
+        let direct: Value = serde_json::from_str(
+            &page_json(
+                &current,
+                0,
+                10,
+                &PageRequest {
+                    filter_rules: vec![CoreFilterRuleRequest {
+                        column: "zygosity".into(),
+                        operator: "in".into(),
+                        value: String::new(),
+                        values: Some(vec!["Haploid alternate".into()]),
+                        include_missing: Some(false),
+                    }],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(direct["rows"][0]["zygosity"], "Haploid alternate");
+        let legacy = root.join("variants.parquet");
+        Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (
+                    SELECT * EXCLUDE (alternate_count, zygosity, zygosity_sort)
+                    FROM read_parquet('{}')
+                 ) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+                current.to_string_lossy().replace('\'', "''"),
+                legacy.to_string_lossy().replace('\'', "''")
+            ))
+            .unwrap();
+        let sidecar_count = || {
+            fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with(SAMPLE_CALL_PROJECTION_PREFIX))
+                })
+                .count()
+        };
+        let request = |value: &str| PageRequest {
+            filter_rules: vec![CoreFilterRuleRequest {
+                column: "zygosity".into(),
+                operator: "in".into(),
+                value: String::new(),
+                values: Some(vec![value.into()]),
+                include_missing: Some(false),
+            }],
+            ..PageRequest::default()
+        };
+
+        assert!(page_json(&legacy, 0, 10, &request("haploid")).is_err());
+        assert_eq!(sidecar_count(), 0);
+        let page: Value = serde_json::from_str(
+            &page_json(&legacy, 0, 10, &request("Haploid alternate")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(page["rows"][0]["zygosity"], "Haploid alternate");
+        assert_eq!(sidecar_count(), 1);
+        page_json(&legacy, 0, 10, &request("Haploid alternate")).unwrap();
+        assert_eq!(sidecar_count(), 1);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13008,6 +14315,8 @@ mod tests {
                 operator: "gt".into(),
                 value: "0.35".into(),
                 value2: String::new(),
+                values: None,
+                include_missing: None,
             }],
             ..PageRequest::default()
         });
@@ -13189,6 +14498,8 @@ mod tests {
                 operator: "gt".into(),
                 value: "0.8".into(),
                 value2: String::new(),
+                values: None,
+                include_missing: None,
             }],
             ..PageRequest::default()
         });
@@ -13344,6 +14655,8 @@ mod tests {
                         operator: "gt".into(),
                         value: "0.85".into(),
                         value2: String::new(),
+                        values: None,
+                        include_missing: None,
                     }],
                     ..PageRequest::default()
                 },
@@ -13646,6 +14959,8 @@ mod tests {
                     operator: "gt".into(),
                     value: "0.5".into(),
                     value2: String::new(),
+                    values: None,
+                    include_missing: None,
                 }],
                 ..PageRequest::default()
             })["total"],
@@ -13729,6 +15044,8 @@ mod tests {
                     operator: "gt".into(),
                     value: "0.054".into(),
                     value2: String::new(),
+                    values: None,
+                    include_missing: None,
                 }],
                 ..PageRequest::default()
             })["total"],
@@ -14043,6 +15360,8 @@ mod tests {
                             operator: "gt".into(),
                             value: threshold.into(),
                             value2: String::new(),
+                            values: None,
+                            include_missing: None,
                         }],
                         ..PageRequest::default()
                     },
@@ -14359,6 +15678,8 @@ mod tests {
                     operator: "gt".into(),
                     value: "0.2".into(),
                     value2: String::new(),
+                    values: None,
+                    include_missing: None,
                 }],
                 exact_total: true,
                 ..PageRequest::default()
@@ -14557,6 +15878,8 @@ mod tests {
                 operator: "equals".into(),
                 value: "true".into(),
                 value2: String::new(),
+                values: None,
+                include_missing: None,
             }],
             sort_evidence: Some(0),
             direction: "desc".into(),
