@@ -52,7 +52,7 @@ const coreFilterColumns=[
   {key:'chromosome',label:'Chromosome',type:'text'},{key:'position',label:'Position',type:'number'},
   {key:'reference',label:'Reference',type:'text'},{key:'alternate',label:'Alternate',type:'text'},
   {key:'variantId',label:'Variant ID',type:'text'},{key:'quality',label:'QUAL',type:'number'},
-  {key:'filter',label:'VCF FILTER',type:'text',categorical:{matchMode:'set',values:[{value:'PASS',label:'PASS'}],canDiscover:true}},
+  {key:'filter',label:'VCF FILTER',type:'text',categorical:{matchMode:'set',values:[{value:'PASS',label:'PASS'},{value:'FAIL',label:'FAIL'}],canDiscover:true}},
   {key:'zygosity',label:'Zygosity',type:'text',categorical:{matchMode:'scalar',values:[
     {value:'Reference',label:'Reference'},{value:'Other alternate',label:'Other alternate'},
     {value:'Heterozygous',label:'Heterozygous'},{value:'Homozygous alternate',label:'Homozygous alternate'},
@@ -80,7 +80,7 @@ document.addEventListener('keydown',event=>{if(['Control','Meta','Shift'].includ
 document.addEventListener('keyup',event=>resultSortModifierKeys.delete(event.key));
 window.addEventListener('blur',()=>resultSortModifierKeys.clear());
 let useCalibratedEvidenceColors=localStorage.getItem(CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY)!=='false';
-let setupDismissed=false,lastTaskSnapshots=[],taskRenderPending=false,lastAnnotationState={state:'idle'},globalStatusNotice=null,completedRuns=[],completedRunSearch='',lastSetupReady=false,resourceStates={},refreshingResources=false,currentResultRun=null,resultView='all',candidateAlleles=new Set(),resultOffset=0,resultTotal=0,resultCountSignature='',resultCountRequest=null,resultCountLoading=false,resultNaturalOrderSignature='',resultNaturalOrder=new Map(),selectedAlleleId=null,resultFieldCatalog=[],resultAlignmentGroups=[],resultLoading=false,resultHasMore=false,resultRequestGeneration=0,resultQuerySignature='',resultRequestController=null,resultSortStatusController=null,resultSortStatusGeneration=0,loadedCaseNotes='',caseNotesTimer=null,caseNotesRunId=null,selectionRunId=null,selectionAnchorIndex=null,selectedAlleles=new Set(),excludedFilteredAlleles=new Set(),selectedVariantGenes=new Map(),selectedVariantRows=new Map(),selectionMode='explicit',selectionFilterSignature='',dbnsfpConfiguration=null,supplementaryFieldConfigurations=new Map();
+let setupDismissed=false,lastTaskSnapshots=[],taskRenderPending=false,lastAnnotationState={state:'idle'},globalStatusNotice=null,completedRuns=[],completedRunSearch='',lastSetupReady=false,resourceStates={},refreshingResources=false,currentResultRun=null,resultView='all',candidateAlleles=new Set(),resultOffset=0,resultTotal=0,resultCountSignature='',resultCountRequest=null,resultCountLoading=false,resultNaturalOrderSignature='',resultNaturalOrder=new Map(),selectedAlleleId=null,resultFieldCatalog=[],resultCoreCategorical={},resultAlignmentGroups=[],resultLoading=false,resultHasMore=false,resultRequestGeneration=0,resultQuerySignature='',resultRequestController=null,resultSortStatusController=null,resultSortStatusGeneration=0,loadedCaseNotes='',caseNotesTimer=null,caseNotesRunId=null,selectionRunId=null,selectionAnchorIndex=null,selectedAlleles=new Set(),excludedFilteredAlleles=new Set(),selectedVariantGenes=new Map(),selectedVariantRows=new Map(),selectionMode='explicit',selectionFilterSignature='',dbnsfpConfiguration=null,supplementaryFieldConfigurations=new Map();
 let resultSearchTimer=null,resultOperation='',resultQueryError='',favorResultStatus=null,favorResultStatusTimer=null;
 let favorOnline={initialize:async()=>{},updateControls:()=>{},updateForRun:async()=>{},isEnabled:()=>true,resetConfirmation:()=>{}};
 const RESULT_COLUMN_SELECTION_STORAGE_KEY='annocat.resultColumnSelections.v2';
@@ -369,6 +369,7 @@ async function openCompletedRun(run,offset=0){
     const fieldResponse=await fetch(`/api/runs/${encodeURIComponent(run.id)}/fields`),fieldBody=await fieldResponse.json();
     if(!fieldResponse.ok)throw new Error(fieldBody.error||'Result columns could not be loaded');
     resultFieldCatalog=fieldBody.fields||[];
+    resultCoreCategorical=fieldBody.coreCategorical||{};
     resultAlignmentGroups=fieldBody.alignmentGroups||[];
     applyResultColumnSelection();
     renderColumns();
@@ -444,6 +445,7 @@ async function refreshCurrentResultSchema({sourceId='',preferredFields=[],config
   const response=await fetch(`/api/runs/${encodeURIComponent(run.id)}/fields`),body=await response.json();
   if(!response.ok)throw new Error(body.error||'Result columns could not be refreshed');
   resultFieldCatalog=body.fields||[];
+  resultCoreCategorical=body.coreCategorical||{};
   resultAlignmentGroups=body.alignmentGroups||[];
   resultSorts=savedSorts.map(sort=>{if(sort.key)return sort;const index=resultFieldCatalog.findIndex(field=>resultFieldIdentity(field)===sort.identity);return index<0||!selectableEvidenceField(resultFieldCatalog[index],index)?null:{key:`evidence:${index}`,direction:sort.direction}}).filter(Boolean);
   visibleEvidence=new Set(resultFieldCatalog.map((field,index)=>{
@@ -585,7 +587,7 @@ const resultFilters=createResultFilters({
   $,escapeHtml,coreFilterColumns,filterOperators,numericFilterOperators,FILTER_PRESET_STORAGE_KEY,
   selectableEvidenceEntries,coreColumnPresentation,evidenceFieldPresentation,resourceTitle,
   resetResultPages:()=>resultPageMemory.clear(),clearVariantSelection,openCompletedRun,
-  getState:()=>({humanReadableColumnNames,resultFieldCatalog,selectionMode,currentResultRun})
+  getState:()=>({humanReadableColumnNames,resultFieldCatalog,resultCoreCategorical,selectionMode,currentResultRun})
 });
 function resultFilterParameters(...args){return resultFilters.resultFilterParameters(...args)}
 function addFilterRule(...args){return resultFilters.addFilterRule(...args)}

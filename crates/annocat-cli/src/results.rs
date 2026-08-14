@@ -218,11 +218,13 @@ pub struct CanonicalSummary {
     pub excluded_auxiliary_records: u64,
     pub samples: Vec<String>,
     pub input_content_sha256: Option<String>,
+    pub(crate) core_categorical: BTreeMap<String, BoundedCategoricalCounts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredSummary {
     pub records: u64,
+    pub alleles: u64,
     pub excluded_auxiliary_records: u64,
     pub consequences: u64,
     pub evidence: u64,
@@ -1280,6 +1282,7 @@ fn parse_and_write_variant_chunk(
     sample_names: &[String],
     sample_names_json: &str,
     writer: &mut ArrowWriter<File>,
+    categorical_counts: &mut BTreeMap<String, BoundedCategoricalCounts>,
 ) -> Result<u64, String> {
     let parsed = pool.install(|| {
         records
@@ -1291,10 +1294,39 @@ fn parse_and_write_variant_chunk(
     for record in parsed {
         batch.extend(record);
     }
+    count_variant_batch_categories(&batch, categorical_counts);
     let rows = batch.len() as u64;
     append_variant_batch(writer, &mut batch)?;
     records.clear();
     Ok(rows)
+}
+
+fn count_variant_batch_categories(
+    batch: &VariantBatch,
+    counts: &mut BTreeMap<String, BoundedCategoricalCounts>,
+) {
+    for index in 0..batch.len() {
+        counts
+            .get_mut("filter")
+            .expect("core filter counter")
+            .add(batch.filter[index].split(';'));
+        counts
+            .get_mut("zygosity")
+            .expect("core zygosity counter")
+            .add_scalar(batch.zygosity[index].as_deref());
+        counts
+            .get_mut("consequence")
+            .expect("core consequence counter")
+            .add(
+                batch.consequence[index]
+                    .iter()
+                    .flat_map(|value| value.split('&')),
+            );
+        counts
+            .get_mut("impact")
+            .expect("core impact counter")
+            .add_scalar(batch.impact[index].as_deref());
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1396,6 +1428,7 @@ struct CatalogEntry {
     occurrences: u64,
     observed_categories: BTreeMap<String, String>,
     observed_categories_complete: bool,
+    categorical_counts: Option<BoundedCategoricalCounts>,
 }
 
 impl Default for CatalogEntry {
@@ -1405,12 +1438,179 @@ impl Default for CatalogEntry {
             occurrences: 0,
             observed_categories: BTreeMap::new(),
             observed_categories_complete: true,
+            categorical_counts: None,
         }
     }
 }
 
 const MAX_CATEGORICAL_VALUES: usize = 100;
 const MAX_CATEGORICAL_VALUE_BYTES: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BoundedCategoricalCounts {
+    values: BTreeMap<String, (String, u64)>,
+    present: u64,
+    complete: bool,
+}
+
+impl Default for BoundedCategoricalCounts {
+    fn default() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            present: 0,
+            complete: true,
+        }
+    }
+}
+
+impl BoundedCategoricalCounts {
+    fn add_scalar(&mut self, value: Option<&str>) {
+        let Some(value) = value.map(str::trim).filter(|value| {
+            !value.is_empty() && *value != "." && value.len() <= MAX_CATEGORICAL_VALUE_BYTES
+        }) else {
+            return;
+        };
+        let key = categorical_value_key(value);
+        if key.is_empty() {
+            return;
+        }
+        self.present = self.present.saturating_add(1);
+        if !self.complete {
+            return;
+        }
+        if !self.values.contains_key(&key) && self.values.len() == MAX_CATEGORICAL_VALUES {
+            self.values.clear();
+            self.complete = false;
+            return;
+        }
+        self.values
+            .entry(key)
+            .and_modify(|(label, count)| {
+                if value < label.as_str() {
+                    *label = value.to_owned();
+                }
+                *count = count.saturating_add(1);
+            })
+            .or_insert_with(|| (value.to_owned(), 1));
+    }
+
+    fn add<'a>(&mut self, values: impl IntoIterator<Item = &'a str>) {
+        let mut categories = BTreeMap::new();
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() || value == "." || value.len() > MAX_CATEGORICAL_VALUE_BYTES {
+                continue;
+            }
+            let key = categorical_value_key(value);
+            if key.is_empty() {
+                continue;
+            }
+            categories
+                .entry(key)
+                .and_modify(|existing: &mut String| {
+                    if value < existing.as_str() {
+                        *existing = value.to_owned();
+                    }
+                })
+                .or_insert_with(|| value.to_owned());
+        }
+        if categories.is_empty() {
+            return;
+        }
+        self.present = self.present.saturating_add(1);
+        if !self.complete {
+            return;
+        }
+        for (key, value) in categories {
+            if !self.values.contains_key(&key) && self.values.len() == MAX_CATEGORICAL_VALUES {
+                self.values.clear();
+                self.complete = false;
+                return;
+            }
+            self.values
+                .entry(key)
+                .and_modify(|(label, count)| {
+                    if value < *label {
+                        *label = value.clone();
+                    }
+                    *count = count.saturating_add(1);
+                })
+                .or_insert((value, 1));
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.present = self.present.saturating_add(other.present);
+        if !self.complete || !other.complete {
+            self.values.clear();
+            self.complete = false;
+            return;
+        }
+        for (key, (label, count)) in other.values {
+            if !self.values.contains_key(&key) && self.values.len() == MAX_CATEGORICAL_VALUES {
+                self.values.clear();
+                self.complete = false;
+                return;
+            }
+            self.values
+                .entry(key)
+                .and_modify(|(existing, total)| {
+                    if label < *existing {
+                        *existing = label.clone();
+                    }
+                    *total = total.saturating_add(count);
+                })
+                .or_insert((label, count));
+        }
+    }
+
+    pub(crate) fn from_grouped(
+        present: u64,
+        values: impl IntoIterator<Item = (String, u64)>,
+    ) -> Self {
+        let mut counts = Self {
+            present,
+            ..Self::default()
+        };
+        for (value, count) in values {
+            let value = value.trim();
+            let key = categorical_value_key(value);
+            if key.is_empty() || value.len() > MAX_CATEGORICAL_VALUE_BYTES {
+                continue;
+            }
+            if !counts.values.contains_key(&key) && counts.values.len() == MAX_CATEGORICAL_VALUES {
+                counts.values.clear();
+                counts.complete = false;
+                break;
+            }
+            counts
+                .values
+                .entry(key)
+                .and_modify(|(label, total)| {
+                    if value < label.as_str() {
+                        *label = value.to_owned();
+                    }
+                    *total = total.saturating_add(count);
+                })
+                .or_insert((value.to_owned(), count));
+        }
+        counts
+    }
+
+    pub(crate) fn metadata(&self, total_alleles: u64) -> Option<Value> {
+        if !self.complete || self.present > total_alleles {
+            return None;
+        }
+        Some(json!({
+            "observedValueCounts": self.values.values().map(|(value, count)| json!({
+                "value": value,
+                "count": count,
+            })).collect::<Vec<_>>(),
+            "missingCount": total_alleles - self.present,
+            "countBasis": "variantAlleles",
+        }))
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CategoricalParser {
@@ -1463,6 +1663,7 @@ struct StructuredDocument {
 
 struct ParsedStructuredRecord {
     is_variant: bool,
+    alleles: u64,
     consequences: ConsequenceBatch,
     evidence: EvidenceBatch,
     catalog: BTreeMap<(String, String, String), CatalogEntry>,
@@ -1471,6 +1672,7 @@ struct ParsedStructuredRecord {
 #[derive(Default)]
 struct StructuredCounts {
     records: u64,
+    alleles: u64,
     consequences: u64,
     evidence: u64,
 }
@@ -1629,9 +1831,23 @@ impl CanonicalVcfRecords {
     }
 }
 
+#[cfg(test)]
 fn parse_structured_record(
     record: &StructuredRecord,
     source_aliases: &BTreeMap<String, String>,
+) -> Result<ParsedStructuredRecord, String> {
+    let count_categories = source_aliases
+        .values()
+        .try_fold(false, |found, source_id| {
+            Ok::<_, String>(found || source_has_categorical_contract(source_id)?)
+        })?;
+    parse_structured_record_mode(record, source_aliases, count_categories)
+}
+
+fn parse_structured_record_mode(
+    record: &StructuredRecord,
+    source_aliases: &BTreeMap<String, String>,
+    count_categories: bool,
 ) -> Result<ParsedStructuredRecord, String> {
     let document: StructuredDocument = serde_json::from_str(&record.line).map_err(|error| {
         format!(
@@ -1661,6 +1877,7 @@ fn parse_structured_record(
     if !is_variant {
         return Ok(ParsedStructuredRecord {
             is_variant: false,
+            alleles: 0,
             consequences: ConsequenceBatch::default(),
             evidence: EvidenceBatch::default(),
             catalog: BTreeMap::new(),
@@ -2108,9 +2325,13 @@ fn parse_structured_record(
         &structured_consequences,
         &selected_consequences,
     );
+    if count_categories {
+        count_selected_evidence_categories(&evidence, &mut catalog)?;
+    }
 
     Ok(ParsedStructuredRecord {
         is_variant: true,
+        alleles: record.canonical_alleles.len() as u64,
         consequences,
         evidence,
         catalog,
@@ -2122,10 +2343,15 @@ fn parse_structured_chunk(
     records: &[StructuredRecord],
     source_aliases: &BTreeMap<String, String>,
 ) -> Result<Vec<ParsedStructuredRecord>, String> {
+    let count_categories = source_aliases
+        .values()
+        .try_fold(false, |found, source_id| {
+            Ok::<_, String>(found || source_has_categorical_contract(source_id)?)
+        })?;
     pool.install(|| {
         records
             .par_iter()
-            .map(|record| parse_structured_record(record, source_aliases))
+            .map(|record| parse_structured_record_mode(record, source_aliases, count_categories))
             .collect::<Result<Vec<_>, _>>()
     })
 }
@@ -2139,6 +2365,14 @@ fn merge_catalog(
         target_entry.types.extend(entry.types);
         target_entry.occurrences = target_entry.occurrences.saturating_add(entry.occurrences);
         target_entry.observed_categories_complete &= entry.observed_categories_complete;
+        match (
+            &mut target_entry.categorical_counts,
+            entry.categorical_counts,
+        ) {
+            (Some(target), Some(source)) => target.merge(source),
+            (None, Some(source)) => target_entry.categorical_counts = Some(source),
+            _ => {}
+        }
         for value in entry.observed_categories.into_values() {
             insert_observed_category(target_entry, &value);
         }
@@ -2160,6 +2394,7 @@ fn parse_and_write_structured_chunk(
     let parsed = parse_structured_chunk(pool, records, source_aliases)?;
     for mut record in parsed {
         counts.records += u64::from(record.is_variant);
+        counts.alleles = counts.alleles.saturating_add(record.alleles);
         counts.evidence = counts.evidence.saturating_add(record.evidence.len() as u64);
         record.rebase_consequence_ids(&mut counts.consequences)?;
         merge_catalog(catalog, record.catalog);
@@ -2474,10 +2709,11 @@ fn convert_structured_with_workers(
             .unwrap_or(0);
     progress(processed_records, true, output_bytes, 0.0, 0.0);
 
-    write_structured_catalog(outputs.catalog, &catalog)?;
+    write_structured_catalog(outputs.catalog, &catalog, counts.alleles)?;
     let source_value_counts = source_value_counts(&catalog);
     Ok(StructuredSummary {
         records: counts.records,
+        alleles: counts.alleles,
         excluded_auxiliary_records,
         consequences: counts.consequences,
         evidence: counts.evidence,
@@ -2528,6 +2764,7 @@ fn report_structured_progress(
 fn write_structured_catalog(
     catalog_json: &Path,
     catalog: &BTreeMap<(String, String, String), CatalogEntry>,
+    total_alleles: u64,
 ) -> Result<(), String> {
     let fields = catalog
         .iter()
@@ -2546,6 +2783,15 @@ fn write_structured_catalog(
                     "observedValues": entry.observed_categories.values().collect::<Vec<_>>(),
                     "observedValuesComplete": entry.observed_categories_complete,
                 });
+                if let Some(metadata) = entry
+                    .categorical_counts
+                    .as_ref()
+                    .and_then(|counts| counts.metadata(total_alleles))
+                    && let (Some(target), Some(source)) =
+                        (field["categorical"].as_object_mut(), metadata.as_object())
+                {
+                    target.extend(source.clone());
+                }
             }
             if let Some(biological_scope) = (scope == "selected" || source_id == "dbnsfp")
                 .then(|| crate::evidence_resolution::record_field_scope(source_id, field_path))
@@ -2722,6 +2968,10 @@ fn convert_vcf_inner(
     let mut processed_records = 0_u64;
     let mut excluded_auxiliary_records = 0_u64;
     let mut rows = 0_u64;
+    let mut core_categorical = ["filter", "zygosity", "consequence", "impact"]
+        .into_iter()
+        .map(|field| (field.to_owned(), BoundedCategoricalCounts::default()))
+        .collect();
     {
         let mut records = Vec::with_capacity(VARIANT_CHUNK_RECORDS);
         let mut previous_bytes = 0_u64;
@@ -2780,6 +3030,7 @@ fn convert_vcf_inner(
                     &sample_names,
                     &sample_names_json,
                     &mut writer,
+                    &mut core_categorical,
                 )?;
                 let bytes = fs::metadata(parquet).map(|value| value.len()).unwrap_or(0);
                 let now = Instant::now();
@@ -2821,6 +3072,7 @@ fn convert_vcf_inner(
                 &sample_names,
                 &sample_names_json,
                 &mut writer,
+                &mut core_categorical,
             )?;
         }
     }
@@ -2851,6 +3103,7 @@ fn convert_vcf_inner(
         excluded_auxiliary_records,
         samples: sample_names,
         input_content_sha256,
+        core_categorical,
     })
 }
 
@@ -2883,6 +3136,31 @@ pub fn write_empty_detail_tables(
     )
     .map_err(|error| format!("cannot write empty field catalog: {error}"))?;
     Ok(())
+}
+
+pub(crate) fn write_core_categorical_counts(
+    catalog: &Path,
+    total_alleles: u64,
+    counts: &BTreeMap<String, BoundedCategoricalCounts>,
+) -> Result<(), String> {
+    let mut value: Value = serde_json::from_slice(
+        &fs::read(catalog).map_err(|error| format!("cannot read field catalog: {error}"))?,
+    )
+    .map_err(|error| format!("invalid field catalog: {error}"))?;
+    let core = counts
+        .iter()
+        .filter_map(|(field, counts)| {
+            counts
+                .metadata(total_alleles)
+                .map(|metadata| (field.clone(), metadata))
+        })
+        .collect::<Map<_, _>>();
+    value["coreCategorical"] = Value::Object(core);
+    fs::write(
+        catalog,
+        serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("cannot write field catalog: {error}"))
 }
 
 pub fn validate(parquet: &Path, expected_rows: u64) -> Result<(), String> {
@@ -5556,7 +5834,7 @@ fn categorical_subquery_sql(
     operator: &str,
     selection: &CategoricalSelection,
 ) -> Result<(String, Vec<SqlValue>), String> {
-    let (matched, mut parameters) =
+    let (matched, parameters) =
         normalized_categorical_match_sql(expression, kind, &selection.values);
     let aggregate = match operator {
         "in" => format!("bool_or({matched})"),
@@ -5564,14 +5842,18 @@ fn categorical_subquery_sql(
         _ => return Err("categorical filters use 'is any of' or 'is none of'".into()),
     };
     let present = categorical_present_sql(expression, kind);
-    parameters.push(selection.include_missing.into());
     Ok((
         format!(
             "COALESCE((
                 SELECT {aggregate}
                 FROM {read_sql}
                 WHERE ({base_condition}) AND ({present})
-            ), CAST(? AS BOOLEAN))"
+            ), {})",
+            if selection.include_missing {
+                "TRUE"
+            } else {
+                "FALSE"
+            }
         ),
         parameters,
     ))
@@ -5651,10 +5933,10 @@ fn evidence_filter_rules_sql(
                 sql.push_str(" AND (");
                 sql.push_str(&condition);
                 sql.push(')');
+                parameters.extend(values);
                 parameters.push(gene_evidence.to_string_lossy().into_owned().into());
                 parameters.push(field.source_id.into());
                 parameters.push(field.field_path.into());
-                parameters.extend(values);
                 continue;
             }
             let negative = matches!(
@@ -5715,10 +5997,10 @@ fn evidence_filter_rules_sql(
                 sql.push_str(" AND (");
                 sql.push_str(&condition);
                 sql.push(')');
+                parameters.extend(values);
                 parameters.push(resolved.to_string_lossy().into_owned().into());
                 parameters.push(field.source_id.into());
                 parameters.push(field.field_path.into());
-                parameters.extend(values);
                 continue;
             }
             let negative = matches!(
@@ -5783,9 +6065,9 @@ fn evidence_filter_rules_sql(
             sql.push_str(" AND (");
             sql.push_str(&condition);
             sql.push(')');
+            parameters.extend(values);
             parameters.append(&mut read_parameters);
             append_evidence_field_parameters(&mut parameters, &field, evidence)?;
-            parameters.extend(values);
             continue;
         }
         let negative = matches!(
@@ -7072,12 +7354,11 @@ fn query_projection_field_is_eligible(field: &SelectedEvidenceColumn) -> bool {
 }
 
 fn catalog_source_is(source_id: &str, expected: &str) -> bool {
-    let source_id = source_id.to_ascii_lowercase();
-    let expected = expected.to_ascii_lowercase();
-    source_id == expected
-        || source_id
-            .strip_prefix(&expected)
-            .is_some_and(|suffix| matches!(suffix.as_bytes().first(), Some(b'-' | b'@')))
+    source_id.eq_ignore_ascii_case(expected)
+        || source_id.get(..expected.len()).is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case(expected)
+                && matches!(source_id.as_bytes().get(expected.len()), Some(b'-' | b'@'))
+        })
 }
 
 fn catalog_field_leaf(field: &Value) -> String {
@@ -9320,6 +9601,101 @@ fn categorical_contract_for_field(
     }))
 }
 
+fn source_has_categorical_contract(source_id: &str) -> Result<bool, String> {
+    let contracts = bundled_categorical_contracts()
+        .as_ref()
+        .map_err(Clone::clone)?;
+    Ok(contracts
+        .iter()
+        .any(|contract| catalog_source_is(source_id, &contract.source_id)))
+}
+
+pub(crate) fn is_categorical_field(source_id: &str, field_path: &str) -> Result<bool, String> {
+    categorical_contract_for_field(source_id, field_path).map(|contract| contract.is_some())
+}
+
+fn categorical_values_for_evidence_row(
+    evidence: &EvidenceBatch,
+    index: usize,
+) -> Result<Option<Vec<String>>, String> {
+    categorical_values_for_stored_field(
+        &evidence.source_id[index],
+        &evidence.field_path[index],
+        &evidence.value_type[index],
+        evidence.string_value[index].as_deref(),
+        evidence.json_value[index].as_deref(),
+    )
+}
+
+pub(crate) fn categorical_values_for_stored_field(
+    source_id: &str,
+    field_path: &str,
+    value_type: &str,
+    string_value: Option<&str>,
+    json_value: Option<&str>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(contract) = categorical_contract_for_field(source_id, field_path)? else {
+        return Ok(None);
+    };
+    let values = match contract.parser {
+        CategoricalParser::Scalar if value_type == "string" => string_value
+            .map(|value| vec![value.to_owned()])
+            .unwrap_or_default(),
+        CategoricalParser::Json if value_type == "json" => json_value
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .map_err(|error| {
+                format!("invalid categorical JSON for {source_id}.{field_path}: {error}")
+            })?
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    };
+    Ok(Some(values))
+}
+
+fn count_selected_evidence_categories(
+    evidence: &EvidenceBatch,
+    catalog: &mut BTreeMap<(String, String, String), CatalogEntry>,
+) -> Result<(), String> {
+    let mut allele_values = BTreeMap::<(String, String, String), Vec<String>>::new();
+    for index in 0..evidence.len() {
+        if !matches!(
+            evidence.scope[index].as_str(),
+            "allele" | "variant" | "selected"
+        ) {
+            continue;
+        }
+        let Some(values) = categorical_values_for_evidence_row(evidence, index)? else {
+            continue;
+        };
+        allele_values
+            .entry((
+                evidence.source_id[index].clone(),
+                evidence.field_path[index].clone(),
+                evidence.allele_id[index].clone(),
+            ))
+            .or_default()
+            .extend(values);
+    }
+    let mut field_counts = BTreeMap::<(String, String), BoundedCategoricalCounts>::new();
+    for ((source_id, field_path, _), values) in allele_values {
+        field_counts
+            .entry((source_id, field_path))
+            .or_default()
+            .add(values.iter().map(String::as_str));
+    }
+    for ((_, source_id, field_path), entry) in catalog.iter_mut() {
+        if let Some(counts) = field_counts.get(&(source_id.clone(), field_path.clone())) {
+            entry.categorical_counts = Some(counts.clone());
+        }
+    }
+    Ok(())
+}
+
 fn insert_observed_category(entry: &mut CatalogEntry, value: &str) {
     let value = value.trim();
     if value.is_empty() || value == "." || value.len() > MAX_CATEGORICAL_VALUE_BYTES {
@@ -9379,13 +9755,19 @@ fn enrich_categorical_contracts(catalog: &mut Value) -> Result<(), String> {
             continue;
         };
         let observed = field["categorical"].clone();
-        field["categorical"] = json!({
+        let mut categorical = json!({
             "matchMode": contract.match_mode,
             "values": contract.values,
             "canDiscover": contract.discover_observed,
             "observedValues": observed["observedValues"].clone(),
             "observedValuesComplete": observed["observedValuesComplete"].as_bool().unwrap_or(false),
         });
+        for key in ["observedValueCounts", "missingCount", "countBasis"] {
+            if !observed[key].is_null() {
+                categorical[key] = observed[key].clone();
+            }
+        }
+        field["categorical"] = categorical;
     }
     Ok(())
 }
@@ -10888,6 +11270,25 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn categorical_counts_are_per_allele_and_report_missing_rows() {
+        let mut counts = BoundedCategoricalCounts::default();
+        counts.add(["Pathogenic", "pathogenic"]);
+        counts.add(["Likely_pathogenic"]);
+        counts.add(["."]);
+        assert_eq!(
+            counts.metadata(4).unwrap(),
+            json!({
+                "observedValueCounts": [
+                    {"value": "Likely_pathogenic", "count": 1},
+                    {"value": "Pathogenic", "count": 1}
+                ],
+                "missingCount": 2,
+                "countBasis": "variantAlleles"
+            })
+        );
+    }
+
+    #[test]
     fn categorical_filters_preserve_exact_values_and_missing_semantics() {
         let selection = categorical_selection(
             &Some(vec![
@@ -10950,6 +11351,18 @@ mod tests {
             entry.observed_categories.into_values().collect::<Vec<_>>(),
             ["Likely_pathogenic", "Pathogenic"]
         );
+    }
+
+    #[test]
+    fn all_categorical_contracts_define_default_values() {
+        for contract in bundled_categorical_contracts().as_ref().unwrap() {
+            assert!(
+                !contract.values.is_empty(),
+                "missing default values for {}.{}",
+                contract.source_id,
+                contract.field_name
+            );
+        }
     }
 
     #[test]
@@ -13502,6 +13915,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(clinvar_filtered["total"], 1);
+        let clinvar_categorical: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    evidence_filters: vec![EvidenceFilterRequest {
+                        index: clinvar_index,
+                        operator: "in".into(),
+                        value: String::new(),
+                        value2: String::new(),
+                        values: Some(vec!["Pathogenic".into()]),
+                        include_missing: Some(false),
+                    }],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(clinvar_categorical["total"], 1);
         for (operator, total) in [("equals", 1), ("in", 1), ("not_equals", 0), ("not_in", 0)] {
             let exact: Value = serde_json::from_str(
                 &page_json_with_evidence(

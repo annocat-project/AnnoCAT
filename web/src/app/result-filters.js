@@ -8,14 +8,29 @@ export function remapEvidenceFilterRules(rules,previousCatalog,nextCatalog){
   }).filter(Boolean);
 }
 
+function categoryKey(value){return String(value??'').trim().toLowerCase().replace(/[_-]/g,' ').replace(/\s+/g,' ')}
+export function categoricalChoices(categorical={},selected=[]){
+  const countRows=categorical.observedValueCounts,counted=Array.isArray(countRows),choices=new Map(),counts=new Map((countRows||[]).map(item=>[categoryKey(item?.value),Number(item?.count)])),fixedOrder=new Map((categorical.values||[]).map((item,index)=>[categoryKey(typeof item==='string'?item:item?.value),index]));
+  const add=item=>{
+    const value=typeof item==='string'?item:item?.value,label=typeof item==='string'?item.replaceAll('_',' '):item?.label||item?.value;
+    if(value==null||String(value).trim()==='')return;
+    const key=categoryKey(value),candidate={value:String(value),label:String(label),count:counts.has(key)?counts.get(key):counted&&fixedOrder.has(key)?0:null,fixedOrder:fixedOrder.get(key)};
+    if(!choices.has(key))choices.set(key,candidate);else if(choices.get(key).count===null&&candidate.count!==null)choices.get(key).count=candidate.count;
+  };
+  (categorical.values||[]).forEach(add);
+  (countRows||categorical.observedValues||[]).forEach(add);
+  selected.forEach(add);
+  return[...choices.values()].sort((a,b)=>Number.isInteger(a.fixedOrder)&&Number.isInteger(b.fixedOrder)?a.fixedOrder-b.fixedOrder:Number.isInteger(a.fixedOrder)?-1:Number.isInteger(b.fixedOrder)?1:(b.count??-1)-(a.count??-1)||a.label.localeCompare(b.label,undefined,{sensitivity:'base'}));
+}
+
 export function createResultFilters({
   $,escapeHtml,coreFilterColumns,filterOperators,numericFilterOperators,FILTER_PRESET_STORAGE_KEY,
   selectableEvidenceEntries,coreColumnPresentation,evidenceFieldPresentation,resourceTitle,
   resetResultPages,clearVariantSelection,openCompletedRun,getState
 }){
-  let humanReadableColumnNames=true,resultFieldCatalog=[],selectionMode='explicit',currentResultRun=null,profileLinkedField=null;
+  let humanReadableColumnNames=true,resultFieldCatalog=[],resultCoreCategorical={},selectionMode='explicit',currentResultRun=null,profileLinkedField=null;
   $('#result-filters')?.classList.add('fui-popover--nested-content');
-  function syncState(){({humanReadableColumnNames,resultFieldCatalog,selectionMode,currentResultRun}=getState())}
+  function syncState(){({humanReadableColumnNames,resultFieldCatalog,resultCoreCategorical={},selectionMode,currentResultRun}=getState())}
 
   function likelyNumericEvidenceField(field){
     const name=String(field?.fieldPath||'').toLowerCase();
@@ -27,21 +42,8 @@ export function createResultFilters({
       const index=Number(value.slice(9)),field=resultFieldCatalog[index],presentation=field?evidenceFieldPresentation(field):null;
       return field?{key:value,label:`${resourceTitle(field.sourceId)} · ${presentation.label}`,type:field.categorical?'text':likelyNumericEvidenceField(field)?'number':field.valueType==='boolean'?'boolean':'text',categorical:field.categorical||null,field,index}:null;
     }
-    return coreFilterColumns.find(column=>column.key===value)||null;
-  }
-  function categoryKey(value){return String(value??'').trim().toLowerCase().replace(/[_-]/g,' ').replace(/\s+/g,' ')}
-  function categoryChoices(definition,selected=[]){
-    const choices=new Map();
-    const add=item=>{
-      const value=typeof item==='string'?item:item?.value,label=typeof item==='string'?item.replaceAll('_',' '):item?.label||item?.value;
-      if(value==null||String(value).trim()==='')return;
-      const key=categoryKey(value),candidate={value:String(value),label:String(label)};
-      if(!choices.has(key))choices.set(key,candidate);
-    };
-    (definition?.categorical?.values||[]).forEach(add);
-    (definition?.categorical?.observedValues||[]).forEach(add);
-    selected.forEach(add);
-    return[...choices.values()].sort((a,b)=>a.label.localeCompare(b.label,undefined,{sensitivity:'base'}));
+    const definition=coreFilterColumns.find(column=>column.key===value)||null,counts=resultCoreCategorical[value];
+    return definition&&counts?{...definition,categorical:{...definition.categorical,...counts}}:definition;
   }
   function selectedCategoricalValues(rule={}){
     if(Array.isArray(rule.values))return rule.values.map(String);
@@ -90,10 +92,11 @@ export function createResultFilters({
     return`<div class="filter-column-picker"><input type="hidden" data-filter-column value="${escapeHtml(current.key)}"><button type="button" class="fui-button fui-select-trigger filter-column-trigger" data-filter-column-toggle aria-haspopup="listbox" aria-expanded="false" title="${escapeHtml(current.description)}"><span data-filter-column-label>${escapeHtml(current.label)}</span><svg class="ui-icon fui-select-trigger__icon" aria-hidden="true"><use href="#icon-chevron-down"></use></svg></button><div class="filter-column-options fui-popover fui-popover--listbox hidden" role="listbox"><input type="search" class="fui-input filter-picker-search" data-filter-column-search aria-label="Search filter columns" placeholder="Search columns, sources, descriptions, or raw keys"><div class="filter-column-option-list">${options}</div></div></div>`;
   }
   function categoricalValueControl(definition,rule={}){
-    const selected=selectedCategoricalValues(rule),selectedKeys=new Set(selected.map(categoryKey)),choices=categoryChoices(definition,selected),summary=selected.length?`${selected.length} selected`:rule.includeMissing?'Missing values':'Choose values';
-    const options=choices.length?choices.map(choice=>`<label class="fui-menu-item categorical-filter-option" data-category-search-text="${escapeHtml(`${choice.label} ${choice.value}`.toLowerCase())}"><input class="fui-checkbox" type="checkbox" value="${escapeHtml(choice.value)}" ${selectedKeys.has(categoryKey(choice.value))?'checked':''}><div>${escapeHtml(choice.label)}</div></label>`).join(''):'<p class="categorical-filter-empty fui-caption">No values loaded.</p>',observed=Boolean(definition.categorical?.observedValues?.length),heading=observed?'Available in this result':'Supported values';
+    const selected=selectedCategoricalValues(rule),selectedKeys=new Set(selected.map(categoryKey)),choices=categoricalChoices(definition.categorical,selected),summary=selected.length?`${selected.length} selected`:rule.includeMissing?'Not reported':'Choose values';
+    const counted=Array.isArray(definition.categorical?.observedValueCounts),visibleChoices=choices.filter(choice=>!counted||!Number.isInteger(choice.fixedOrder)||choice.count!==0),options=choices.length?choices.map(choice=>{const selected=selectedKeys.has(categoryKey(choice.value)),zero=counted&&Number.isInteger(choice.fixedOrder)&&choice.count===0;return`<label class="fui-menu-item categorical-filter-option ${zero&&!selected?'hidden':''}" data-category-zero="${zero}" data-category-search-text="${escapeHtml(`${choice.label} ${choice.value}`.toLowerCase())}"><input class="fui-checkbox" type="checkbox" value="${escapeHtml(choice.value)}" ${selected?'checked':''}><div>${escapeHtml(choice.label)}</div>${Number.isFinite(choice.count)?`<span class="categorical-filter-count">${choice.count.toLocaleString()}</span>`:''}</label>`}).join(''):'<p class="categorical-filter-empty fui-caption">No values loaded.</p>',observed=counted||Boolean(definition.categorical?.observedValues?.length),heading=observed?'Available in this result':'Supported values',missingCount=Number(definition.categorical?.missingCount);
+    const missingOption=`<label class="fui-menu-item categorical-filter-missing" data-category-search-text="not reported"><input class="fui-checkbox" type="checkbox" data-filter-include-missing ${rule.includeMissing?'checked':''}><div>Not reported</div>${Number.isFinite(missingCount)?`<span class="categorical-filter-count">${missingCount.toLocaleString()}</span>`:''}</label>`,choiceCount=visibleChoices.length+1;
     const exactOption=definition.categorical?.canDiscover===false?'':'<button type="button" class="fui-menu-item categorical-filter-exact hidden" data-enter-category></button>';
-    return`<div class="categorical-filter" data-filter-categorical><input type="hidden" data-filter-value value="${escapeHtml(JSON.stringify(selected))}"><button type="button" class="fui-button fui-select-trigger categorical-filter-trigger" data-category-toggle aria-haspopup="listbox" aria-expanded="false"><span data-category-summary>${escapeHtml(summary)}</span><svg class="ui-icon fui-select-trigger__icon" aria-hidden="true"><use href="#icon-chevron-down"></use></svg></button><div class="categorical-filter-options fui-popover fui-popover--listbox hidden"><input type="search" class="fui-input filter-picker-search" data-category-search aria-label="Search or enter an exact value" placeholder="Search or enter an exact value"><div class="categorical-filter-heading"><strong class="fui-menu-group__label">${heading}</strong><span class="fui-caption">${choices.length} ${choices.length===1?'value':'values'}</span></div><div class="categorical-filter-list" role="listbox" aria-multiselectable="true">${options}</div>${exactOption}<div class="categorical-filter-actions">${definition.categorical?.canDiscover?'<button type="button" class="fui-menu-item" data-discover-categories>Find other values in this result</button>':''}<label class="fui-menu-item categorical-filter-missing"><input class="fui-checkbox" type="checkbox" data-filter-include-missing ${rule.includeMissing?'checked':''}><div>Include not reported</div></label><small data-category-status></small></div></div></div>`;
+    return`<div class="categorical-filter" data-filter-categorical><input type="hidden" data-filter-value value="${escapeHtml(JSON.stringify(selected))}"><button type="button" class="fui-button fui-select-trigger categorical-filter-trigger" data-category-toggle aria-haspopup="listbox" aria-expanded="false"><span data-category-summary>${escapeHtml(summary)}</span><svg class="ui-icon fui-select-trigger__icon" aria-hidden="true"><use href="#icon-chevron-down"></use></svg></button><div class="categorical-filter-options fui-popover fui-popover--listbox hidden"><input type="search" class="fui-input filter-picker-search" data-category-search aria-label="Search or enter an exact value" placeholder="Search or enter an exact value"><div class="categorical-filter-list" role="listbox" aria-multiselectable="true"><div class="categorical-filter-heading" role="presentation"><strong class="fui-menu-group__label">${heading}</strong><span class="fui-caption">${choiceCount} ${choiceCount===1?'value':'values'}</span></div>${options}${missingOption}</div>${exactOption}<div class="categorical-filter-actions">${definition.categorical?.canDiscover&&!counted?'<button type="button" class="fui-menu-item" data-discover-categories>Find other values in this result</button>':''}<small data-category-status></small></div></div></div>`;
   }
   function filterValueControl(definition,rule={},operator=''){
     if(definition?.categorical)return categoricalValueControl(definition,rule);
@@ -124,9 +127,9 @@ export function createResultFilters({
   function filterFilterColumnOptions(picker,query){const normalized=query.trim().toLowerCase();picker.querySelectorAll('[data-filter-column-option-group]').forEach(group=>{const options=[...group.querySelectorAll('[data-filter-column-option]')];options.forEach(option=>option.classList.toggle('hidden',Boolean(normalized)&&!option.dataset.filterColumnSearchText.includes(normalized)));group.classList.toggle('hidden',options.every(option=>option.classList.contains('hidden')))})}
   function closeFilterColumnPicker(picker){picker.querySelector('.filter-column-options').classList.add('hidden');picker.querySelector('[data-filter-column-toggle]').setAttribute('aria-expanded','false')}
   function refreshCategorySummary(row){
-    const control=row.querySelector('[data-filter-value]'),values=[...row.querySelectorAll('.categorical-filter-list input:checked')].map(input=>input.value),includeMissing=row.querySelector('[data-filter-include-missing]').checked;
+    const control=row.querySelector('[data-filter-value]'),values=[...row.querySelectorAll('.categorical-filter-list input:checked:not([data-filter-include-missing])')].map(input=>input.value),includeMissing=row.querySelector('[data-filter-include-missing]').checked;
     control.value=JSON.stringify(values);
-    row.querySelector('[data-category-summary]').textContent=values.length?`${values.length} selected`:includeMissing?'Missing values':'Choose values';
+    row.querySelector('[data-category-summary]').textContent=values.length?`${values.length} selected`:includeMissing?'Not reported':'Choose values';
   }
   function bindCategoricalControl(row){
     const control=row.querySelector('[data-filter-categorical]');
@@ -137,7 +140,7 @@ export function createResultFilters({
       let hasExactMatch=false,visibleCount=0;
       control.querySelectorAll('[data-category-search-text]').forEach(option=>{
         const input=option.querySelector('input');
-        const visible=!query||option.dataset.categorySearchText.includes(query);
+        const visible=input?.checked||((!option.dataset.categoryZero||option.dataset.categoryZero==='false'||Boolean(query))&&(!query||option.dataset.categorySearchText.includes(query)));
         option.classList.toggle('hidden',!visible);
         if(visible)visibleCount++;
         if(exactKey&&categoryKey(input?.value)===exactKey)hasExactMatch=true;
@@ -166,7 +169,6 @@ export function createResultFilters({
       if(exactOption&&visible.length===0)addExactValue();
     });
     control.querySelector('.categorical-filter-list').addEventListener('change',()=>{refreshCategorySummary(row);filterRulesChanged()});
-    control.querySelector('[data-filter-include-missing]').addEventListener('change',()=>{refreshCategorySummary(row);filterRulesChanged()});
     exactOption?.addEventListener('click',addExactValue);
     control.querySelector('[data-discover-categories]')?.addEventListener('click',async()=>{
       syncState();

@@ -1899,6 +1899,7 @@ fn wait_for_annotation(run_id: &str) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
+        terminal::sync_tasks(std::slice::from_ref(&tasks::from_annotation(state.clone())));
         match state.state {
             "completed" => return Ok(()),
             "failed" | "paused" | "cancelled" => {

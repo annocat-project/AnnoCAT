@@ -321,7 +321,7 @@ pub fn enrich(
     mut request: EnrichRequest,
 ) -> Result<EnrichSummary, String> {
     normalize_request(&mut request)?;
-    validate_assembly(run_directory)?;
+    let variant_count = validate_assembly(run_directory)?;
     let service = annocat_core::source_catalog::service(SERVICE_ID)
         .ok_or("FAVOR service configuration is missing")?;
     let coding_endpoint = service
@@ -364,6 +364,7 @@ pub fn enrich(
             &fetched_at,
             service.api_url.as_str(),
             coding_endpoint,
+            variant_count,
         )?;
     }
     for chunk in supported.chunks(REQUEST_CHUNK) {
@@ -399,6 +400,7 @@ pub fn enrich(
             &fetched_at,
             service.api_url.as_str(),
             coding_endpoint,
+            variant_count,
         )?;
     }
     summary(run_directory, request.allele_ids.len(), &fetched_at)
@@ -586,7 +588,7 @@ fn normalize_request(request: &mut EnrichRequest) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_assembly(run_directory: &Path) -> Result<(), String> {
+fn validate_assembly(run_directory: &Path) -> Result<u64, String> {
     let bytes = fs::read(run_directory.join("manifest.json"))
         .map_err(|error| format!("cannot read completed run manifest: {error}"))?;
     let manifest: Value = serde_json::from_slice(&bytes)
@@ -594,7 +596,10 @@ fn validate_assembly(run_directory: &Path) -> Result<(), String> {
     if manifest["state"] != "completed" || manifest["assembly"] != "GRCh38" {
         return Err("online annotations require a completed GRCh38 AnnoCAT result".into());
     }
-    Ok(())
+    manifest["variantCount"]
+        .as_u64()
+        .filter(|count| *count > 0)
+        .ok_or_else(|| "completed run manifest has no valid variant count".into())
 }
 
 fn report_coordinates(variants: &Path, allele_ids: &[String]) -> Result<Vec<Coordinate>, String> {
@@ -835,6 +840,7 @@ fn publish_items(
     fetched_at: &str,
     standard_endpoint: &str,
     coding_endpoint: &str,
+    variant_count: u64,
 ) -> Result<(), String> {
     if items.is_empty() {
         return Ok(());
@@ -905,8 +911,8 @@ fn publish_items(
     append_evidence(&connection, items)?;
     remove_unsubstantiated_protein_apc(&connection)?;
     append_statuses(&connection, items, fetched_at)?;
-    let occurrences = field_occurrences(&connection)?;
-    let favor_catalog = catalog_json(&occurrences);
+    let statistics = field_statistics(&connection)?;
+    let favor_catalog = catalog_json(&statistics, variant_count);
     let favor_catalog_path = run_directory.join(FIELD_CATALOG_FILE);
     super::library_metadata::atomic_write(
         &favor_catalog_path,
@@ -1292,20 +1298,87 @@ fn append_statuses(
         .map_err(|error| format!("cannot flush FAVOR statuses: {error}"))
 }
 
-fn field_occurrences(connection: &Connection) -> Result<BTreeMap<String, u64>, String> {
-    let mut statement = connection
-        .prepare("SELECT field_path, count(*) FROM evidence GROUP BY field_path")
-        .map_err(|error| format!("cannot count FAVOR fields: {error}"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+#[derive(Default)]
+struct FieldStatistics {
+    occurrences: u64,
+    categorical: Option<super::results::BoundedCategoricalCounts>,
+}
+
+fn field_statistics(connection: &Connection) -> Result<BTreeMap<String, FieldStatistics>, String> {
+    let categorical_fields = FIELDS
+        .iter()
+        .map(|field| {
+            super::results::is_categorical_field(SOURCE_ID, field.path)
+                .map(|categorical| categorical.then_some(field.path))
         })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let categorical_sql = categorical_fields
+        .iter()
+        .map(|field| format!("'{}'", field.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let categorical_sql = if categorical_sql.is_empty() {
+        "NULL".to_owned()
+    } else {
+        categorical_sql
+    };
+    let sql = format!(
+        "WITH categorized AS (
+            SELECT field_path, allele_id,
+                   CASE WHEN value_type = 'string' AND field_path IN ({categorical_sql})
+                        THEN string_value ELSE NULL END AS category
+            FROM evidence
+         )
+         SELECT field_path, category, count(*), count(DISTINCT allele_id), GROUPING(category)
+         FROM categorized
+         GROUP BY GROUPING SETS ((field_path), (field_path, category))"
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("cannot count FAVOR fields: {error}"))?;
+    let mut rows = statement
+        .query([])
         .map_err(|error| format!("cannot read FAVOR field counts: {error}"))?;
-    rows.map(|row| {
-        let (field, count) = row.map_err(|error| error.to_string())?;
-        Ok((field, count.max(0) as u64))
-    })
-    .collect()
+    let mut statistics = BTreeMap::<String, FieldStatistics>::new();
+    let mut grouped = BTreeMap::<String, Vec<(String, u64)>>::new();
+    let mut present = BTreeMap::<String, u64>::new();
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        let field = row.get::<_, String>(0).map_err(|error| error.to_string())?;
+        let category = row
+            .get::<_, Option<String>>(1)
+            .map_err(|error| error.to_string())?;
+        let count = row
+            .get::<_, i64>(2)
+            .map_err(|error| error.to_string())?
+            .max(0) as u64;
+        let allele_count = row
+            .get::<_, i64>(3)
+            .map_err(|error| error.to_string())?
+            .max(0) as u64;
+        let grouping = row.get::<_, i64>(4).map_err(|error| error.to_string())?;
+        if grouping != 0 {
+            statistics.entry(field.clone()).or_default().occurrences = count;
+            present.insert(field, allele_count);
+        } else if let Some(category) = category
+            && super::results::is_categorical_field(SOURCE_ID, &field)?
+        {
+            grouped
+                .entry(field)
+                .or_default()
+                .push((category, allele_count));
+        }
+    }
+    for (field, values) in grouped {
+        statistics.entry(field.clone()).or_default().categorical =
+            Some(super::results::BoundedCategoricalCounts::from_grouped(
+                present.get(&field).copied().unwrap_or(0),
+                values,
+            ));
+    }
+    Ok(statistics)
 }
 
 fn field_physical_scope(field_path: &str) -> &'static str {
@@ -1345,11 +1418,12 @@ fn field_resolution_policy(field_path: &str) -> &'static str {
     }
 }
 
-fn catalog_json(occurrences: &BTreeMap<String, u64>) -> Value {
+fn catalog_json(statistics: &BTreeMap<String, FieldStatistics>, total_alleles: u64) -> Value {
     let fields = FIELDS
         .iter()
         .filter_map(|field| {
-            let count = occurrences.get(field.path).copied().unwrap_or(0);
+            let statistics = statistics.get(field.path);
+            let count = statistics.map_or(0, |statistics| statistics.occurrences);
             (count > 0).then(|| {
                 let mut value = json!({
                     "scope": field_biological_scope(field.path),
@@ -1367,6 +1441,12 @@ fn catalog_json(occurrences: &BTreeMap<String, u64>) -> Value {
                     || provider_selected_standard_field(field.path)
                 {
                     value["selectionOrigin"] = Value::String("provider".into());
+                }
+                if let Some(metadata) = statistics
+                    .and_then(|statistics| statistics.categorical.as_ref())
+                    .and_then(|counts| counts.metadata(total_alleles))
+                {
+                    value["categorical"] = metadata;
                 }
                 value
             })
@@ -1581,6 +1661,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn field_statistics_count_distinct_alleles_in_one_grouped_query() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE evidence(
+                    allele_id VARCHAR,
+                    field_path VARCHAR,
+                    value_type VARCHAR,
+                    string_value VARCHAR
+                 );
+                 INSERT INTO evidence VALUES
+                    ('a1', 'siftCat', 'string', 'deleterious'),
+                    ('a1', 'siftCat', 'string', 'deleterious'),
+                    ('a2', 'siftCat', 'string', 'tolerated'),
+                    ('a1', 'caddPhred', 'number', NULL);",
+            )
+            .unwrap();
+        let statistics = field_statistics(&connection).unwrap();
+        let sift = &statistics["siftCat"];
+        assert_eq!(sift.occurrences, 3);
+        assert_eq!(
+            sift.categorical.as_ref().unwrap().metadata(4).unwrap(),
+            json!({
+                "observedValueCounts": [
+                    {"value": "deleterious", "count": 1},
+                    {"value": "tolerated", "count": 1}
+                ],
+                "missingCount": 2,
+                "countBasis": "variantAlleles"
+            })
+        );
+        assert_eq!(statistics["caddPhred"].occurrences, 1);
+        assert!(statistics["caddPhred"].categorical.is_none());
+    }
+
+    #[test]
     fn canonical_favor_references_are_bounded_sequences() {
         assert!(valid_favor_reference("19-44908822-C-T"));
         assert!(valid_favor_reference("22-17008105-G-A"));
@@ -1724,15 +1840,26 @@ mod tests {
 
     #[test]
     fn catalog_distinguishes_position_and_source_selected_coding_fields() {
-        let occurrences = BTreeMap::from([
-            ("gnomadAf".to_owned(), 1),
-            ("revel".to_owned(), 1),
-            ("codingRevelScore".to_owned(), 1),
-            ("codingCaddPhred".to_owned(), 1),
-            ("codingGerpRs".to_owned(), 1),
-            ("codingPhyloP100way".to_owned(), 1),
-        ]);
-        let catalog = catalog_json(&occurrences);
+        let statistics = [
+            "gnomadAf",
+            "revel",
+            "codingRevelScore",
+            "codingCaddPhred",
+            "codingGerpRs",
+            "codingPhyloP100way",
+        ]
+        .into_iter()
+        .map(|field| {
+            (
+                field.to_owned(),
+                FieldStatistics {
+                    occurrences: 1,
+                    categorical: None,
+                },
+            )
+        })
+        .collect();
+        let catalog = catalog_json(&statistics, 1);
         let fields = catalog["fields"].as_array().unwrap();
         let field = |path: &str| {
             fields

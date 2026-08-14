@@ -113,6 +113,8 @@
   display: grid;
   width: max(100%, 22rem);
   max-width: min(45rem, calc(100vw - var(--space-12)));
+  max-height: min(26.25rem, 42vh);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 0;
 }
 
@@ -135,7 +137,7 @@
 
 .categorical-filter-list {
   display: grid;
-  max-height: min(15rem, 40vh);
+  min-height: 0;
   overflow: auto;
 }
 
@@ -145,9 +147,18 @@
   overflow-wrap: anywhere;
 }
 
+.categorical-filter-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
 .categorical-filter-actions {
   display: grid;
   padding-top: var(--space-1);
+}
+
+.categorical-filter-actions:not(:has([data-discover-categories])):has([data-category-status]:empty) {
+  display: none;
 }
 
 .categorical-filter-empty,

@@ -1290,6 +1290,13 @@ fn execute_vcf_review(
     {
         return fail_staging(staging, error);
     }
+    if let Err(error) = super::results::write_core_categorical_counts(
+        &field_catalog,
+        canonical.rows,
+        &canonical.core_categorical,
+    ) {
+        return fail_staging(staging, error);
+    }
 
     set_phase("publishing", "Verifying the AnnoCAT result");
     if let Err(error) = super::results::validate_report_tables_allow_empty_consequences(
@@ -2105,6 +2112,22 @@ fn finalize_outputs(
             );
         }
     };
+    if structured.alleles != canonical.rows {
+        return fail_staging(
+            staging,
+            format!(
+                "result allele counts do not align: variant table has {}, structured output has {}",
+                canonical.rows, structured.alleles
+            ),
+        );
+    }
+    if let Err(error) = super::results::write_core_categorical_counts(
+        &field_catalog,
+        canonical.rows,
+        &canonical.core_categorical,
+    ) {
+        return fail_staging(staging, error);
+    }
     let consequences_bytes = file_bytes(&consequences)?;
     let evidence_bytes = file_bytes(&evidence)?;
     let field_catalog_bytes = file_bytes(&field_catalog)?;

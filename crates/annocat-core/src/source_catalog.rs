@@ -1521,12 +1521,12 @@ mod tests {
         let splice_ai = calibration("spliceai-clingen-svi-2023-global");
         assert_eq!(
             label_at(splice_ai, 0.100),
-            "Supporting benign splice-effect evidence"
+            "Moderate benign splice-effect evidence"
         );
         assert_eq!(label_at(splice_ai, 0.101), "Indeterminate calibrated range");
         assert_eq!(
             label_at(splice_ai, 0.200),
-            "Supporting pathogenic splice-effect evidence"
+            "Moderate pathogenic splice-effect evidence"
         );
 
         for calibration in manifest["calibrations"].as_array().unwrap() {
