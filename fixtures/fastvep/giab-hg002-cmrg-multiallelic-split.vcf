@@ -1,0 +1,7 @@
+##fileformat=VCFv4.2
+##reference=GRCh38
+##contig=<ID=chr1,length=248956422>
+##annocat_fixture_source=GIAB HG002 CMRG v1.00 chr1:1028320 GCC>G,GC split into biallelic records
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	1028320	.	GCC	G	30	.	.
+chr1	1028320	.	GCC	GC	30	.	.

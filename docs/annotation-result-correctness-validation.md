@@ -1,6 +1,6 @@
 # Annotation result correctness validation
 
-Status: Verified implementation plan
+Status: Validation harness implemented; four Ensembl 115 concordance corpora pass locally
 Last updated: 2026-08-14
 Applies to: fastVEP output, local variant-annotation sources, OSA1 and OSA2
 caches, result conversion, selected evidence, online FAVOR enrichment, result
@@ -42,6 +42,170 @@ not claim to represent a production source. Do not commit restricted source
 content. Large managed caches are neither committed nor required in CI.
 Expected values must remain independent even if the tiny caches are rebuilt
 with production cache-building code.
+
+The initial CI phase commits schema-faithful synthetic source rows and an
+independent expected-value file. Its Rust comparator covers result conversion,
+representative transcript selection, selected evidence, table queries, Variant
+Details, filtering, sorting, missing-versus-zero handling, and export. OSA1 and
+OSA2 reader parity remains part of the next source-cache validation phase and
+must not be claimed by this initial check.
+
+The manual `Annotation concordance` workflow builds the fastVEP commit pinned
+by AnnoCAT and annotates the public 173-variant VEP example with Ensembl 115
+chromosome 22 GFF3 and FASTA. It submits the same VCF records to Ensembl's
+release-pinned September 2025 REST archive and fails unless `/info/software`
+reports release 115. The REST endpoint accepts at most 200 variants per POST,
+so this public corpus fits in one request:
+<https://sep2025.rest.ensembl.org/documentation/info/vep_region_post>.
+
+The comparison requires exact multiset equality for every field with a direct
+representation in both outputs. Missing variants, missing consequences,
+duplicate-count differences, extra consequences, and mapped-field differences
+fail the workflow. A versioned source-contract file can ignore only named
+fields or allow named transcript identities, each with a reason. An unlisted
+difference or a stale unused identity exception fails. The uploaded reproducibility
+record contains the request, response, software-release response, tool
+identity, contract identity, and SHA-256 hashes.
+
+This lane does not compare VEP's `SOURCE`, `SYMBOL_SOURCE`, `HGNC_ID`, APPRIS,
+or the paired RefSeq accession carried by VEP's `MANE_SELECT` field. The REST
+response does not expose `SOURCE`; its Ensembl database supplies HGNC xrefs that
+are absent from the chromosome GFF3 used by fastVEP; fastVEP's GFF3 loader does
+not retain APPRIS; and AnnoCAT uses the Ensembl transcript plus the combined
+MANE membership flag rather than the paired RefSeq accession. The lane compares
+combined MANE membership, TSL, CCDS, protein ID, and the other mapped fields
+listed in its JSON report. Fields excluded from this REST/GFF contract remain
+unverified; AnnoCAT does not install or require VEP CLI to validate the fields
+it supports. This proves consequence concordance only for the public corpus and
+does not replace raw-source-to-cache validation.
+
+### 1.1 Current execution status
+
+The first local execution used the exact Windows fastVEP binary declared in
+`config/fastvep-pin.json`, the installed Ensembl 115 transcript cache, and the
+public 173-record fastVEP VEP example. The archived REST service reported
+Ensembl release 115 and returned one response for every input record. All 173
+variant identities matched.
+
+The initial consequence comparison did not pass. fastVEP emitted 2,977
+supported rows and the REST oracle emitted 2,975. There was one oracle-only
+and three fastVEP-only transcript identities. Among 2,974 shared unique
+identities, 344 `HGVSp`, 316 `FLAGS`, and 20 `SYMBOL` values differed.
+
+Rebuilding the transcript cache from the official Ensembl 115 GFF3 and GRCh38
+FASTA produced the same annotations as the installed cache. Rebuilding the
+newer local fastVEP source at commit `e7192e9`, rebuilding its cache from the
+same inputs, and annotating with equivalent explicit flags produced a
+byte-identical VCF. The differences are therefore reproducible annotation
+behavior, not evidence of transcript-cache corruption or an already-fixed
+local-source issue.
+
+A clean build of upstream `Huang-lab/fastVEP` master at `0e13c5b` (v0.3.0),
+with a separately rebuilt transcript cache, also produced that byte-identical
+VCF. The observed differences therefore predate the AnnoCAT fork. The missing
+CDS-completeness flags are additionally an input-contract gap: the Ensembl 115
+GFF3 contains no `cds_start_NF` or `cds_end_NF` tags, while the archived VEP
+service returns those flags from its internal transcript data.
+
+The investigation found four concrete fastVEP gaps:
+
+- the GFF3 contains the correct CDS protein versions, but the pinned binary
+  emits `.1` in affected `HGVSp` values;
+- the GFF3 `ncRNA_gene` records contain the missing symbols, but the loader
+  does not attach them;
+- the VEP-only transcript uses the GFF3 `unconfirmed_transcript` feature type,
+  which the loader does not retain; and
+- VEP reports incomplete-CDS flags that fastVEP does not emit.
+
+The GFF3 parser now retains `ncRNA_gene` and `unconfirmed_transcript` records
+and carries the parsed CDS protein version instead of fabricating version 1.
+Focused parser tests pass. A fresh cache built with the patched parser and the
+same GRCh38 FASTA emitted 2,978 transcript rows. All 2,975 transcript identities
+shared with the REST oracle now match exactly for every compared field except
+`FLAGS`. The previous 344 `HGVSp` differences, 20 `SYMBOL` differences, and the
+one missing transcript identity are resolved.
+
+An additional eight-record fixture covers BRCA1 and TP53 SNVs and a deletion,
+forward- and reverse-strand transcripts, coding and non-coding transcripts,
+UTR, intronic, downstream, and protein consequences. Its 365 transcript-allele
+identities match the archived release-115 REST response exactly for all 25
+mapped fields. This test found a real error: non-coding exonic deletions were
+not shifted to the most 3-prime transcript position when the transcript cache
+did not store a spliced sequence. The shared annotation path now maps cDNA back
+to the reference and reads only adjacent bases as needed. It does not rebuild
+or expand existing transcript caches. The four affected BRCA1 HGVSc values now
+match VEP, and focused forward/reverse coordinate tests pass.
+
+A public 40-record GIAB HG002 CMRG sample adds chromosome 1 SNVs, insertions,
+deletions, and one multiallelic repeat-region indel. Candidate and archived
+release-115 REST outputs contain the same 135 allele-transcript identities.
+For 39 records and 131 rows, all 25 mapped fields match exactly. The remaining
+four `HGVSc` differences belong to the one unsplit multiallelic record at
+`1:1028320 GCC>G,GC`. Splitting its two alternate alleles into separate VCF
+records produces four exact rows with no field differences.
+
+The shared consequence path now minimizes each alternate allele independently
+before calculating consequences and HGVS, and reverse-complements multibase
+alleles on reverse-strand transcripts. VCF `CSQ` output uses a minimized allele
+for a biallelic record but retains distinguishable record-level allele keys for
+an unsplit multiallelic record. Canonical result identity and supplementary
+source lookup continue to use the original VCF allele, so this output fix does
+not change evidence joins or result schemas.
+
+Ensembl VEP documents known HGVS problems for multiallelic variants and
+recommends placing each alternate allele on its own input line:
+<https://github.com/Ensembl/ensembl-vep#known-bugs>. Ensembl VEP CLI also shifts
+HGVS descriptions to the transcript-most-3-prime location by default, while
+the REST region endpoint leaves 3-prime shifting disabled unless requested:
+<https://www.ensembl.org/info/docs/tools/vep/script/vep_options.html> and
+<https://rest.ensembl.org/documentation/info/vep_region_post>. AnnoCAT's result
+contract is one independently normalized result allele per alternate allele.
+The exact split REST result is therefore the oracle for this boundary; AnnoCAT
+does not reproduce the REST endpoint's unsplit multiallelic HGVS artifact.
+
+A two-record public SMARCA4 fixture covers an ordinary in-frame deletion and a
+deletion that starts in an intron and can be shifted to an equivalent exonic
+deletion at the transcript-most-3-prime position. The shared annotation helper
+now performs that sequence-aware shift before deriving HGVSc and HGVSp. Both
+records match the release-115 REST oracle exactly for MANE Select HGVSc, HGVSp,
+and consequence terms. The library and CLI annotation paths reuse the same
+helper, so this fix does not change result identity, supplementary evidence
+lookups, or cache formats.
+
+The 316 `FLAGS` differences are `cds_start_NF` or `cds_end_NF` values. Ensembl's
+public release-115 GFF3 contains neither attribute, while the VEP cache dumper
+retains those attributes from the Ensembl database. They must not be inferred
+from CDS phase or coordinates because those fields do not prove transcript-end
+completeness. The GFF-to-REST contract therefore excludes only `FLAGS`; exact
+parity for that field requires the matching VEP cache or database metadata.
+
+The three fastVEP-only transcripts all belong to `ENSG00000249590`. They are
+current GRCh38 Ensembl 115 transcripts present in both the GFF3 and the archived
+lookup API, with distinct intronic, synonymous, and nonsense-mediated-decay
+effects for the test allele. They are not duplicate annotations and the GFF3
+does not mark them as artifacts or readthrough transcripts. AnnoCAT's declared
+transcript source is the public release-115 GFF3, so the versioned contract
+allows exactly these three allele-transcript identities. No gene-wide,
+transcript-wide, or wildcard suppression is used. With that contract applied,
+all 2,975 comparable rows match the REST oracle for all 24 compared fields.
+
+The REST adapter intentionally compares transcript and intergenic consequences
+only. This workflow supplies Ensembl transcript GFF3 but no regulatory or motif
+source, so a VEP-only regulatory or motif consequence is outside this lane's
+declared input contract.
+
+The configured fastVEP commit is not currently available from the public
+repository named in `config/fastvep-pin.json`. Therefore, the remote workflow
+cannot yet rebuild the exact configured binary and a fresh transcript cache.
+Publish that commit or update the pin through a reviewed reproducibility change
+before treating the remote workflow as an executable release gate. Do not
+silently substitute another commit.
+
+These passing corpora do not yet cover chromosomes X, Y, or MT; a broad set of
+mixed multiallelic records; MNVs; symbolic alleles; accepted alternate contigs;
+every consequence class; or raw-to-cache fidelity for each supplementary
+source. Those cases remain required before claiming full annotation
+correctness.
 
 Do not add a validation database, background service, runtime VEP dependency,
 or WGS-sized golden result.
@@ -104,10 +268,18 @@ Required cases include:
 
 ### 3.2 Canonical allele to transcript consequences
 
-Use Ensembl VEP as the independent consequence oracle. The VEP binary, cache,
-FASTA, assembly, transcript source, and release must match the contract declared
-by the fastVEP build. Ensembl recommends matching the VEP and cache releases:
+Use Ensembl VEP as the independent consequence oracle. A local VEP comparison
+must pin the binary, cache, FASTA, assembly, transcript source, and release to
+the contract declared by the fastVEP build. Ensembl recommends matching the VEP
+and cache releases:
 <https://www.ensembl.org/info/docs/tools/vep/script/vep_cache.html>.
+
+A release-pinned Ensembl REST archive is acceptable for fields that have a
+direct JSON equivalent. Record `/info/software`, the exact request, the full
+response, and their hashes. Never compare a current REST release with an older
+fastVEP transcript model, and never infer parity for a field absent from the
+REST response. Ensembl 115 was released in September 2025:
+<https://www.ensembl.info/2025/09/02/ensembl-115-has-been-released/>.
 
 Compare the complete supported consequence set for each allele, not only the
 representative table consequence. VEP emits a separate prediction when an
@@ -133,6 +305,87 @@ expected value, observed value, reason, upstream reference, VEP and fastVEP
 release, owner, and review date in a versioned exception file. Wildcards and
 source-wide waivers are not allowed. A percentage agreement threshold must not
 conceal an unexplained mismatch.
+
+#### 3.2.1 fastVEP issue 81: protein in-frame indels
+
+Issue 81 changes HGVSp nomenclature for protein in-frame insertions, deletions,
+and deletion-insertions. It must not change consequence prediction, protein
+coordinates, amino-acid fields, or ACMG evidence. The upstream acceptance
+criteria are recorded in
+<https://github.com/Huang-lab/fastVEP/issues/81>.
+
+Full validation requires all of the following:
+
+1. Use the 15 observed insertion cases named by the issue author. Record the
+   genomic allele, transcript and release, raw protein position and amino-acid
+   change, reference peptide, and expected Ensembl VEP HGVSp for each case.
+   Test every case with and without peptide context. If this case table is not
+   public, the issue author or upstream maintainer must run this gate; substitute
+   examples do not prove that the original 15 cases pass.
+2. Include independent branch coverage for a right-shifted duplication, a true
+   insertion, a deletion, a deletion-insertion, a repeat-region shift, an
+   incomplete-CDS peptide with leading `X`, a terminal `*`, a peptide mismatch,
+   and a missing peptide. With peptide context, HGVSp must exactly match pinned
+   Ensembl VEP. Without usable peptide context, output must remain an unshifted
+   valid indel expression and must never become synonymous or missense.
+3. Exercise both annotation call sites: the `fastvep-annotate` library path and
+   the `fastvep-cli` VCF path. Both must pass `Transcript::peptide` to the HGVSp
+   formatter without changing predictor-level protein coordinates or amino
+   acids.
+4. Run the same real-data VCF through the parent commit and candidate commit,
+   and through Ensembl VEP CLI with the same release, cache, FASTA, transcript
+   source, assembly, and HGVS options. Compare every transcript-level HGVSp and
+   report before-and-after exact-match counts. The corpus must contain in-frame
+   insertions; a general validation VCF with none cannot close this gate.
+5. Run ACMG output on the same input before and after. The ordered multiset of
+   allele, gene, transcript, consequence, `ACMG`, and `ACMG_CRITERIA` values must
+   be byte-identical.
+6. Require `cargo test --workspace`,
+   `cargo clippy --workspace --all-targets -- -D warnings`, and
+   `cargo fmt --check` to pass.
+
+Current local validation used the public 343-allele corpus from
+<https://github.com/Qnomx/fastVEP/pull/2>, its frozen Ensembl VEP oracle, the
+clean parent commit, and the candidate implementation. That corpus now includes
+all 15 insertion cases reported in issue 81. The candidate matched the expected
+HGVSp for all 15 cases.
+
+Among the 152 corpus records with an expected in-frame HGVSp comparison, the
+parent commit had 17 exact matches, 118 differing values, one missing value,
+and 16 malformed values. The candidate had 121 exact matches, 30 differing
+values, one missing value, and no malformed values. It changed 133 values,
+created 104 new exact matches, and regressed none of the parent's exact matches.
+Focused tests cover both annotation call sites, peptide and no-peptide paths,
+right-shifted duplication, insertion, deletion, deletion-insertion, repeat
+shifting, leading `X`, terminal `*`, and unusable peptide context.
+
+The parent and candidate produced the same 7,366 ordered ACMG rows. After only
+the HGVSp field was blanked, every field in all 343 emitted VCF records was also
+identical. Consequence terms, protein coordinates, amino-acid fields, and ACMG
+evidence therefore remained unchanged in this corpus. `cargo test --workspace`
+and `cargo fmt --all -- --check` pass.
+
+The repository-wide strict Clippy gate is not yet green. The clean parent and
+candidate both fail Rust 1.94 Clippy checks in code unrelated to issue 81; the
+first shared failure is `Allele::from_str` in `fastvep-core`. No diagnostic is
+reported in the issue 81 implementation file, `fastvep-hgvs/src/protein.rs`.
+This inherited quality-gate failure must be fixed or explicitly waived before a
+release can claim every gate in this section passed.
+
+The frozen oracle proves the reported issue 81 formatter defect is fixed for
+the public corpus. The separate SMARCA4 splice-boundary deletion is also fixed,
+but in the shared transcript-aware nucleotide normalization layer rather than
+in the issue 81 formatter. This preserves issue 81's blast-radius rule while
+covering the previously missing HGVSp. The exact public REST checks and focused
+unit tests are AnnoCAT's acceptance gate; VEP CLI is not a runtime, build, or CI
+dependency.
+
+Existing transcript caches remain readable and use the same format. A cache
+built before the GFF parser fix can retain a fabricated protein-version suffix
+such as `.1`; rebuilding that cache from the same pinned GFF3 and FASTA updates
+the suffix without changing its schema. Existing result files are immutable and
+must be reannotated to receive corrected HGVS text. CDS-completeness flags remain
+outside the GFF3 source contract and are not inferred.
 
 ### 3.3 Raw source to cache
 
@@ -539,8 +792,8 @@ separates corruption detection from scientific data fidelity, uses independent
 oracles, covers allele and transcript identity explicitly, and validates every
 lossy or selecting transformation at the boundary where it occurs.
 
-The first implementation should stop after the committed fixture bundle and one
-Rust end-to-end comparator pass. Add installed-cache release validation and
-broader release sampling only after that check finds and reports field-level
-mismatches correctly. A larger framework would not improve correctness until
-the small independent oracle is trusted.
+The initial implementation now includes the committed semantic fixture, a Rust
+end-to-end result check, an exact field-level VEP comparator, two curated
+Ensembl corpora, and the public GIAB CMRG sample. The next useful boundary is
+raw-source-to-cache parity for each release-enabled supplementary source. Do
+not add a larger framework until those small independent source oracles exist.

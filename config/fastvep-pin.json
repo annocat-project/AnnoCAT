@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "271abdbe531108bac758d052ff429c9c23e682fe",
+  "commit": "7f1c9ea66b3e2aac996c2051d29971cb549bc4e7",
   "branch": "codex/annotation-performance-instrumentation",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
@@ -162,16 +162,20 @@
       "commit": "271abdbe531108bac758d052ff429c9c23e682fe",
       "upstreamCommit": "f41de3b68311b993487462ae29eb2e381f3d9ea5",
       "purpose": "Read OSA2 ZIP central directories sequentially, defer local-header reads until lookup, and open supplementary providers in deterministic parallel order"
+    },
+    {
+      "commit": "7f1c9ea66b3e2aac996c2051d29971cb549bc4e7",
+      "purpose": "Correct transcript consequence, multiallelic allele, HGVS, protein-version, noncoding-gene, and splice-boundary deletion concordance without changing cache formats"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 7369728,
-    "sha256": "6729398aa23d199bee0f262141b415d690a324c8b0e47fa41a905df16365b18c",
+    "sizeBytes": 7376896,
+    "sha256": "f3d5ad112198aac4afa5f189efd13cc39342f8a92e3153c00dadc715d8a1d32a",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-08-11",
+  "reviewedOn": "2026-08-14",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP and SpliceAI chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 preserves rare ambiguous-reference allele keys in a lossless overflow array while ordinary A/C/G/T alleles keep the compact lookup path. OSA2 startup reads each ZIP central directory sequentially, defers local-header reads until the corresponding chunk is queried, and opens supplementary providers in deterministic parallel order. Chunks are read directly from mapped archives, keep decoded JSON records in contiguous storage, and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact. AnnoCAT can omit duplicate supplementary VCF INFO projections from its internal temporary VCF while retaining complete structured evidence; requested annotated VCFs remain complete. Opt-in aggregate profiling measures annotation phases and source cache behavior, including ZIP inflation and opaque JSON-blob decoding, without recording variant values."
+  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP and SpliceAI chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 preserves rare ambiguous-reference allele keys in a lossless overflow array while ordinary A/C/G/T alleles keep the compact lookup path. OSA2 startup reads each ZIP central directory sequentially, defers local-header reads until the corresponding chunk is queried, and opens supplementary providers in deterministic parallel order. Chunks are read directly from mapped archives, keep decoded JSON records in contiguous storage, and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact. AnnoCAT can omit duplicate supplementary VCF INFO projections from its internal temporary VCF while retaining complete structured evidence; requested annotated VCFs remain complete. Transcript consequences now normalize each alternate allele independently, preserve reverse-strand multibase alleles, retain public GFF3 transcript metadata, and produce sequence-aware 3-prime HGVS for coding, noncoding, and splice-boundary deletions without changing OSA or transcript-cache schemas. Opt-in aggregate profiling measures annotation phases and source cache behavior, including ZIP inflation and opaque JSON-blob decoding, without recording variant values."
 }

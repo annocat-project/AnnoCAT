@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "ignoredFields": [
+    {
+      "field": "FLAGS",
+      "reason": "The public Ensembl release 115 GFF3 does not encode the CDS completeness flags returned by the release 115 VEP cache."
+    }
+  ],
+  "allowedExtraIdentities": [
+    {
+      "variant": ["22", "30427209", "T", "C"],
+      "allele": "C",
+      "featureType": "Transcript",
+      "feature": "ENST00000439023",
+      "reason": "This release 115 transcript is present in the public GFF3 but absent from the VEP cache response."
+    },
+    {
+      "variant": ["22", "30427209", "T", "C"],
+      "allele": "C",
+      "featureType": "Transcript",
+      "feature": "ENST00000439838",
+      "reason": "This release 115 transcript is present in the public GFF3 but absent from the VEP cache response."
+    },
+    {
+      "variant": ["22", "30427209", "T", "C"],
+      "allele": "C",
+      "featureType": "Transcript",
+      "feature": "ENST00000454552",
+      "reason": "This release 115 transcript is present in the public GFF3 but absent from the VEP cache response."
+    }
+  ]
+}

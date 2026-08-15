@@ -1,0 +1,96 @@
+name: Annotation concordance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ensembl-vep-115:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y samtools tabix
+
+      - name: Fetch and build pinned fastVEP
+        run: |
+          commit=$(jq -r .commit config/fastvep-pin.json)
+          repository=$(jq -r .repository config/fastvep-pin.json)
+          git clone "$repository" "$RUNNER_TEMP/fastVEP"
+          git -C "$RUNNER_TEMP/fastVEP" checkout --detach "$commit"
+          cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
+            --release --locked -p fastvep-cli
+
+      - name: Prepare pinned Ensembl 115 chromosome 22 inputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/concordance"
+          cd "$RUNNER_TEMP/concordance"
+          curl --fail --location --retry 3 --output reference.fa.gz \
+            https://ftp.ensembl.org/pub/release-115/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.chromosome.22.fa.gz
+          curl --fail --location --retry 3 --output annotations.gff3.gz \
+            https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz
+          gzip -dc reference.fa.gz > reference.fa
+          samtools faidx reference.fa
+          gzip -dc annotations.gff3.gz | grep '^#' > annotations.chr22.gff3
+          gzip -dc annotations.gff3.gz | grep -v '^#' | \
+            awk -F '\t' '$1 == "22"' | sort -t $'\t' -k1,1 -k4,4n >> annotations.chr22.gff3
+          bgzip -c annotations.chr22.gff3 > annotations.chr22.gff3.gz
+          tabix -p gff annotations.chr22.gff3.gz
+          sha256sum reference.fa annotations.chr22.gff3.gz > source-hashes.sha256
+
+      - name: Annotate with pinned fastVEP
+        run: |
+          work="$RUNNER_TEMP/concordance"
+          fastvep="$RUNNER_TEMP/fastVEP/target/release/fastvep"
+          cp "$RUNNER_TEMP/fastVEP/validation/human/vep_example_GRCh38.vcf" "$work/input.vcf"
+          "$fastvep" annotate -i "$work/input.vcf" \
+            --gff3 "$work/annotations.chr22.gff3" \
+            --fasta "$work/reference.fa" --hgvs --symbol --canonical \
+            -o "$work/fastvep.vcf"
+          "$fastvep" --version > "$work/fastvep-version.txt"
+
+      - name: Fetch the archived Ensembl VEP 115 oracle
+        run: |
+          work="$RUNNER_TEMP/concordance"
+          python scripts/fetch-ensembl-vep-oracle.py "$work/input.vcf" \
+            --request "$work/vep-request.json" \
+            --response "$work/vep-response.json" \
+            --software "$work/vep-software.json"
+
+      - name: Require exact supported-field concordance
+        run: |
+          work="$RUNNER_TEMP/concordance"
+          set +e
+          python scripts/compare-vep-concordance.py \
+            "$work/fastvep.vcf" "$work/vep-response.json" \
+            --oracle-format rest-json \
+            --contract fixtures/fastvep/ensembl-115-gff-rest-contract.json \
+            --json "$work/concordance.json"
+          status=$?
+          set -e
+          sha256sum "$work/input.vcf" "$work/fastvep.vcf" \
+            "$work/vep-request.json" "$work/vep-response.json" \
+            "$work/vep-software.json" \
+            fixtures/fastvep/ensembl-115-gff-rest-contract.json \
+            >> "$work/source-hashes.sha256"
+          exit "$status"
+
+      - name: Upload reproducibility record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: annotation-concordance
+          path: |
+            ${{ runner.temp }}/concordance/concordance.json
+            ${{ runner.temp }}/concordance/source-hashes.sha256
+            ${{ runner.temp }}/concordance/fastvep-version.txt
+            ${{ runner.temp }}/concordance/vep-request.json
+            ${{ runner.temp }}/concordance/vep-response.json
+            ${{ runner.temp }}/concordance/vep-software.json
+          if-no-files-found: warn

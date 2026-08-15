@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "position": 65564,
+      "geneSymbol": "OR4F5",
+      "transcriptId": "ENST00000641515",
+      "zygosity": "Heterozygous",
+      "revel": 0.28,
+      "gnomadAf": 0.0
+    },
+    {
+      "position": 65565,
+      "geneSymbol": "OR4F6",
+      "transcriptId": "ENST00000999999",
+      "zygosity": "Homozygous alternate",
+      "revel": 0.82,
+      "gnomadAf": 0.001
+    },
+    {
+      "position": 65566,
+      "geneSymbol": "OR4F7",
+      "transcriptId": "ENST00000999998",
+      "zygosity": "Not called",
+      "revel": null,
+      "gnomadAf": null
+    }
+  ],
+  "revelDescendingPositions": [65565, 65564, 65566],
+  "pathogenicPositions": [65565]
+}

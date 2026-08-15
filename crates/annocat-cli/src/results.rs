@@ -14035,6 +14035,240 @@ mod tests {
     }
 
     #[test]
+    fn semantic_fixture_preserves_values_across_tables_queries_details_and_export() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic-validation");
+        let expected: Value =
+            serde_json::from_slice(&fs::read(fixture.join("expected.json")).unwrap()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "annocat-semantic-validation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let variants = root.join("variants.parquet");
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+
+        let variant_summary = convert_vcf(
+            &fixture.join("input.vcf"),
+            &variants,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+        convert_structured(
+            &fixture.join("fastvep.ndjson"),
+            &consequences,
+            &evidence,
+            &catalog,
+            || false,
+            |_, _, _, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(variant_summary.rows, 3);
+        validate_report_tables(&variants, &consequences, &evidence, &catalog, 3).unwrap();
+
+        let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        let fields = catalog_value["fields"].as_array().unwrap();
+        let field_index = |source: &str, field: &str| {
+            fields
+                .iter()
+                .position(|entry| entry["sourceId"] == source && entry["fieldPath"] == field)
+                .unwrap_or_else(|| panic!("missing {source}.{field} fixture field"))
+        };
+        let revel_index = field_index("revel", "score");
+        let gnomad_index = field_index("gnomad", "af");
+        let clinvar_index = field_index("clinvar", "significance");
+
+        let page: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    exact_total: true,
+                    evidence_columns: vec![revel_index, gnomad_index, clinvar_index],
+                    sorts: vec![PageSortRequest {
+                        column: "position".into(),
+                        direction: "asc".into(),
+                    }],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(page["total"], 3);
+        for expected_allele in expected["alleles"].as_array().unwrap() {
+            let position = expected_allele["position"].as_i64().unwrap();
+            let actual = page["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["position"] == position)
+                .unwrap();
+            assert_eq!(actual["geneSymbol"], expected_allele["geneSymbol"]);
+            assert_eq!(actual["transcriptId"], expected_allele["transcriptId"]);
+            assert_eq!(actual["zygosity"], expected_allele["zygosity"]);
+            for (index, name) in [(revel_index, "revel"), (gnomad_index, "gnomadAf")] {
+                let actual_value = actual["evidence"]
+                    .get(index.to_string())
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<f64>().ok());
+                assert_eq!(actual_value, expected_allele[name].as_f64());
+            }
+        }
+
+        let sorted: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    exact_total: true,
+                    evidence_columns: vec![revel_index],
+                    sort_evidence: Some(revel_index),
+                    direction: "desc".into(),
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let sorted_positions = sorted["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["position"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        let expected_positions = |key: &str| {
+            expected[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sorted_positions,
+            expected_positions("revelDescendingPositions")
+        );
+
+        let pathogenic_request = PageRequest {
+            exact_total: true,
+            evidence_filters: vec![EvidenceFilterRequest {
+                index: clinvar_index,
+                operator: "in".into(),
+                value: String::new(),
+                value2: String::new(),
+                values: Some(vec!["Pathogenic".into()]),
+                include_missing: Some(false),
+            }],
+            ..PageRequest::default()
+        };
+        let pathogenic: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &pathogenic_request,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let pathogenic_positions = pathogenic["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["position"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pathogenic_positions,
+            expected_positions("pathogenicPositions")
+        );
+
+        let selected_id = allele_id("1", 65565, "A", "G");
+        let detail: Value = serde_json::from_str(
+            &complete_detail_json(
+                &variants,
+                Some(&consequences),
+                Some(&evidence),
+                &selected_id,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(detail["variant"]["geneSymbol"], "OR4F6");
+        assert_eq!(detail["variant"]["transcriptId"], "ENST00000999999");
+        assert_eq!(detail["consequences"].as_array().unwrap().len(), 2);
+        assert!(detail["evidence"].as_array().unwrap().iter().any(|entry| {
+            entry["sourceId"] == "revel"
+                && entry["fieldPath"] == "score"
+                && entry["scope"] == "selected"
+                && entry["value"] == 0.82
+        }));
+
+        let connection = Connection::open_in_memory().unwrap();
+        let selected_revel: f64 = connection
+            .query_row(
+                "SELECT number_value FROM read_parquet(?)
+                 WHERE allele_id=? AND source_id='revel' AND field_path='score' AND scope='selected'",
+                params![evidence.to_string_lossy().as_ref(), selected_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(selected_revel, 0.82);
+        let zero_id = allele_id("1", 65564, "A", "G");
+        let zero_af: f64 = connection
+            .query_row(
+                "SELECT number_value FROM read_parquet(?)
+                 WHERE allele_id=? AND source_id='gnomad' AND field_path='af' AND scope='allele'",
+                params![evidence.to_string_lossy().as_ref(), zero_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(zero_af, 0.0);
+        let missing_id = allele_id("1", 65566, "C", "T");
+        let missing_af: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?)
+                 WHERE allele_id=? AND source_id='gnomad' AND field_path='af'",
+                params![evidence.to_string_lossy().as_ref(), missing_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(missing_af, 0);
+
+        let exported = root.join("pathogenic.csv");
+        assert_eq!(
+            export_filtered_rows_with_details(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                &exported,
+                &pathogenic_request,
+                &["position".into(), "gene".into(), "transcriptId".into()],
+            )
+            .unwrap(),
+            1
+        );
+        let exported = String::from_utf8(fs::read(exported).unwrap()).unwrap();
+        assert!(exported.contains("\"65565\",\"OR4F6\",\"ENST00000999999\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn allele_sources_are_normalized_once_at_ingestion() {
         let root = std::env::temp_dir().join(format!(
             "annocat-evidence-scope-fallback-{}-{}",
