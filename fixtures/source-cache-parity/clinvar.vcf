@@ -1,0 +1,6 @@
+##fileformat=VCFv4.2
+##INFO=<ID=CLNSIG,Number=.,Type=String,Description="Clinical significance">
+##INFO=<ID=CLNREVSTAT,Number=.,Type=String,Description="Review status">
+##INFO=<ID=CLNDN,Number=.,Type=String,Description="Condition">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	10001	rsParityClinVar	A	G	.	PASS	CLNSIG=Pathogenic;CLNREVSTAT=criteria_provided,_multiple_submitters,_no_conflicts;CLNDN=Example_condition

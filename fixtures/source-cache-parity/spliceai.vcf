@@ -1,0 +1,5 @@
+##fileformat=VCFv4.2
+##INFO=<ID=SpliceAI,Number=.,Type=String,Description="SpliceAI">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	30000	.	C	T,A	.	PASS	SpliceAI=T|GENE2|0.00|0.10|0.00|0.92|3|-5|10|-2,A|GENE2|0.50|0.00|0.00|0.00|7|0|0|0
+1	40000	.	N	A	.	PASS	SpliceAI=A|GENEN|0.20|0.00|0.30|0.00|-12|0|4|0

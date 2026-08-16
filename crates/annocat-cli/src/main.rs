@@ -1067,15 +1067,23 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                     let release =
                         resource_release("ensembl-gff3").expect("Ensembl release is cataloged");
                     let executable = fastvep::readiness().executable;
+                    let rebuild = rebuild_install_requested(query);
                     match executable
                         .ok_or_else(|| "fastVEP executable is unavailable".to_string())
-                        .and_then(|fastvep| {
-                            transcript::start_background(
-                                fastvep,
-                                downloader::final_path(&paths.downloads, &release),
-                                reference::fasta_path(&paths.resources),
-                                paths.resources,
-                            )
+                        .and_then(|fastvep| rebuild.map(|rebuild| (fastvep, rebuild)))
+                        .and_then(|(fastvep, rebuild)| {
+                            let gff3 = downloader::final_path(&paths.downloads, &release);
+                            let fasta = reference::fasta_path(&paths.resources);
+                            if rebuild {
+                                transcript::rebuild_background(
+                                    fastvep,
+                                    gff3,
+                                    fasta,
+                                    paths.resources,
+                                )
+                            } else {
+                                transcript::start_background(fastvep, gff3, fasta, paths.resources)
+                            }
                         }) {
                         Ok(()) => ("202 Accepted", "{\"accepted\":true}".into()),
                         Err(error) => (

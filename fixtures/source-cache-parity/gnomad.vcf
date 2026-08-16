@@ -1,0 +1,8 @@
+##fileformat=VCFv4.2
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##INFO=<ID=AN,Number=1,Type=Integer,Description="Allele number">
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count">
+##INFO=<ID=nhomalt,Number=A,Type=Integer,Description="Homozygote count">
+##INFO=<ID=AF_eas,Number=A,Type=Float,Description="East Asian allele frequency">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	20000	.	C	T,A	.	PASS	AF=0.01,0.005;AN=140000;AC=1400,700;nhomalt=10,3;AF_eas=0.02,0.01

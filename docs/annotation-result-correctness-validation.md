@@ -1,7 +1,7 @@
 # Annotation result correctness validation
 
-Status: Validation harness implemented; four Ensembl 115 concordance corpora pass locally
-Last updated: 2026-08-14
+Status: Consequence, genotype, cache-format, and result-projection gates implemented; expanded Ensembl oracle exposes ten boundary failures
+Last updated: 2026-08-15
 Applies to: fastVEP output, local variant-annotation sources, OSA1 and OSA2
 caches, result conversion, selected evidence, online FAVOR enrichment, result
 queries, Variant Details, and export
@@ -26,34 +26,38 @@ Keep the existing `annocat results validate` command as an integrity check. Do
 not turn it into a source-data validator and do not add semantic validation to
 the normal result-open path.
 
-The minimum implementation has two lanes:
+The implementation has two lanes:
 
 1. Pull-request validation uses one small public fixture bundle: input VCFs,
-   license-permitted source excerpts or schema-faithful synthetic source rows,
-   tiny OSA1 and OSA2 caches, and one independently authored expected-value
-   file. One Rust integration test annotates with those caches, reads the
-   result Parquet files, and reports field-level differences.
-2. Release validation repeats the comparison with the actual installed caches,
-   pinned upstream tools, and deterministic records from the actual pinned raw
-   source files under their applicable terms.
+   schema-faithful synthetic source rows, and one independently authored
+   expected-value file. A Rust integration test projects those expected records
+   through AnnoCAT's canonical Parquet, query, filter, sort, and Variant Details
+   paths.
+2. The manual concordance workflow builds temporary OSA1 and OSA2 caches with
+   the pinned fastVEP binary and requires both readers to reproduce the expected
+   logical source records. Release validation additionally repeats source
+   sampling against the actual installed caches and pinned raw source files
+   under their applicable terms.
 
-The committed caches exercise production readers and resolution logic; they do
-not claim to represent a production source. Do not commit restricted source
+The temporary caches exercise production builders and readers; they do not
+claim to represent a production source. Do not commit restricted source
 content. Large managed caches are neither committed nor required in CI.
-Expected values must remain independent even if the tiny caches are rebuilt
+Expected values must remain independent even though the tiny caches are built
 with production cache-building code.
 
-The initial CI phase commits schema-faithful synthetic source rows and an
-independent expected-value file. Its Rust comparator covers result conversion,
-representative transcript selection, selected evidence, table queries, Variant
-Details, filtering, sorting, missing-versus-zero handling, and export. OSA1 and
-OSA2 reader parity remains part of the next source-cache validation phase and
-must not be claimed by this initial check.
+The source fixture commits schema-faithful synthetic rows and an independent
+expected-value file. The manual parity script covers exact OSA1/OSA2 source
+records. The Rust comparator covers result conversion, representative
+transcript selection, selected evidence, table queries, Variant Details,
+filtering, sorting, and missing-versus-zero handling. Export remains covered by
+the existing result-query tests; it is not yet asserted by this fixture.
 
 The manual `Annotation concordance` workflow builds the fastVEP commit pinned
-by AnnoCAT and annotates the public 173-variant VEP example with Ensembl 115
-chromosome 22 GFF3 and FASTA. It submits the same VCF records to Ensembl's
-release-pinned September 2025 REST archive and fails unless `/info/software`
+by AnnoCAT and annotates 196 public or synthetic reference-valid variants on
+chromosomes 21, 22, X, Y, and MT with Ensembl 115 GFF3 and FASTA. It builds a
+transcript cache from those same inputs and requires cache-backed annotation to
+be byte-identical to direct-GFF annotation. It then submits the same VCF records
+to Ensembl's release-pinned September 2025 REST archive and fails unless `/info/software`
 reports release 115. The REST endpoint accepts at most 200 variants per POST,
 so this public corpus fits in one request:
 <https://sep2025.rest.ensembl.org/documentation/info/vep_region_post>.
@@ -172,7 +176,7 @@ and consequence terms. The library and CLI annotation paths reuse the same
 helper, so this fix does not change result identity, supplementary evidence
 lookups, or cache formats.
 
-The 316 `FLAGS` differences are `cds_start_NF` or `cds_end_NF` values. Ensembl's
+The 319 `FLAGS` differences are `cds_start_NF` or `cds_end_NF` values. Ensembl's
 public release-115 GFF3 contains neither attribute, while the VEP cache dumper
 retains those attributes from the Ensembl database. They must not be inferred
 from CDS phase or coordinates because those fields do not prove transcript-end
@@ -201,11 +205,78 @@ Publish that commit or update the pin through a reviewed reproducibility change
 before treating the remote workflow as an executable release gate. Do not
 silently substitute another commit.
 
-These passing corpora do not yet cover chromosomes X, Y, or MT; a broad set of
-mixed multiallelic records; MNVs; symbolic alleles; accepted alternate contigs;
-every consequence class; or raw-to-cache fidelity for each supplementary
-source. Those cases remain required before claiming full annotation
-correctness.
+The previously executed concordance corpus also included one reference-valid
+transcribed-region substitution on each of X, Y, and MT. The same release-115
+GFF3 and chromosome
+FASTA inputs are compared with the archived release-115 VEP REST oracle. These
+three variants produce 107 shared allele-transcript identities. With the
+declared GFF-only `FLAGS` exception applied, all 107 rows match for all 24
+compared fields. These records verify consequence generation and chromosome
+naming on all three chromosomes; they do not prove sex-aware genotype
+interpretation, ploidy, PAR handling, or complete mitochondrial consequence
+behavior.
+
+This comparison must use a transcript cache freshly built by the pinned
+fastVEP revision. A development cache built by the older `4a02dc5` revision
+retained the same 107 identities but differed in protein-version and gene-symbol
+metadata. Binary readability is therefore not sufficient proof of transcript
+cache semantic compatibility.
+
+That 176-variant workflow-equivalent corpus produced 3,082 shared
+allele-transcript rows. It has no missing or extra rows and no compared-field
+differences after the existing narrow GFF-only `FLAGS` contract is applied. A
+transcript cache freshly built by the current pinned fastVEP revision produces
+a byte-identical VCF to direct-GFF annotation for this corpus. The workflow
+definition enforces both invariants once the pinned revision is published; the
+equivalent gate currently passes locally.
+
+The current workflow expands that corpus to 196 records. Its appended fixture
+contains two X records, one Y record, eleven MT records across control, RNA, and
+coding regions, and nine chromosome-22 records covering MNVs, insertions,
+deletions, and mixed multiallelic alleles. Every REF allele was checked against
+the pinned GRCh38 FASTA.
+
+The complete cache-backed run and archived release-115 REST oracle contain the
+same 196 records and 3,402 comparable allele-transcript identities. After the
+versioned three-transcript GFF3 allowance and the GFF3-only `FLAGS` exclusion,
+there are no missing identities, extra identities, or mapped-field differences.
+The corrected cases include mitochondrial start-codon uncertainty, complex
+coding edits, reverse-strand alleles, and a reverse-strand non-coding insertion.
+
+The former final mismatch came from an unsplit `CAC>C,CAT` record. Ensembl
+documents incorrect HGVS behavior for some unsplit multiallelic inputs and
+recommends one alternate allele per line. The gate now represents that deletion
+and SNV as independently normalized records. Their 26 allele-transcript rows
+match the archived oracle exactly. Other mixed multiallelic records remain in
+the corpus, so this change does not remove multiallelic consequence coverage or
+add a mismatch exception.
+
+The supplementary source fixture independently covers raw synthetic source
+rows through OSA1, OSA2, and AnnoCAT result projection for ClinVar, gnomAD,
+dbSNP, CADD, phyloP, REVEL, SpliceAI, and dbNSFP. It includes repeated exact
+dbNSFP keys, Number=A and Number=R multiallelic fields, signed SpliceAI
+positions, an ambiguous-reference SpliceAI key, and a neighboring no-evidence
+allele. It does not replace
+release-candidate sampling against the complete installed source files.
+
+A local production-cache smoke test additionally annotated the earlier
+22-record representation of the edge fixture with installed dbNSFP, ClinVar,
+dbSNP, gnomAD genomes, CADD, phyloP, and
+SpliceAI caches. It produced 25 normalized allele rows, 427 consequences, and
+231 evidence values, with evidence observed from all seven requested sources.
+A separate public 40-record GIAB HG002 CMRG sample produced 41 allele rows, 135
+consequences, and 1,113 evidence values. Canonical-file hashes and sizes matched
+both result manifests. Production CADD and SpliceAI OSA1/OSA2 lookups produced
+byte-identical VCF output; CADD structured output was byte-identical, and
+SpliceAI structured output was identical after canonical unwrapping of the
+OSA2 reader's duplicate-capable singleton record list. This is a pipeline and
+cache-format smoke test, not independent biological validation of every
+supplementary value.
+
+The passing gates do not yet cover symbolic structural alleles, breakends,
+accepted alternate contigs, every consequence class, or full installed-cache
+sampling. Those cases remain outside the current small-variant correctness
+claim.
 
 Do not add a validation database, background service, runtime VEP dependency,
 or WGS-sized golden result.
@@ -265,6 +336,22 @@ Required cases include:
 - accepted human alternate contigs and excluded decoy or viral contigs;
 - reference mismatches and unknown bases; and
 - called, partially called, and missing genotypes.
+
+VCF `GT` allele-vector length declares the called ploidy. AnnoCAT preserves the
+caller's `GT`, separator, and allele order; it does not infer sample sex or
+rewrite ploidy from chromosome coordinates. Focused tests cover representative
+diploid and haploid calls in X PAR and non-PAR labels, Y PAR and non-PAR labels,
+MT haploid calls, and partially called genotypes. This proves faithful VCF-call
+parsing, not sample-sex, karyotype, or ploidy QC. Those checks require declared
+sample metadata and a separate QC contract. The VCF specification defines the
+genotype encoding:
+<https://samtools.github.io/hts-specs/VCFv4.5.pdf>.
+
+PAR and mitochondrial consequence checks belong to the release-pinned Ensembl
+oracle lane. They must not be inferred from genotype ploidy. Ensembl documents
+the human pseudoautosomal regions separately from transcript consequence
+generation:
+<https://www.ensembl.org/info/genome/genebuild/human_PARS.html>.
 
 ### 3.2 Canonical allele to transcript consequences
 
@@ -413,6 +500,15 @@ Required assertions:
 - text, integer, identifier, and categorical fields are exact; and
 - numeric fields are exact unless the cache contract declares a specific
   quantization rule.
+
+The committed `fixtures/source-cache-parity` corpus implements this boundary
+for the eight release-enabled supplementary adapters. The standard-library
+script `scripts/verify-supplementary-cache-parity.py` builds both cache formats
+with the pinned fastVEP binary, runs full cache verification, annotates the same
+query alleles, and requires OSA1 and OSA2 to equal the independently authored
+`expected.ndjson` exactly. The Rust result-projection test then verifies the
+same expected records after conversion to canonical Parquet and through table,
+filter, sort, and Variant Details queries.
 
 A quantized field is checked twice:
 
@@ -684,15 +780,16 @@ rates may be reported, but they do not replace field-level gates.
 
 ### Pull requests
 
-- Run the committed semantic corpus with tiny source-contract and cache
-  fixtures.
+- Run the committed semantic source-contract corpus through the Rust result
+  projection test.
 - Run result integrity, resolver, and presentation-policy tests.
-- Do not require installed production caches, download large sources, or run
-  live APIs.
+- Do not build fastVEP caches, require installed production caches, download
+  large sources, or run live APIs.
 
 ### Release candidate
 
 - Regenerate independent oracle outputs with pinned upstream tools.
+- Build and verify the tiny OSA1/OSA2 source-contract caches.
 - Run raw-to-cache comparisons against actual installed caches for every
   release-enabled source contract.
 - Run OSA1/OSA2 equivalence where supported.
@@ -734,10 +831,18 @@ the source assertions or computational predictions are true.
 Reuse existing code and test surfaces:
 
 - `crates/annocat-core/src/normalization.rs`: normalization unit cases;
-- `crates/annocat-core/src/vcf.rs`: VCF allele and genotype checks;
+- `crates/annocat-core/src/sample_call.rs`: VCF genotype and ploidy-preservation
+  checks;
 - `crates/annocat-cli/src/results.rs`: canonical table, evidence resolution,
-  query, and export assertions;
-- `crates/annocat-cli/tests/`: one end-to-end semantic integration test;
+  query, filter, sort, Variant Details, and source-parity projection assertions;
+- `fixtures/source-cache-parity/`: raw synthetic source contracts and the
+  independently authored expected structured output;
+- `scripts/verify-supplementary-cache-parity.py`: temporary OSA1/OSA2 build,
+  verification, lookup, and exact-parity gate;
+- `fixtures/fastvep/ensembl-115-xy-mt.vcf`: public-oracle X, Y, MT, and complex
+  small-allele consequence cases;
+- `.github/workflows/annotation-concordance.yml`: manual pinned fastVEP,
+  transcript-cache, source-cache, and archived Ensembl gate;
 - `config/fastvep-pin.json`: fastVEP identity;
 - `config/source-catalog.json`: source scope and precedence;
 - `config/dbnsfp-4.9a-curated-fields.json`: dbNSFP field and transcript
@@ -746,27 +851,26 @@ Reuse existing code and test surfaces:
 - `web/tests/evidence-display-policy.test.mjs`: formatting, tooltip, and color
   policy.
 
-Suggested fixture location:
+Implemented fixture layout:
 
 ```text
-crates/annocat-cli/tests/fixtures/semantic-validation/
-  inputs/
-    accepted.vcf
-    rejected.vcf
-  source-fixtures/
-  caches/
-    osa1/
-    osa2/
-  legacy-result/
-  expected.jsonl
-  favor-response.json
-  exceptions.json
+fixtures/source-cache-parity/
+  query.vcf
+  clinvar.vcf
+  gnomad.vcf
+  dbsnp.vcf
+  cadd.tsv
+  phylop.tsv
+  revel.csv
+  spliceai.vcf
+  dbnsfp.tsv
+  expected.ndjson
   README.md
 ```
 
-The committed `expected.jsonl` is the stable CI oracle. Oracle-generation
-commands belong in the fixture README and run only during deliberate fixture
-updates. Production code never shells out to VEP or `bcftools`.
+The committed `expected.ndjson` is the stable CI oracle. It is reviewed by hand
+against the source contracts and is not generated by fastVEP or AnnoCAT.
+Production code never shells out to VEP or `bcftools`.
 
 ## 11. Non-goals
 
@@ -792,8 +896,9 @@ separates corruption detection from scientific data fidelity, uses independent
 oracles, covers allele and transcript identity explicitly, and validates every
 lossy or selecting transformation at the boundary where it occurs.
 
-The initial implementation now includes the committed semantic fixture, a Rust
-end-to-end result check, an exact field-level VEP comparator, two curated
-Ensembl corpora, and the public GIAB CMRG sample. The next useful boundary is
-raw-source-to-cache parity for each release-enabled supplementary source. Do
-not add a larger framework until those small independent source oracles exist.
+The implementation now includes an exact eight-source OSA1/OSA2 parity fixture,
+a Rust end-to-end result-projection check, genotype-ploidy preservation tests,
+an exact field-level VEP comparator, the expanded 196-record Ensembl workflow,
+and the public GIAB CMRG sample. The next useful boundary is deterministic
+sampling against complete installed release caches, plus a frozen online-source
+fixture. Do not add a validation service, database, or WGS-sized golden result.

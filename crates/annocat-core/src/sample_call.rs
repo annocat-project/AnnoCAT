@@ -379,6 +379,73 @@ mod tests {
     }
 
     #[test]
+    fn sex_chromosome_par_and_mitochondrial_calls_preserve_declared_vcf_ploidy() {
+        let cases = [
+            (
+                "X PAR1 diploid",
+                "0/1:18,12",
+                GenotypeRelation::Heterozygous,
+                PhaseState::Unphased,
+                2,
+                1,
+                Some(12),
+            ),
+            (
+                "X non-PAR haploid",
+                "1:3,24",
+                GenotypeRelation::HaploidAlternate,
+                PhaseState::Haploid,
+                1,
+                1,
+                Some(24),
+            ),
+            (
+                "Y PAR1 phased diploid",
+                "1|0:9,8",
+                GenotypeRelation::Heterozygous,
+                PhaseState::Phased,
+                2,
+                1,
+                Some(8),
+            ),
+            (
+                "Y non-PAR haploid",
+                "1:2,21",
+                GenotypeRelation::HaploidAlternate,
+                PhaseState::Haploid,
+                1,
+                1,
+                Some(21),
+            ),
+            (
+                "mitochondrial haploid",
+                "1:4,96",
+                GenotypeRelation::HaploidAlternate,
+                PhaseState::Haploid,
+                1,
+                1,
+                Some(96),
+            ),
+        ];
+
+        for (label, genotype, relation, phase, ploidy, copies, alt_depth) in cases {
+            let call = parse_sample_call("CASE", Some("GT:AD"), genotype, 1, 1);
+            assert_eq!(call.genotype_relation, relation, "{label}");
+            assert_eq!(call.phase, phase, "{label}");
+            assert_eq!(call.ploidy, ploidy, "{label}");
+            assert_eq!(call.selected_alt_copy_count, copies, "{label}");
+            assert_eq!(call.selected_alt_depth, alt_depth, "{label}");
+        }
+
+        // VCF GT encodes ploidy. Chromosome, PAR, and reported sex do not
+        // authorize AnnoCAT to rewrite a caller's genotype.
+        let partial = parse_sample_call("CASE", Some("GT:AD"), "1/.:4,9", 1, 1);
+        assert_eq!(partial.genotype_relation, GenotypeRelation::PartiallyCalled);
+        assert_eq!(partial.ploidy, 2);
+        assert_eq!(partial.selected_alt_copy_count, 1);
+    }
+
+    #[test]
     fn malformed_genotype_separators_are_not_treated_as_calls() {
         for genotype in ["/1", "0/", "0//1", "0|/1"] {
             let call = parse_sample_call("CASE", Some("GT"), genotype, 1, 1);

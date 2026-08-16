@@ -304,7 +304,26 @@ pub fn start_background(
     fasta: PathBuf,
     resources: PathBuf,
 ) -> Result<(), String> {
-    if is_ready(&resources) {
+    start_background_inner(fastvep, gff3, fasta, resources, false)
+}
+
+pub fn rebuild_background(
+    fastvep: PathBuf,
+    gff3: PathBuf,
+    fasta: PathBuf,
+    resources: PathBuf,
+) -> Result<(), String> {
+    start_background_inner(fastvep, gff3, fasta, resources, true)
+}
+
+fn start_background_inner(
+    fastvep: PathBuf,
+    gff3: PathBuf,
+    fasta: PathBuf,
+    resources: PathBuf,
+    replace_existing: bool,
+) -> Result<(), String> {
+    if !replace_existing && is_ready(&resources) {
         return Err("the transcript cache is already installed".into());
     }
     {

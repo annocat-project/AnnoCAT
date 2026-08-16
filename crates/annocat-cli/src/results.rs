@@ -10267,9 +10267,21 @@ fn appris_rank(consequence: &Map<String, Value>) -> u8 {
 }
 
 fn tsl_rank(consequence: &Map<String, Value>) -> u16 {
-    consequence_text(consequence, &["TSL", "tsl"])
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<u16>().ok())
+    ["TSL", "tsl"]
+        .iter()
+        .find_map(|name| {
+            let value = consequence.get(*name)?;
+            value
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .or_else(|| {
+                    value
+                        .as_str()
+                        .and_then(valid_annotation_text)
+                        .and_then(|value| value.split_whitespace().next())
+                        .and_then(|value| value.parse::<u16>().ok())
+                })
+        })
         .unwrap_or(u16::MAX)
 }
 
@@ -10637,8 +10649,7 @@ fn matching_consequences(
     if !all_alternates.contains(',') {
         return consequences.to_vec();
     }
-    let normalized_alternate = vep_allele(reference, alternate);
-    consequences
+    let uploaded = consequences
         .iter()
         .filter(|entry| {
             entry
@@ -10646,8 +10657,25 @@ fn matching_consequences(
                 .and_then(Value::as_str)
                 .and_then(|value| value.rsplit('/').next())
                 == Some(alternate)
-                || entry.get("Allele").and_then(Value::as_str)
-                    == Some(normalized_alternate.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !uploaded.is_empty() {
+        return uploaded;
+    }
+    let anchored = consequences
+        .iter()
+        .filter(|entry| entry.get("Allele").and_then(Value::as_str) == Some(alternate))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !anchored.is_empty() {
+        return anchored;
+    }
+    let normalized_alternate = vep_allele(reference, alternate);
+    consequences
+        .iter()
+        .filter(|entry| {
+            entry.get("Allele").and_then(Value::as_str) == Some(normalized_alternate.as_str())
         })
         .cloned()
         .collect()
@@ -12302,6 +12330,28 @@ mod tests {
     }
 
     #[test]
+    fn multiallelic_indels_match_fastvep_anchored_alleles() {
+        let consequences = vec![
+            Map::from_iter([
+                ("Allele".into(), Value::String("AGT".into())),
+                ("UPLOADED_ALLELE".into(), Value::String("A/AGT&T".into())),
+            ]),
+            Map::from_iter([
+                ("Allele".into(), Value::String("T".into())),
+                ("UPLOADED_ALLELE".into(), Value::String("A/AGT&T".into())),
+            ]),
+        ];
+
+        let insertion = matching_consequences(&consequences, "A", "AGT", "AGT,T");
+        let substitution = matching_consequences(&consequences, "A", "T", "AGT,T");
+
+        assert_eq!(insertion.len(), 1);
+        assert_eq!(insertion[0]["Allele"], "AGT");
+        assert_eq!(substitution.len(), 1);
+        assert_eq!(substitution[0]["Allele"], "T");
+    }
+
+    #[test]
     fn structured_consequences_keep_feature_types_and_allele_identity() {
         let record = StructuredRecord {
             line_number: 1,
@@ -13083,6 +13133,72 @@ mod tests {
                 .get("Feature")
                 .and_then(Value::as_str),
             Some("ENST_MANE")
+        );
+    }
+
+    #[test]
+    fn transcript_selection_treats_numeric_and_text_tsl_equally() {
+        let text = vec![
+            json!({
+                "Consequence": "intron_variant&non_coding_transcript_variant",
+                "Gene": "ENSG00000225880",
+                "Feature_type": "Transcript",
+                "Feature": "ENST00000634337",
+                "BIOTYPE": "lncRNA",
+                "CANONICAL": "YES",
+                "TSL": "5"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            json!({
+                "Consequence": "intron_variant&non_coding_transcript_variant",
+                "Gene": "ENSG00000237491",
+                "Feature_type": "Transcript",
+                "Feature": "ENST00000412115",
+                "BIOTYPE": "lncRNA",
+                "CANONICAL": "YES",
+                "TSL": "3"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+        let numeric = vec![
+            json!({
+                "consequence_terms": ["intron_variant", "non_coding_transcript_variant"],
+                "gene_id": "ENSG00000225880",
+                "transcript_id": "ENST00000634337",
+                "biotype": "lncRNA",
+                "canonical": 1,
+                "tsl": 5
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            json!({
+                "consequence_terms": ["intron_variant", "non_coding_transcript_variant"],
+                "gene_id": "ENSG00000237491",
+                "transcript_id": "ENST00000412115",
+                "biotype": "lncRNA",
+                "canonical": 1,
+                "tsl": 3
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        ];
+
+        assert_eq!(
+            consequence_text(best_consequence(&text).unwrap(), &["Feature"]),
+            Some("ENST00000412115")
+        );
+        assert_eq!(
+            consequence_text(
+                best_consequence(&numeric).unwrap(),
+                &["transcript_id"]
+            ),
+            Some("ENST00000412115")
         );
     }
 
@@ -14265,6 +14381,250 @@ mod tests {
         );
         let exported = String::from_utf8(fs::read(exported).unwrap()).unwrap();
         assert!(exported.contains("\"65565\",\"OR4F6\",\"ENST00000999999\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_cache_parity_fixture_survives_result_projection() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source-cache-parity");
+        let root = std::env::temp_dir().join(format!(
+            "annocat-source-cache-parity-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        // The cache parity fixture is supplementary-only. Add minimal selected
+        // consequences here so transcript- and gene-scoped records traverse
+        // the same resolver used by complete annotation runs.
+        let projected = root.join("projected.ndjson");
+        let consequence_specs = BTreeMap::from([
+            (10001, vec![("G", "GENE1", "ENST000001", "T/M")]),
+            (
+                20000,
+                vec![
+                    ("T", "GENE20000", "ENST20000T", "A/V"),
+                    ("A", "GENE20000", "ENST20000A", "A/E"),
+                ],
+            ),
+            (25000, vec![("G", "GENE25000", "ENST25000", "A/V")]),
+            (
+                30000,
+                vec![
+                    ("T", "GENE2", "ENST30000T", "A/V"),
+                    ("A", "GENE2", "ENST30000A", "A/E"),
+                ],
+            ),
+            (
+                35142,
+                vec![
+                    ("A", "GENE3", "ENST000001", "T/M"),
+                    ("C", "GENE3", "ENST000002", "T/S"),
+                ],
+            ),
+            (35143, vec![("A", "GENE3", "ENST000003", "T/N")]),
+            (40000, vec![("A", "GENEN", "ENST40000", "X/Y")]),
+        ]);
+        let mut projected_lines = Vec::new();
+        for line in fs::read_to_string(fixture.join("expected.ndjson"))
+            .unwrap()
+            .lines()
+        {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            let position = record["start"].as_i64().unwrap();
+            let consequences = consequence_specs[&position]
+                .iter()
+                .map(|(alternate, gene, transcript, amino_acids)| {
+                    json!({
+                        "variant_allele": alternate,
+                        "consequence_terms": ["missense_variant"],
+                        "impact": "MODERATE",
+                        "gene_symbol": gene,
+                        "gene_id": format!("ENSG{position}"),
+                        "transcript_id": transcript,
+                        "amino_acids": amino_acids,
+                        "canonical": true
+                    })
+                })
+                .collect::<Vec<_>>();
+            record["transcript_consequences"] = Value::Array(consequences);
+            projected_lines.push(serde_json::to_string(&record).unwrap());
+        }
+        fs::write(&projected, projected_lines.join("\n") + "\n").unwrap();
+
+        let annotated_vcf = root.join("input.vcf");
+        let mut vcf_lines = Vec::new();
+        for line in fs::read_to_string(fixture.join("query.vcf"))
+            .unwrap()
+            .lines()
+        {
+            if line.starts_with("#CHROM") {
+                vcf_lines.push(
+                    "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|UPLOADED_ALLELE|CANONICAL\">"
+                        .to_owned(),
+                );
+                vcf_lines.push(line.to_owned());
+                continue;
+            }
+            if line.starts_with('#') {
+                vcf_lines.push(line.to_owned());
+                continue;
+            }
+            let mut columns = line.split('\t').map(str::to_owned).collect::<Vec<_>>();
+            let position = columns[1].parse::<i64>().unwrap();
+            let reference = columns[3].clone();
+            let csq = consequence_specs[&position]
+                .iter()
+                .map(|(alternate, gene, transcript, _)| {
+                    format!(
+                        "{alternate}|missense_variant|MODERATE|{gene}|ENSG{position}|Transcript|{transcript}|{reference}/{alternate}|YES"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            columns[7] = format!("CSQ={csq}");
+            vcf_lines.push(columns.join("\t"));
+        }
+        fs::write(&annotated_vcf, vcf_lines.join("\n") + "\n").unwrap();
+
+        let variants = root.join("variants.parquet");
+        let consequences = root.join("consequences.parquet");
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        let variant_summary =
+            convert_vcf(&annotated_vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        assert_eq!(variant_summary.rows, 10);
+        let sources = [
+            "clinvar", "gnomad", "dbsnp", "spliceai", "cadd", "phylop", "revel", "dbnsfp",
+        ]
+        .map(str::to_owned);
+        let aliases = structured_source_aliases(&sources).unwrap();
+        let mut progress = |_, _, _, _, _| {};
+        convert_structured_mode(
+            &projected,
+            &consequences,
+            &evidence,
+            &catalog,
+            None,
+            None,
+            &aliases,
+            || false,
+            &mut progress,
+        )
+        .unwrap();
+        validate_report_tables(&variants, &consequences, &evidence, &catalog, 10).unwrap();
+
+        let connection = Connection::open_in_memory().unwrap();
+        let evidence_path = evidence.to_string_lossy();
+        let number = |allele: &str, source: &str, field: &str, scope: &str| -> f64 {
+            connection
+                .query_row(
+                    "SELECT coalesce(number_value, cast(integer_value AS DOUBLE), try_cast(string_value AS DOUBLE))
+                     FROM read_parquet(?)
+                     WHERE allele_id=? AND source_id=? AND field_path=? AND scope=?",
+                    params![evidence_path.as_ref(), allele, source, field, scope],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|error| panic!("missing {scope} {source}.{field} for {allele}: {error}"))
+        };
+        let first = allele_id("1", 10001, "A", "G");
+        assert_eq!(number(&first, "cadd", "phred", "allele"), 12.4);
+        assert_eq!(number(&first, "phylop", "value", "allele"), 3.14);
+        assert_eq!(number(&first, "dbnsfp", "REVEL_score", "selected"), 0.91);
+        assert_eq!(
+            number(&first, "dbnsfp", "AlphaMissense_score", "selected"),
+            0.81
+        );
+        let dbnsfp_records: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?)
+                 WHERE allele_id=? AND source_id='dbnsfp'
+                   AND scope='source_records' AND field_path='__recordList'",
+                params![evidence_path.as_ref(), first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dbnsfp_records, 1);
+
+        let population_a = allele_id("1", 20000, "C", "A");
+        let population_t = allele_id("1", 20000, "C", "T");
+        assert_eq!(number(&population_a, "gnomad", "allAf", "allele"), 0.005);
+        assert_eq!(number(&population_t, "gnomad", "allAf", "allele"), 0.01);
+        assert_eq!(number(&population_a, "dbsnp", "globalMaf", "allele"), 0.005);
+        assert_eq!(number(&population_t, "dbsnp", "globalMaf", "allele"), 0.01);
+
+        let neighbor = allele_id("1", 25000, "A", "G");
+        let leaked: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?) WHERE allele_id=?",
+                params![evidence_path.as_ref(), neighbor],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0);
+
+        let splice_a = allele_id("1", 30000, "C", "A");
+        let splice_t = allele_id("1", 30000, "C", "T");
+        assert_eq!(number(&splice_a, "spliceai", "dsAg", "selected"), 0.5);
+        assert_eq!(number(&splice_t, "spliceai", "dsDl", "selected"), 0.92);
+        assert_eq!(number(&splice_t, "spliceai", "dpAl", "selected"), -5.0);
+        let ambiguous_splice = allele_id("1", 40000, "N", "A");
+        assert_eq!(
+            number(&ambiguous_splice, "spliceai", "dsDg", "selected"),
+            0.3
+        );
+        assert_eq!(
+            number(&ambiguous_splice, "spliceai", "dpAg", "selected"),
+            -12.0
+        );
+
+        let revel_a = allele_id("1", 35142, "G", "A");
+        let revel_c = allele_id("1", 35142, "G", "C");
+        assert_eq!(number(&revel_a, "revel", "score", "selected"), 0.027);
+        assert_eq!(number(&revel_c, "revel", "score", "selected"), 0.035);
+
+        let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        let fields = catalog_value["fields"].as_array().unwrap();
+        let clinvar_index = fields
+            .iter()
+            .position(|field| {
+                field["sourceId"] == "clinvar" && field["fieldPath"] == "significance"
+            })
+            .unwrap();
+        let pathogenic: Value = serde_json::from_str(
+            &page_json_with_evidence(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                0,
+                10,
+                &PageRequest {
+                    exact_total: true,
+                    evidence_filters: vec![EvidenceFilterRequest {
+                        index: clinvar_index,
+                        operator: "in".into(),
+                        value: String::new(),
+                        value2: String::new(),
+                        values: Some(vec!["Pathogenic".into()]),
+                        include_missing: Some(false),
+                    }],
+                    ..PageRequest::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pathogenic["total"], 1);
+
+        let detail: Value =
+            serde_json::from_str(&detail_json(&consequences, &evidence, &first).unwrap()).unwrap();
+        assert!(detail["evidence"].as_array().unwrap().iter().any(|entry| {
+            entry["sourceId"] == "cadd" && entry["fieldPath"] == "phred" && entry["value"] == 12.4
+        }));
         fs::remove_dir_all(root).unwrap();
     }
 

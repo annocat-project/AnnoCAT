@@ -1,0 +1,4 @@
+chr,hg19_pos,grch38_pos,ref,alt,aaref,aaalt,REVEL,Ensembl_transcriptid
+1,35142,35142,G,A,T,M,0.027,ENST000001
+1,35142,35142,G,C,T,S,0.035,ENST000002
+1,35143,35143,C,A,T,N,0.842,ENST000003

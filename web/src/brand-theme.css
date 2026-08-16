@@ -548,7 +548,11 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 #results .variant-detail-heading {
   align-items: center;
 }
-#results .variant-detail-heading>div { display: grid; min-width: 0; gap: 3px; align-content: center; }
+#results .variant-detail-heading>div { display: grid; min-width: 0; flex: 1 1 auto; gap: var(--space-1); align-content: center; }
+#results .variant-detail-titlebar { display: flex; min-width: 0; align-items: baseline; gap: var(--space-2); }
+#results .variant-detail-titlebar h2 { flex: 0 0 auto; margin: 0; color: var(--color-text-primary); font-size: var(--text-label-size); font-weight: var(--font-weight-semibold); letter-spacing: 0; line-height: var(--text-label-leading); }
+#results .variant-detail-rsid { overflow: hidden; color: var(--color-text-secondary); font-size: var(--text-supporting-size); font-variant-numeric: tabular-nums; font-weight: var(--font-weight-regular); letter-spacing: 0; line-height: var(--text-supporting-leading); text-overflow: ellipsis; white-space: nowrap; }
+#results .variant-detail-coordinate { overflow: hidden; color: var(--color-text-primary); font-size: var(--font-size-xl); font-variant-numeric: tabular-nums; font-weight: var(--font-weight-semibold); letter-spacing: 0; line-height: var(--line-height-subtitle-1); text-overflow: ellipsis; white-space: nowrap; }
 #results #variant-detail-body { min-height: 0; flex: 1 1 auto; overflow: auto; }
 #results .detail-overview { padding-bottom: 15px; }
 #results .detail-summary { gap: 9px 14px; }

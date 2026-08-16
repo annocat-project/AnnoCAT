@@ -1,0 +1,3 @@
+#chr	pos(1-based)	ref	alt	Ensembl_transcriptid	REVEL_score	AlphaMissense_score
+1	10001	A	G	ENST000001;ENST000002	0.91;0.72	0.81;0.63
+1	10001	A	G	ENST000003	0.44	0.37

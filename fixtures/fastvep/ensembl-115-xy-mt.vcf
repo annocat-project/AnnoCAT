@@ -1,0 +1,31 @@
+##fileformat=VCFv4.2
+##fileDate=20260814
+##source=AnnoCAT synthetic Ensembl 115 chromosome coverage fixture
+##reference=https://ftp.ensembl.org/pub/release-115/fasta/homo_sapiens/dna/
+##contig=<ID=X,length=156040895,assembly=GRCh38>
+##contig=<ID=Y,length=57227415,assembly=GRCh38>
+##contig=<ID=MT,length=16569,assembly=GRCh38>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+X	650000	.	G	A	.	PASS	.
+X	154546100	.	T	C	.	PASS	.
+Y	2787300	.	T	C	.	PASS	.
+MT	11778	.	G	A	.	PASS	.
+MT	10	.	T	C	.	PASS	.
+MT	580	.	T	C	.	PASS	.
+MT	650	.	T	C	.	PASS	.
+MT	3234	.	A	G	.	PASS	.
+MT	3307	.	A	G	.	PASS	.
+MT	5904	.	A	G	.	PASS	.
+MT	8527	.	A	G	.	PASS	.
+MT	10760	.	A	G	.	PASS	.
+MT	14747	.	A	G	.	PASS	.
+MT	16023	.	G	A	.	PASS	.
+22	19980020	.	GG	AT	.	PASS	.
+22	19980025	.	CC	C	.	PASS	.
+22	19980030	.	G	GAA	.	PASS	.
+22	19980035	.	C	A,T	.	PASS	.
+22	19980028	.	C	A,CAA	.	PASS	.
+22	19980040	.	GC	AT	.	PASS	.
+22	19980045	.	GCC	G	.	PASS	.
+22	19980050	.	CAC	C	.	PASS	.
+22	19980052	.	C	T	.	PASS	.

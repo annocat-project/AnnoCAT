@@ -1,0 +1,9 @@
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	10001	.	A	G	.	PASS	.
+1	20000	.	C	T,A	.	PASS	.
+1	25000	.	A	G	.	PASS	.
+1	30000	.	C	T,A	.	PASS	.
+1	35142	.	G	A,C	.	PASS	.
+1	35143	.	C	A	.	PASS	.
+1	40000	.	N	A	.	PASS	.

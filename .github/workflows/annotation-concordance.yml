@@ -27,32 +27,57 @@ jobs:
           cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
             --release --locked -p fastvep-cli
 
-      - name: Prepare pinned Ensembl 115 chromosome 22 inputs
+      - name: Require supplementary source cache parity
+        run: |
+          mkdir -p "$RUNNER_TEMP/concordance"
+          python scripts/verify-supplementary-cache-parity.py \
+            --fastvep "$RUNNER_TEMP/fastVEP/target/release/fastvep" \
+            --json "$RUNNER_TEMP/concordance/source-cache-parity.json"
+
+      - name: Prepare pinned Ensembl 115 chromosome inputs
         run: |
           mkdir -p "$RUNNER_TEMP/concordance"
           cd "$RUNNER_TEMP/concordance"
-          curl --fail --location --retry 3 --output reference.fa.gz \
-            https://ftp.ensembl.org/pub/release-115/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.chromosome.22.fa.gz
           curl --fail --location --retry 3 --output annotations.gff3.gz \
             https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz
-          gzip -dc reference.fa.gz > reference.fa
+          : > reference.fa
+          for chromosome in 21 22 X Y MT; do
+            curl --fail --location --retry 3 \
+              --output "reference.$chromosome.fa.gz" \
+              "https://ftp.ensembl.org/pub/release-115/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.chromosome.$chromosome.fa.gz"
+            gzip -dc "reference.$chromosome.fa.gz" >> reference.fa
+          done
           samtools faidx reference.fa
-          gzip -dc annotations.gff3.gz | grep '^#' > annotations.chr22.gff3
+          gzip -dc annotations.gff3.gz | grep '^#' > annotations.gff3
           gzip -dc annotations.gff3.gz | grep -v '^#' | \
-            awk -F '\t' '$1 == "22"' | sort -t $'\t' -k1,1 -k4,4n >> annotations.chr22.gff3
-          bgzip -c annotations.chr22.gff3 > annotations.chr22.gff3.gz
-          tabix -p gff annotations.chr22.gff3.gz
-          sha256sum reference.fa annotations.chr22.gff3.gz > source-hashes.sha256
+            awk -F '\t' '$1 == "21" || $1 == "22" || $1 == "X" || $1 == "Y" || $1 == "MT"' | \
+            sort -t $'\t' -k1,1V -k4,4n >> annotations.gff3
+          bgzip -c annotations.gff3 > annotations.gff3.gz
+          tabix -p gff annotations.gff3.gz
+          sha256sum reference.fa annotations.gff3.gz > source-hashes.sha256
 
-      - name: Annotate with pinned fastVEP
+      - name: Annotate with pinned fastVEP and require transcript-cache parity
         run: |
           work="$RUNNER_TEMP/concordance"
           fastvep="$RUNNER_TEMP/fastVEP/target/release/fastvep"
           cp "$RUNNER_TEMP/fastVEP/validation/human/vep_example_GRCh38.vcf" "$work/input.vcf"
+          grep -v '^#' fixtures/fastvep/ensembl-115-xy-mt.vcf >> "$work/input.vcf"
+          test "$(grep -vc '^#' "$work/input.vcf")" -eq 196
           "$fastvep" annotate -i "$work/input.vcf" \
-            --gff3 "$work/annotations.chr22.gff3" \
+            --gff3 "Ensembl=$work/annotations.gff3" \
             --fasta "$work/reference.fa" --hgvs --symbol --canonical \
             -o "$work/fastvep.vcf"
+          "$fastvep" cache \
+            --gff3 "Ensembl=$work/annotations.gff3" \
+            --fasta "$work/reference.fa" \
+            --output "$work/transcripts.cache" --no-progress
+          "$fastvep" annotate -i "$work/input.vcf" \
+            --transcript-cache "$work/transcripts.cache" \
+            --fasta "$work/reference.fa" --hgvs --symbol --canonical \
+            -o "$work/fastvep-cache.vcf"
+          sha256sum "$work/transcripts.cache" "$work/fastvep-cache.vcf" \
+            >> "$work/source-hashes.sha256"
+          cmp --silent "$work/fastvep.vcf" "$work/fastvep-cache.vcf"
           "$fastvep" --version > "$work/fastvep-version.txt"
 
       - name: Fetch the archived Ensembl VEP 115 oracle
@@ -88,6 +113,7 @@ jobs:
           name: annotation-concordance
           path: |
             ${{ runner.temp }}/concordance/concordance.json
+            ${{ runner.temp }}/concordance/source-cache-parity.json
             ${{ runner.temp }}/concordance/source-hashes.sha256
             ${{ runner.temp }}/concordance/fastvep-version.txt
             ${{ runner.temp }}/concordance/vep-request.json
