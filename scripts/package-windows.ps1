@@ -10,6 +10,44 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $pinFile = Join-Path $projectRoot "config\fastvep-pin.json"
 $pin = Get-Content -LiteralPath $pinFile -Raw | ConvertFrom-Json
 $fastVepRoot = (Resolve-Path -LiteralPath $FastVepSource).Path
+$privateBuildPaths = @($env:USERPROFILE) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique
+
+function Assert-NoPrivateBuildPaths {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    $contents = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Executable))
+    foreach ($privatePath in $privateBuildPaths) {
+        $paths = @($privatePath, ($privatePath -replace '\\', '/')) | Select-Object -Unique
+        foreach ($path in $paths) {
+            if ($contents.IndexOf($path, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                throw "Release binary contains a private build path: $Executable"
+            }
+        }
+    }
+}
+
+$previousEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+$rustFlagSeparator = [char]0x1f
+$releaseRustFlags = @()
+if (-not [string]::IsNullOrWhiteSpace($previousEncodedRustFlags)) {
+    $releaseRustFlags += $previousEncodedRustFlags -split $rustFlagSeparator
+}
+$releaseRustFlags += @(
+    "--remap-path-prefix=$env:USERPROFILE=/build/source",
+    "--remap-path-prefix=$projectRoot=/build/source"
+)
+$env:CARGO_ENCODED_RUSTFLAGS = $releaseRustFlags -join $rustFlagSeparator
+
+$previousAwsLcCFlags = $env:AWS_LC_SYS_CFLAGS
+$awsLcCFlags = @(
+    $previousAwsLcCFlags,
+    "/experimental:deterministic /pathmap:$env:USERPROFILE=C:\build\source"
+) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$env:AWS_LC_SYS_CFLAGS = $awsLcCFlags -join " "
+
 $actualCommit = (& git -C $fastVepRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $pin.commit) {
     throw "fastVEP source commit mismatch: expected $($pin.commit), found $actualCommit"
@@ -28,12 +66,18 @@ if ($LASTEXITCODE -ne 0) { throw "fastVEP tests failed" }
 & cargo build --manifest-path (Join-Path $fastVepRoot "Cargo.toml") --release --locked -p fastvep-cli
 if ($LASTEXITCODE -ne 0) { throw "fastVEP release build failed" }
 $builtFastVep = Join-Path $fastVepRoot "target\release\fastvep.exe"
+Assert-NoPrivateBuildPaths -Executable $builtFastVep
 $builtFastVepHash = (Get-FileHash -LiteralPath $builtFastVep -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($builtFastVepHash -ne $pin.windowsX86_64.sha256) {
     throw "fastVEP binary hash mismatch: expected $($pin.windowsX86_64.sha256), found $builtFastVepHash"
 }
 & cargo build --manifest-path (Join-Path $projectRoot "Cargo.toml") --release --locked -p annocat-cli --bins
 if ($LASTEXITCODE -ne 0) { throw "AnnoCat release build failed" }
+Assert-NoPrivateBuildPaths -Executable (Join-Path $projectRoot "target\release\annocat.exe")
+Assert-NoPrivateBuildPaths -Executable (Join-Path $projectRoot "target\release\annocat-report-worker.exe")
+
+$env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedRustFlags
+$env:AWS_LC_SYS_CFLAGS = $previousAwsLcCFlags
 
 $version = (& (Join-Path $projectRoot "target\release\annocat.exe") --version).Split()[-1]
 $outputRoot = Join-Path $projectRoot $OutputDirectory

@@ -179,7 +179,7 @@
   "windowsX86_64": {
     "filename": "fastvep.exe",
     "sizeBytes": 7365632,
-    "sha256": "46e81faeb70163902cecbea063b813a8b71bd62660cca52bbe989d47322719d4",
+    "sha256": "6378f436c1730191280a6faba2f808462b50fadf4b92a1d2c9d0360757ddd63e",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
