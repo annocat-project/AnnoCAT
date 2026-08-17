@@ -15,10 +15,10 @@
 /data/
 /downloads/
 /runs/
+__pycache__/
 /tmp/
 /.tmp/
 /tools/
-/docs/
 /dist/
 /.pnpm-store/
 /web/assets/annocat-logo-concept*.png

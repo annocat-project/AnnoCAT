@@ -13194,10 +13194,7 @@ mod tests {
             Some("ENST00000412115")
         );
         assert_eq!(
-            consequence_text(
-                best_consequence(&numeric).unwrap(),
-                &["transcript_id"]
-            ),
+            consequence_text(best_consequence(&numeric).unwrap(), &["transcript_id"]),
             Some("ENST00000412115")
         );
     }

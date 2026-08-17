@@ -1,73 +1,63 @@
 # fastVEP fork maintenance
 
-AnnoCAT supports exactly the fastVEP fork commit recorded in
-`config/fastvep-pin.json`. Data-source update discovery never updates the annotation
-engine. A new engine is adopted only after its fork history, lockfile, tests, binary
-identity, and AnnoCAT compatibility gates pass.
+AnnoCAT supports the exact fastVEP revision recorded in
+[`config/fastvep-pin.json`](../config/fastvep-pin.json). Source update checks do
+not update the annotation engine. A new engine is adopted only with a reviewed
+pin change.
 
-## Repository layout
+## Repositories and pin
 
-- `Huang-lab/fastVEP` remains the upstream project.
-- `annocat-project/fastVEP` is the public fork.
-- The fork's `master` branch tracks upstream without AnnoCAT changes.
-- Versioned `annocat/*` branches contain the reviewed AnnoCAT commits.
-- AnnoCAT pins an exact fork commit SHA; it never builds a floating branch.
+- [Huang-lab/fastVEP](https://github.com/Huang-lab/fastVEP) is upstream.
+- [annocat-project/fastVEP](https://github.com/annocat-project/fastVEP) contains
+  AnnoCAT's maintained changes.
+- `config/fastvep-pin.json` records the exact fork commit, upstream base,
+  ordered changes, dependency-lock hash, and expected Windows artifact.
 
-The ordered commit list in `config/fastvep-pin.json` is the compatibility and
-provenance boundary. Packaging verifies that the fork commit descends from the pinned
-upstream base and contains exactly those commits in that order.
+The branch name in the pin is descriptive. The commit SHA is the build and
+compatibility boundary. Release packaging must not build a floating branch.
 
-## Local verification
+## Verify a checkout
 
-Check out the pinned fork commit in a clean clone, then run:
+Check out the pinned commit in a clean fastVEP clone, then run:
 
 ```powershell
-./scripts/test-fastvep-pin.ps1 -FastVepSource <path-to-fastVEP>
+./scripts/test-fastvep-pin.ps1 -FastVepSource <FASTVEP_SOURCE>
 ```
 
-The script rejects the wrong commit, staged or modified tracked files, a changed
-`Cargo.lock`, an unrelated upstream base, missing commits, reordered commits, or extra
-commits. The packaging script runs the same verification automatically.
+The check rejects a wrong commit, modified tracked files, a changed lockfile,
+missing ordered changes, or an unrelated upstream base. The Windows packaging
+script performs the same check before it builds `fastvep.exe`.
 
-## Runtime impact
+## Maintained differences
 
-Most AnnoCAT fork commits affect source preparation, verification, sharding, or
-cache-build locking and add no work to the normal annotation loop. Structured output
-formats the already annotated in-memory result as newline-delimited JSON through a
-buffered writer; it does not repeat transcript prediction, HGVS calculation, or fastSA
-lookups.
+The complete ordered list belongs in the pin, not in prose that can drift away
+from the code. At a high level, the maintained fork adds:
 
-Source-format ownership also belongs to fastVEP. AnnoCAT may resolve an HTTP artifact,
-resume a raw byte range, and provide tabix framing metadata, but it must not decode,
-rewrite, merge, or validate database rows. `sa-build` accepts raw BGZF range prefixes,
-an optional chromosome filter, and multiple sorted artifacts for this boundary.
+- streaming builders for AnnoCAT's managed supplementary sources;
+- strict OSA1 and OSA2 validation and compatibility;
+- lossless record lists for transcript- and gene-scoped evidence;
+- bounded parsing, compression, cache, and memory behavior;
+- deterministic parallel supplementary-source loading and lookup;
+- structured output without duplicate source lookup;
+- transcript-cache integrity and read-only runtime safeguards;
+- consequence and HGVS corrections validated against Ensembl 115; and
+- aggregate performance diagnostics that do not record variant values.
 
-On 2026-07-16, the Windows release build was measured on fastVEP's 1,003-record
-`validation/human/chr22_1kgp.vcf` fixture using the same warmed transcript cache and
-three warm runs per mode:
+These changes must preserve the declared source field, allele, gene,
+transcript, and missing-value contracts. A cache that can be opened is not
+necessarily semantically compatible.
 
-| Mode | Mean seconds |
-| --- | ---: |
-| Annotated VCF only | 10.106 |
-| Annotated VCF plus structured sidecar | 10.522 |
-| Observed overhead | 4.1% |
+## Update procedure
 
-The resulting VCF was 3.15 MB and the sidecar was 5.06 MB. This is a small-fixture
-result, not a WGS performance guarantee. The sidecar is staging-only and is removed
-after AnnoCAT validates its Parquet conversion. The scale gates in `TODO.md` remain the
-release measurements for runtime, disk throughput, output size, and peak memory.
+1. Select and record the new upstream base.
+2. Reapply or replace each maintained change without rewriting released
+   history.
+3. Run the locked fastVEP workspace tests.
+4. Run AnnoCAT unit, integration, source-parity, and consequence-concordance
+   tests.
+5. Build the Windows artifact and record its SHA-256 and size.
+6. Update every identity and ordered change in `config/fastvep-pin.json`.
+7. Run the packaged end-to-end annotation gate before changing the release
+   default.
 
-## Updating fastVEP
-
-1. Select and record a new upstream commit.
-2. Create a new `annocat/*` branch from that commit; do not rewrite a released branch.
-3. Cherry-pick, reimplement, or drop each AnnoCAT change as appropriate.
-4. Submit generally useful changes upstream when practical.
-5. Run fastVEP's locked workspace tests and AnnoCAT's tests and compatibility fixtures.
-6. Build the Windows release executable and record its size and SHA-256.
-7. Update the fork commit, upstream base, ordered changes, lockfile hash, and binary
-   identity in `config/fastvep-pin.json`.
-8. Repeat the real VCF-plus-structured-output and scale gates before changing the
-   release default.
-
-Pinned commits and released branches must never be force-pushed.
+Do not force-push a commit referenced by a released AnnoCAT pin.

@@ -914,9 +914,9 @@
       "singlePredictorOnly": false,
       "scoreRange": {"minimumInclusive": 0.0, "maximumInclusive": 1.0},
       "bands": [
-        {"maximumInclusive": 0.1, "label": "Moderate benign splice-effect evidence", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
+        {"maximumInclusive": 0.1, "label": "Moderate evidence for non-spliceogenicity", "direction": "benign", "strength": "moderate", "tone": "reassuring"},
         {"minimumExclusive": 0.1, "maximumExclusive": 0.2, "label": "Indeterminate calibrated range", "direction": "none", "strength": "none", "tone": "neutral"},
-        {"minimumInclusive": 0.2, "label": "Moderate pathogenic splice-effect evidence", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
+        {"minimumInclusive": 0.2, "label": "Moderate evidence for spliceogenicity", "direction": "pathogenic", "strength": "moderate", "tone": "adverse"}
       ]
     }
   ],

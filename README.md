@@ -1,164 +1,84 @@
 # AnnoCAT
 
-Portable local variant annotation, curation, and review for Windows.
-
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-4057d6.svg)](#system-requirements)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-4057d6.svg)](#installation)
 [![Release](https://img.shields.io/github/v/release/annocat-project/AnnoCAT?include_prereleases)](https://github.com/annocat-project/AnnoCAT/releases)
 
-**AnnoCAT is a portable Windows application for annotating and exploring variants
-from whole-genome, exome, or panel VCF files.** It combines gene consequences with
-clinical, population, prediction, splicing, and conservation evidence in a
-searchable results viewer.
+AnnoCAT is a portable application for annotating and reviewing genomic variants.
+It accepts GRCh38 panel, exome, and whole-genome VCF files, adds gene and
+transcript consequences from fastVEP, and presents annotation evidence in a
+searchable local viewer.
 
-AnnoCAT stores your VCF files and AnnoCAT results on your computer. AnnoCAT uses
-the internet to download data sources, get online annotations, and open external
-links.
+AnnoCAT can add clinical records, population frequencies, identifiers,
+prediction scores, splicing scores, and conservation measurements from installed
+or online sources. It does not process FASTQ, BAM, or CRAM files.
 
-Open an exported AnnoCAT result without installed annotation data. Before an
-annotation, install the GRCh38 reference and the selected data sources. Extract the
-release ZIP, and then double-click `launch-annocat.cmd`.
+VCF inputs and AnnoCAT results stay on the local computer unless they are
+exported. AnnoCAT uses the internet to install or update data sources, request
+online annotations, and open external links.
 
-AnnoCAT starts from an existing VCF and does not process raw FASTQ, BAM, or CRAM
-sequencing files.
-
-## Features
-
-- Annotate panel, exome, and whole-genome VCFs against GRCh38.
-- Use Standard, Comprehensive, Core + online annotations, or Custom profiles.
-- Manage data-source installation, retained fields, progress, updates, and removal.
-- Search, sort, and filter large results without loading the entire dataset at once.
-- Compare transcript consequences and transcript-specific evidence.
-- Review clinical, population, prediction, splicing, conservation, and sample data.
-- Star variants as candidates and export selected or filtered rows and gene lists.
-- Export result ZIP files that open without locally installed data sources.
-
-## Quick start
+## Installation
 
 1. Download the latest Windows ZIP from
    [GitHub Releases](https://github.com/annocat-project/AnnoCAT/releases).
 2. Extract the complete ZIP to a folder.
 3. Double-click `launch-annocat.cmd`.
-4. Keep the terminal window open while using AnnoCAT.
+4. Keep the terminal window open while AnnoCAT is running.
 
-AnnoCAT opens in your default browser and runs only on your computer. The release
-includes AnnoCAT, fastVEP, and all required software libraries. You do not need
-Rust, Python, Node.js, Docker, or a separate database server.
+The release contains AnnoCAT, fastVEP, and the required software libraries. It
+does not require Rust, Python, Node.js, Docker, or a separate database server.
 
-On first launch, choose one of two paths:
+On first launch, select **Open results** to view an existing AnnoCAT result, or
+select **Set up annotation** to install the GRCh38 reference, transcript data,
+and annotation sources. Existing results do not require installed annotation
+data or an internet connection.
 
-- **Open results** to open an AnnoCAT result. Annotation data is not required.
-- **Set up annotation** to install the GRCh38 reference and an annotation profile.
+### Requirements
 
-## How it works
+- 64-bit Windows 10 or Windows 11
+- GRCh38 VCF, VCF.GZ, or BGZ input
+- Internet access for data-source installation, updates, and online annotations
+- Enough storage for the selected data sources and results
 
-```text
-VCF file
-   ↓
-Gene and transcript consequences
-   ↓
-Clinical, population, prediction, splicing, and conservation evidence
-   ↓
-Searchable local result
-   ↓
-Review, candidates, and export
-```
+## Annotation
 
-AnnoCAT uses the bundled fastVEP engine to identify affected genes and transcripts,
-predict variant consequences, and generate HGVS descriptions. Installed annotation
-sources then add matching clinical records, population frequencies, identifiers,
-prediction scores, splicing scores, and conservation measurements.
+Open **New annotation**, select one or more VCF files, choose an annotation
+profile, review the output location, and start the annotation. Each input VCF
+creates a separate AnnoCAT result. AnnoCAT does not combine VCF files or samples.
 
-Completed annotations are stored in a compact indexed result. The viewer requests
-only the rows needed for the current view, search, or filter, allowing large WGS
-results to remain responsive without loading the complete dataset into browser
-memory.
+| Profile | Data sources |
+|---|---|
+| **Standard** | Core annotation, ClinVar, dbSNP, gnomAD exomes, PhyloP, and REVEL |
+| **Comprehensive** | Core annotation, dbNSFP, ClinVar, dbSNP, gnomAD genomes, CADD, PhyloP, and SpliceAI |
+| **Core + online annotations** | Core annotation with requested FAVOR annotations |
+| **Custom** | A user-selected combination of installed sources |
 
-## Annotation profiles
+Use **Data sources** to install, configure, verify, update, or remove annotation
+data. AnnoCAT shows known download and storage sizes before installation.
 
-| Profile | Intended use | Included evidence |
-|---|---|---|
-| **Standard** | General review with a smaller setup | Core GRCh38 annotation, ClinVar, dbSNP, gnomAD exomes, PhyloP, and standalone REVEL |
-| **Comprehensive** | Broader WGS investigation | Core GRCh38 annotation, dbNSFP, ClinVar, dbSNP, gnomAD exomes, CADD, PhyloP, and SpliceAI |
-| **Core + online annotations** | Annotation with remote FAVOR data | Core GRCh38 annotation and FAVOR annotations for selected or matching variants |
-| **Custom** | User-selected sources | Any compatible combination of installed sources |
+## Results
 
-AnnoCAT shows the download size and installed size before installation. Use **Data
-sources** to install, configure, update, or remove data sources. Comprehensive gets
-REVEL evidence from dbNSFP.
+The results table contains one row per alternate allele. It supports whole-result
+search, structured filters, multi-column sorting, selectable columns, gene lists,
+and transcript-aware evidence. Select a row to review its consequences, HGVS
+descriptions, sample call, source annotations, and provenance.
 
-## Annotating a VCF
+Candidates are manual bookmarks. They are not automatic classifications. Export
+selected or filtered variants, visible columns, or genes from the current result.
 
-1. Open **New annotation**.
-2. Select one or more `.vcf`, `.vcf.gz`, or `.vcf.bgz` files.
-3. Select a profile.
-4. Review the selected data sources and output folder.
-5. Start the annotation and follow progress from the status area or **Tasks**.
-6. Open the AnnoCAT result under **Results**.
+AnnoCAT can export a result as a validated ZIP containing its variants,
+annotations, provenance, online annotations, and candidate bookmarks. Imported
+results appear under **Results**. Notes remain on the computer where they were
+created.
 
-Each input VCF produces a separate annotation and AnnoCAT result. AnnoCAT does not
-combine VCF files or samples.
-
-## Exploring results
-
-The variants table shows one row per alternate allele and begins with a compact set
-of useful columns. Click a column heading to sort it, or use **Columns** to show,
-hide, resize, and reorder core or source-specific fields.
-
-Use the search box for quick gene, variant, consequence, identifier, or annotation
-lookups. For precise queries, add structured filters using `=`, `≠`, `>`, `≥`, `<`,
-`≤`, and text operators. Filters can also accept comma-separated gene lists and can
-be saved for use with other results.
-
-For example:
-
-```text
-gnomAD allele frequency < 0.001
-Impact = HIGH
-Gene is in BRCA1, BRCA2, PALB2
-```
-
-Click a variant to open its details. The transcript selector updates the consequence,
-HGVS descriptions, protein change, transcript support, and transcript-specific
-predictions together. Variant-level evidence such as ClinVar, dbSNP, and population
-frequency remains associated with the genomic allele. Source descriptions and
-tooltips explain what fields mean and how scores are generally interpreted.
-
-Colors and prediction scores help organize evidence; they are not diagnoses or final
+Prediction colors and scores organize evidence. They are not diagnoses or final
 pathogenicity classifications.
-
-### Candidates and exports
-
-- Click a star in the table or variant details to add or remove a candidate.
-- Candidates are manual bookmarks, not automatically classified variants.
-- Select individual variants, a range, or every result matching the current filters.
-- Export selected or filtered rows using the visible columns.
-- Export selected or filtered genes as a comma-separated gene list.
-
-## Exporting results
-
-Export an AnnoCAT result as a ZIP file. This file contains the searchable
-variants, annotations, provenance, online annotations, and candidate bookmarks.
-
-Imported results appear under **Results**. Candidates are included. Notes stay on
-the computer that created them.
-
-## Storage and privacy
-
-Variant inputs and AnnoCAT results stay on your computer unless you export them.
-AnnoCAT uses the internet to download data sources and get online annotations.
-**Settings** shows the annotation data, download, and results folders.
-
-Installed data and saved results use dedicated directories whose locations appear
-in **Settings**. Preserve those directories when moving or manually updating a
-portable installation. Large WGS data sources can require substantial network
-transfer and storage; AnnoCAT shows available size information before installation.
 
 ## Command line
 
-Run `annocat --help` for the complete command reference. The CLI uses the same
-configuration, annotation data, results, validation, and recovery workflows as the
-desktop application.
+The CLI uses the same configuration, annotation data, results, validation, and
+recovery workflows as the desktop application. Run `annocat --help` for the full
+command reference.
 
 ```text
 annocat status --profile standard
@@ -169,45 +89,49 @@ annocat results export RESULT_ID -o result.zip
 annocat tasks list
 ```
 
-Use repeated `-i` options to annotate a batch in sequence. Use repeated `--source`
-options instead of `--profile` for an exact source selection. Add `--json` to
-supported read commands for machine-readable output.
+Repeat `-i` to annotate a sequential batch. Repeat `--source` instead of using a
+profile to select exact sources. Supported read commands accept `--json` for
+machine-readable output.
 
-## System requirements
+## Documentation
 
-- 64-bit Windows 10 or Windows 11.
-- GRCh38 VCF input for the first release.
-- Sufficient storage for the selected data profile and annotation results.
-- Internet access for initial source installation and source updates.
-- No internet connection or annotation data is required to view a local AnnoCAT
-  result.
-
-## Intended use
-
-AnnoCAT is intended solely for research and educational annotation, exploration,
-filtering, and visualization of genomic variants. It has not received regulatory
-clearance or approval for diagnostic or clinical use.
-
-**For research use only. Not for use in diagnostic procedures.** Do not use AnnoCAT
-or its outputs for diagnosis, screening, prognosis, treatment selection, or other
-patient-care decisions. Results may be incomplete or incorrect, depend on third-party
-data sources and computational predictions, and must not be treated as validated
-clinical findings.
+- [Install and update AnnoCAT](docs/installation.md)
+- [Create an annotation result](docs/annotation.md)
+- [Review, filter, and export results](docs/results.md)
+- [Use the command line](docs/cli.md)
+- [Understand local data and network use](docs/data-and-privacy.md)
+- [Browse all maintained documentation](docs/README.md)
 
 ## Development
 
-End users should use the Windows release and do not need a development environment.
-Building from source is intended for contributors and requires a Rust toolchain.
+Building from source requires a Rust toolchain. End users should use the packaged
+release.
 
 ```text
 cargo test --workspace
 cargo run -p annocat-cli -- launch
 ```
 
-## License and acknowledgments
+AnnoCAT uses an exact, tested fastVEP revision recorded in
+[`config/fastvep-pin.json`](config/fastvep-pin.json). Release packaging verifies
+that source revision and its dependency lock before building the bundled binary.
 
-AnnoCAT is licensed under the [Apache License 2.0](LICENSE).
+## Intended use
 
-AnnoCAT bundles a modified Apache-2.0 fastVEP build. Downloaded reference and
-data sources remain subject to their publishers' separate licenses, permitted
-uses, and citation requirements.
+AnnoCAT is for research and educational use only. It has not received regulatory
+clearance or approval for diagnostic or clinical use. Do not use AnnoCAT or its
+outputs for diagnosis, screening, prognosis, treatment selection, or other
+patient-care decisions.
+
+Results can be incomplete or incorrect and depend on third-party data sources and
+computational predictions. Check relevant findings against the original data
+sources. Do not treat AnnoCAT output as a validated clinical finding.
+
+## License
+
+AnnoCAT is licensed under the [Apache License 2.0](LICENSE). It bundles a modified
+Apache-2.0 fastVEP build. Downloaded reference and annotation data remain subject
+to their publishers' licenses, permitted uses, and citation requirements.
+
+For problems and feature requests, use
+[GitHub Issues](https://github.com/annocat-project/AnnoCAT/issues).

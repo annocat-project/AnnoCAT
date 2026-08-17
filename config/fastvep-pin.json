@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "d2d8ae9b5e8f1b474fa50036482972b9b0232d13",
+  "commit": "4235edc7350f6a197e58dcf415356610e302f7a4",
   "branch": "codex/annotation-performance-instrumentation",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
@@ -94,82 +94,86 @@
       "purpose": "Query supplementary providers in genomic order while processing independent sources in parallel"
     },
     {
-      "commit": "aa8a589c67525bd66bcbced00948bdbced1f7091",
+      "commit": "70e563e400905ffc7fb468298c8e9dba46eee5c9",
       "purpose": "Use an all-chromosome shard as the fallback provider and honor the configured annotation batch size"
     },
     {
-      "commit": "e7192e92f1f8e8ba6fa6c818f299c9be9d3feab8",
+      "commit": "68f683e4a604edbec0d622109f5e547c2e30b11d",
       "purpose": "Write supplementary evidence once per allele in structured JSON instead of repeating it for every transcript"
     },
     {
-      "commit": "a240c2db2d1ecd78c907e1f3c5518ae0b3402cfd",
+      "commit": "28c30ec52a997b96f0323c3eef49274e586ea387",
       "purpose": "Merge upstream fastVEP v0.3.0 correctness, mitochondrial, web-hardening, release, and canonical OSA2 changes with AnnoCAT's source builders"
     },
     {
-      "commit": "253edf1e8abb46260fea8b07725535865646b3c0",
+      "commit": "d0b746f0823b902fbc0e79af599c37958bba0424",
       "purpose": "Load, verify, and compose OSA1 or OSA2 caches through one fail-closed supplementary annotation boundary"
     },
     {
-      "commit": "7ce38d0a0024cee9a9d4b0d648d941d19a70b19e",
+      "commit": "8e9047248f7d5fcfe9887c5343cef19ec717b5b3",
       "purpose": "Accept valid duplicate OSA2 allele keys while preserving order validation and deterministic legacy-compatible lookup"
     },
     {
-      "commit": "22e742e2e42581ade5568e5273644aec9a2850fa",
+      "commit": "09580828a40f928f91a150181519200826320b60",
       "purpose": "Preserve all exact-key records only for declared multi-record sources so AnnoCAT can resolve dbNSFP evidence by transcript and peptide identity"
     },
     {
-      "commit": "4a02dc5fa98b552eb51bdad04aa29e5a443c6728",
+      "commit": "48a94117c02d490b1aec3279a83986a66406f160",
       "purpose": "Bound dbNSFP OSA2 genomic chunks so wide transcript-vector records stay below the verified decompression limit"
     },
     {
-      "commit": "4a2065f6ff20ab89b26eac8d73609f2e21de8724",
+      "commit": "7b764e5d781f208ea4599873902e46e67ca8ac41",
       "upstreamCommit": "dde192c3921fabec019b4bba4f10e590d53969f0",
       "purpose": "Share thread-scaled, byte-bounded OSA caches and read OSA2 chunks directly from mapped archives while preserving record lists, strict archive validation, and CRC checks"
     },
     {
-      "commit": "4ca5c825f1e058ef92980ab851e990212b9de4f1",
+      "commit": "1ac293ccde430d4b8fa1f8b723e1d5d0022affae",
       "purpose": "Integrate the reviewed fastVEP release correctness, consequence, cache, output, and OSA updates with AnnoCAT's maintained fork"
     },
     {
-      "commit": "087797922ce0b93f91d0e455c745a28704d300f3",
+      "commit": "61fd7cd193e35b5912589e8980833f1fd5ebc5e9",
       "purpose": "Preserve gene-scoped SpliceAI and transcript-scoped REVEL records in OSA2, verify exact conversion parity, and project record lists safely"
     },
     {
-      "commit": "eb394981cc323b1ee32e91da8895b3ffbf9ae496",
+      "commit": "e56f6db62d59357447f7b61de1b99aa55183526b",
       "purpose": "Preserve ambiguous-reference allele keys losslessly in OSA2 and bound dense SpliceAI record-list chunks for safe annotation"
     },
     {
-      "commit": "80c19d795ce6794cccec548c229f0424b668f73e",
+      "commit": "a26c0b2f58519349116bb6facd4bea08efa4461d",
       "purpose": "Measure aggregate annotation phases, per-source lookups, cache loads, serialization, and output blocking without recording variant data"
     },
     {
-      "commit": "300b0cbaa9320c35170fac871199dd35b9512f89",
+      "commit": "d5185d2268cc9a19d473d28cc81f9cca50e25297",
       "purpose": "Attribute supplementary-reader cache hits, misses, decoded bytes, chunk construction, inflation, and JSON reconstruction without changing annotation output"
     },
     {
-      "commit": "bede8257f346c59b1b405f5a0769cf32a6523f3d",
+      "commit": "29c68aa166bb77442ea2fe4bfffbada64e9be1eb",
       "purpose": "Separate aggregate OSA2 JSON-blob decoding work from ZIP inflation without recording annotation values"
     },
     {
-      "commit": "39f3c671c0d03a88b450bed8e9fe1b09565d8a20",
+      "commit": "2e9232270ddc820202fe4dc07b0ec891810ae61b",
       "purpose": "Store decoded OSA2 JSON records in one contiguous string with compact line offsets instead of one allocation per record"
     },
     {
-      "commit": "e29d4098214ee7c9b85a4d9a37ee6c448b3827ec",
+      "commit": "ae293466ded01db53f045fcc9805512663bd836b",
       "purpose": "Keep supplementary evidence in structured output while omitting its duplicate VCF INFO projection for internal AnnoCAT conversion"
     },
     {
-      "commit": "271abdbe531108bac758d052ff429c9c23e682fe",
+      "commit": "c443f50726d236f12915a2a3153a8871faaccadd",
       "upstreamCommit": "f41de3b68311b993487462ae29eb2e381f3d9ea5",
       "purpose": "Read OSA2 ZIP central directories sequentially, defer local-header reads until lookup, and open supplementary providers in deterministic parallel order"
     },
     {
-      "commit": "7f1c9ea66b3e2aac996c2051d29971cb549bc4e7",
+      "commit": "5c5eb03bd1aee477cf12c590351fb4c4796fb6fc",
       "purpose": "Correct transcript consequence, multiallelic allele, HGVS, protein-version, noncoding-gene, and splice-boundary deletion concordance without changing cache formats"
     },
     {
-      "commit": "d2d8ae9b5e8f1b474fa50036482972b9b0232d13",
+      "commit": "97a94f281200531aff7f66fe000b81a9353b5fe5",
       "purpose": "Match Ensembl 115 for mitochondrial start uncertainty and independently normalized complex coding and noncoding alleles, including reverse-strand insertions, without changing cache formats"
+    },
+    {
+      "commit": "4235edc7350f6a197e58dcf415356610e302f7a4",
+      "purpose": "Document the maintained AnnoCAT fork, its compatibility changes, and its release verification process"
     }
   ],
   "windowsX86_64": {
@@ -179,7 +183,7 @@
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-08-15",
+  "reviewedOn": "2026-08-17",
   "windowsTestStatus": "passed",
   "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP and SpliceAI chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 preserves rare ambiguous-reference allele keys in a lossless overflow array while ordinary A/C/G/T alleles keep the compact lookup path. OSA2 startup reads each ZIP central directory sequentially, defers local-header reads until the corresponding chunk is queried, and opens supplementary providers in deterministic parallel order. Chunks are read directly from mapped archives, keep decoded JSON records in contiguous storage, and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact. AnnoCAT can omit duplicate supplementary VCF INFO projections from its internal temporary VCF while retaining complete structured evidence; requested annotated VCFs remain complete. Transcript consequences now normalize each alternate allele independently, preserve reverse-strand multibase alleles, retain public GFF3 transcript metadata, and produce sequence-aware 3-prime HGVS for coding, noncoding, and splice-boundary deletions without changing OSA or transcript-cache schemas. Opt-in aggregate profiling measures annotation phases and source cache behavior, including ZIP inflation and opaque JSON-blob decoding, without recording variant values."
 }
