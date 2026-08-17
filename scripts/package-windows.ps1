@@ -91,7 +91,11 @@ if (Test-Path -LiteralPath $bundleRoot) {
     Remove-Item -LiteralPath $bundleRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep\docs") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep\data\benchmark\sa_sources") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "licenses") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bundleRoot "docs") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $bundleRoot "config") -Force | Out-Null
 
 $annocatExe = Join-Path $projectRoot "target\release\annocat.exe"
 $reportWorkerExe = Join-Path $projectRoot "target\release\annocat-report-worker.exe"
@@ -99,12 +103,27 @@ $fastVepExe = Join-Path $fastVepRoot "target\release\fastvep.exe"
 Copy-Item -LiteralPath $annocatExe -Destination (Join-Path $bundleRoot "annocat.exe")
 Copy-Item -LiteralPath $reportWorkerExe -Destination (Join-Path $bundleRoot "annocat-report-worker.exe")
 Copy-Item -LiteralPath $fastVepExe -Destination (Join-Path $bundleRoot "tools\fastvep\fastvep.exe")
+Copy-Item -LiteralPath (Join-Path $fastVepRoot "README.md") -Destination (Join-Path $bundleRoot "tools\fastvep\README.md")
+Copy-Item -LiteralPath (Join-Path $fastVepRoot "LICENSE.md") -Destination (Join-Path $bundleRoot "tools\fastvep\LICENSE.md")
+@("SUPPLEMENTARY_ANNOTATIONS.md", "ACMG.md", "ACMG_SETUP.md") | ForEach-Object {
+    Copy-Item -LiteralPath (Join-Path $fastVepRoot "docs\$_") -Destination (Join-Path $bundleRoot "tools\fastvep\docs\$_")
+}
+Copy-Item -LiteralPath (Join-Path $fastVepRoot "data\benchmark\sa_sources\download_sa_sources.sh") -Destination (Join-Path $bundleRoot "tools\fastvep\data\benchmark\sa_sources\download_sa_sources.sh")
 Copy-Item -LiteralPath (Join-Path $projectRoot "launch-annocat.cmd") -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $bundleRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE.txt")
+Copy-Item -Path (Join-Path $projectRoot "docs\*.md") -Destination (Join-Path $bundleRoot "docs")
+Copy-Item -LiteralPath (Join-Path $projectRoot "config\fastvep-pin.json") -Destination (Join-Path $bundleRoot "config\fastvep-pin.json")
+Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
 
 $fastVepHash = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "tools\fastvep\fastvep.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifestFiles = [ordered]@{}
+Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
+    Sort-Object FullName |
+    ForEach-Object {
+        $relativePath = [IO.Path]::GetRelativePath($bundleRoot, $_.FullName).Replace("\", "/")
+        $manifestFiles[$relativePath] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
 $manifest = [ordered]@{
     schemaVersion = 1
     product = "AnnoCat"
@@ -130,13 +149,7 @@ $manifest = [ordered]@{
         sha256 = $fastVepHash
         license = $pin.license
     }
-    files = [ordered]@{
-        "annocat.exe" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "annocat.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
-        "annocat-report-worker.exe" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "annocat-report-worker.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
-        "tools/fastvep/fastvep.exe" = $fastVepHash
-        "LICENSE.txt" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "LICENSE.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
-        "licenses/fastVEP-Apache-2.0.txt" = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
+    files = $manifestFiles
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleRoot "bundle-manifest.json") -Encoding utf8
 
