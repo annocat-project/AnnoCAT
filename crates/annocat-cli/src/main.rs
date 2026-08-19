@@ -4882,7 +4882,7 @@ mod profile_status_tests {
     fn data_sources_do_not_duplicate_download_tasks() {
         let html = include_str!("../../../web/index.html");
         let app = web_app_source();
-        let theme = include_str!("../../../web/src/brand-theme.css");
+        let theme = include_str!("../../../web/src/brand-theme.css").replace("\r\n", "\n");
         assert!(!html.contains("id=\"download-section\""));
         assert!(!html.contains("id=\"download-jobs\""));
         assert!(html.contains("id=\"jobs-list\""));
