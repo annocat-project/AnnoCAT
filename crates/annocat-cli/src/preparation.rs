@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::fs;
 #[cfg(test)]
 use std::io::Cursor;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -513,17 +513,100 @@ impl<R: Read> Read for Md5CountedReader<R> {
     }
 }
 
-fn zip_u16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+#[derive(Debug)]
+struct RevelCsvMember {
+    index: usize,
+    name: String,
+    start: u64,
+    end: u64,
+    compressed_bytes: u64,
+    uncompressed_bytes: u64,
 }
 
-fn zip_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
+fn normalized_revel_chromosome(value: &str) -> String {
+    let value = value.trim_matches('_');
+    value
+        .parse::<u8>()
+        .map(|number| number.to_string())
+        .unwrap_or_else(|_| value.to_ascii_uppercase())
+}
+
+fn revel_csv_range(name: &str, chromosome: &str) -> Result<(u64, u64), String> {
+    let filename = Path::new(name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("invalid REVEL ZIP member name: {name}"))?;
+    let stem = filename
+        .strip_suffix(".csv")
+        .and_then(|value| value.strip_prefix("revel_grch38_chrom_"))
+        .ok_or_else(|| format!("unsupported REVEL ZIP member: {name}"))?;
+    let (chromosome_and_start, end) = stem
+        .rsplit_once('_')
+        .ok_or_else(|| format!("invalid REVEL ZIP member range: {name}"))?;
+    let (member_chromosome, start) = chromosome_and_start
+        .rsplit_once('_')
+        .ok_or_else(|| format!("invalid REVEL ZIP member range: {name}"))?;
+    if normalized_revel_chromosome(member_chromosome) != normalized_revel_chromosome(chromosome) {
+        return Err(format!(
+            "REVEL chromosome {chromosome} ZIP contains member {name}"
+        ));
+    }
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| format!("invalid REVEL ZIP member start: {name}"))?;
+    let end = end
+        .parse::<u64>()
+        .map_err(|_| format!("invalid REVEL ZIP member end: {name}"))?;
+    if start == 0 || start > end {
+        return Err(format!("invalid REVEL ZIP member range: {name}"));
+    }
+    Ok((start, end))
+}
+
+fn ordered_revel_csv_members<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    chromosome: &str,
+) -> Result<Vec<RevelCsvMember>, String> {
+    let mut members = Vec::new();
+    for index in 0..archive.len() {
+        let member = archive
+            .by_index(index)
+            .map_err(|error| format!("cannot inspect REVEL ZIP member {index}: {error}"))?;
+        if member.is_dir() {
+            continue;
+        }
+        let name = member.name().to_string();
+        if member.compression() != zip::CompressionMethod::Deflated
+            || member.compressed_size() == 0
+            || member.size() == 0
+        {
+            return Err(format!("unsupported REVEL ZIP member: {name}"));
+        }
+        let (start, end) = revel_csv_range(&name, chromosome)?;
+        members.push(RevelCsvMember {
+            index,
+            name,
+            start,
+            end,
+            compressed_bytes: member.compressed_size(),
+            uncompressed_bytes: member.size(),
+        });
+    }
+    members.sort_unstable_by_key(|member| (member.start, member.end));
+    if members.is_empty() {
+        return Err(format!(
+            "REVEL chromosome {chromosome} ZIP has no CSV members"
+        ));
+    }
+    for pair in members.windows(2) {
+        if pair[1].start <= pair[0].end {
+            return Err(format!(
+                "REVEL ZIP member ranges overlap: {} and {}",
+                pair[0].name, pair[1].name
+            ));
+        }
+    }
+    Ok(members)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,62 +618,64 @@ fn stream_revel_archive_to_partial_osa(
     completed: u16,
     prepared_bytes: u64,
 ) -> Result<StreamingBuildResult, String> {
-    let url = &request.identity.source_url;
-    let resumable = source_input_mode() == SourceInputMode::Resumable;
-    let source: Box<dyn Read> = if resumable {
-        let part = resumable::acquire_range(
-            request.paths,
-            request.identity,
-            url,
-            0,
-            archive.bytes,
-            None,
-            None,
-            live_cancel().as_ref(),
-            |state| {
-                update_revel_progress(
-                    &archive.chromosome,
-                    completed,
-                    base_network.saturating_add(state.persisted_bytes),
-                    total_network,
-                    prepared_bytes,
-                    state.bytes_per_second,
-                );
-                update_resumable_download_detail(
-                    "REVEL",
-                    &archive.chromosome,
-                    state.persisted_bytes,
-                    state.expected_bytes,
-                );
-            },
-        )?;
-        Box::new(part.reader)
-    } else {
-        let response = crate::http_client::source()?
-            .get(url)
-            .header(
-                reqwest::header::USER_AGENT,
-                "AnnoCAT/0.1 (local variant annotation)",
-            )
-            .send()
-            .map_err(|error| {
-                format!(
-                    "REVEL chromosome {} request failed: {error}",
-                    archive.chromosome
-                )
-            })?;
-        if !response.status().is_success() || response.content_length() != Some(archive.bytes) {
-            return Err(format!(
-                "REVEL chromosome {} returned HTTP {} or an unexpected length",
-                archive.chromosome,
-                response.status()
-            ));
+    // REVEL chromosome archives contain sorted CSV ranges in arbitrary ZIP
+    // member order. Stage the archive so those members can be read in genomic
+    // order without buffering their decompressed contents.
+    let part = resumable::acquire_range(
+        request.paths,
+        request.identity,
+        &request.identity.source_url,
+        0,
+        archive.bytes,
+        None,
+        None,
+        live_cancel().as_ref(),
+        |state| {
+            update_revel_progress(
+                &archive.chromosome,
+                completed,
+                base_network.saturating_add(state.persisted_bytes),
+                total_network,
+                prepared_bytes,
+                state.bytes_per_second,
+            );
+            update_resumable_download_detail(
+                "REVEL",
+                &archive.chromosome,
+                state.persisted_bytes,
+                state.expected_bytes,
+            );
+        },
+    )?;
+    let mut source = part.reader;
+    let mut md5 = md5::Context::new();
+    let mut received = 0_u64;
+    let mut buffer = vec![0_u8; STREAM_WRITER_BUFFER_BYTES as usize];
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot validate REVEL ZIP: {error}"))?;
+        if read == 0 {
+            break;
         }
-        Box::new(response)
-    };
-    if resumable {
-        update_local_build_detail("REVEL", &archive.chromosome);
+        md5.consume(&buffer[..read]);
+        received = received.saturating_add(read as u64);
     }
+    if received != archive.bytes || format!("{:x}", md5.finalize()) != archive.md5 {
+        let _ = fs::remove_file(request.paths.source_part());
+        let _ = fs::remove_file(request.paths.source_part_identity());
+        return Err(format!(
+            "REVEL chromosome {} ZIP is incomplete or has an MD5 mismatch",
+            archive.chromosome
+        ));
+    }
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("cannot rewind REVEL ZIP: {error}"))?;
+    let mut source = zip::ZipArchive::new(source)
+        .map_err(|error| format!("cannot read REVEL ZIP directory: {error}"))?;
+    let members = ordered_revel_csv_members(&mut source, &archive.chromosome)?;
+    update_local_build_detail("REVEL", &archive.chromosome);
     let log = fs::File::create(request.log_path)
         .map_err(|error| format!("cannot create REVEL preparation log: {error}"))?;
     let output_base = request.paths.partial_directory.join("source");
@@ -612,153 +697,58 @@ fn stream_revel_archive_to_partial_osa(
         .stdout(Stdio::null())
         .stderr(Stdio::from(log));
     configure_fastvep_parser_workers(&mut command);
+    if let Some(fields) = request.source_fields {
+        command.env(
+            "ANNOCAT_SOURCE_FIELDS",
+            serde_json::to_string(fields)
+                .map_err(|error| format!("cannot encode supplementary field selection: {error}"))?,
+        );
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot start fastVEP REVEL preparation: {error}"))?;
     let result = (|| {
         let mut stdin = child.stdin.take().ok_or("fastVEP stdin was unavailable")?;
-        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mut input = Md5CountedReader {
-            inner: source,
-            count: count.clone(),
-            hasher: md5::Context::new(),
-        };
         let started = Instant::now();
-        let mut csv_members = 0_u32;
-        loop {
+        let mut processed_compressed = 0_u64;
+        for metadata in &members {
             if live_cancel().load(Ordering::SeqCst) {
                 return Err("cancelled".into());
             }
-            let mut signature = [0_u8; 4];
-            input
-                .read_exact(&mut signature)
-                .map_err(|error| format!("truncated REVEL ZIP header: {error}"))?;
-            match signature {
-                [0x50, 0x4b, 0x03, 0x04] => {
-                    let mut header = [0_u8; 26];
-                    input
-                        .read_exact(&mut header)
-                        .map_err(|error| format!("truncated REVEL ZIP member header: {error}"))?;
-                    let flags = zip_u16(&header, 2);
-                    let method = zip_u16(&header, 4);
-                    let crc32 = zip_u32(&header, 10);
-                    let compressed = zip_u32(&header, 14) as u64;
-                    let uncompressed = zip_u32(&header, 18) as u64;
-                    let name_len = zip_u16(&header, 22) as usize;
-                    let extra_len = zip_u16(&header, 24) as usize;
-                    if flags & 0x08 != 0 {
-                        return Err("REVEL ZIP uses unsupported data descriptors".into());
-                    }
-                    let mut name = vec![0_u8; name_len];
-                    input
-                        .read_exact(&mut name)
-                        .map_err(|error| format!("truncated REVEL ZIP member name: {error}"))?;
-                    std::io::copy(
-                        &mut input.by_ref().take(extra_len as u64),
-                        &mut std::io::sink(),
-                    )
-                    .map_err(|error| format!("cannot skip REVEL ZIP extra data: {error}"))?;
-                    let name = String::from_utf8(name)
-                        .map_err(|_| "REVEL ZIP member name is not UTF-8")?;
-                    if name.ends_with('/') {
-                        if compressed != 0 || uncompressed != 0 {
-                            return Err("REVEL ZIP directory entry is not empty".into());
-                        }
-                        continue;
-                    }
-                    if !name.ends_with(".csv")
-                        || method != 8
-                        || compressed == 0
-                        || uncompressed == 0
-                    {
-                        return Err(format!("unsupported REVEL ZIP member: {name}"));
-                    }
-                    csv_members += 1;
-                    let take = input.by_ref().take(compressed);
-                    let mut decoder = flate2::read::DeflateDecoder::new(take);
-                    let mut crc = crc32fast::Hasher::new();
-                    let mut written = 0_u64;
-                    let mut buffer = vec![0_u8; 1024 * 1024];
-                    loop {
-                        if live_cancel().load(Ordering::SeqCst) {
-                            return Err("cancelled".into());
-                        }
-                        let read = decoder.read(&mut buffer).map_err(|error| {
-                            format!("cannot inflate REVEL ZIP member {name}: {error}")
-                        })?;
-                        if read == 0 {
-                            break;
-                        }
-                        crc.update(&buffer[..read]);
-                        written = written.saturating_add(read as u64);
-                        stdin
-                            .write_all(&buffer[..read])
-                            .map_err(|error| format!("cannot stream REVEL to fastVEP: {error}"))?;
-                        let elapsed = started.elapsed().as_secs_f64();
-                        let consumed = count.load(Ordering::Relaxed);
-                        let downloaded = if resumable { archive.bytes } else { consumed };
-                        if resumable {
-                            update_local_build_progress_detail(
-                                "REVEL",
-                                &archive.chromosome,
-                                consumed,
-                                archive.bytes,
-                                if elapsed == 0.0 {
-                                    0.0
-                                } else {
-                                    consumed as f64 / elapsed
-                                },
-                            );
+            let mut member = source.by_index(metadata.index).map_err(|error| {
+                format!("cannot open REVEL ZIP member {}: {error}", metadata.name)
+            })?;
+            let copied = copy_bounded_with_progress(
+                &mut member,
+                &mut stdin,
+                live_cancel().as_ref(),
+                |member_bytes| {
+                    let estimated = metadata.compressed_bytes.saturating_mul(member_bytes)
+                        / metadata.uncompressed_bytes;
+                    let consumed = processed_compressed.saturating_add(estimated);
+                    let elapsed = started.elapsed().as_secs_f64();
+                    update_local_build_progress_detail(
+                        "REVEL",
+                        &archive.chromosome,
+                        consumed,
+                        archive.bytes,
+                        if elapsed == 0.0 {
+                            0.0
                         } else {
-                            update_revel_progress(
-                                &archive.chromosome,
-                                completed,
-                                base_network.saturating_add(downloaded),
-                                total_network,
-                                prepared_bytes,
-                                if elapsed == 0.0 {
-                                    0.0
-                                } else {
-                                    downloaded as f64 / elapsed
-                                },
-                            );
-                        }
-                    }
-                    let mut remaining = decoder.into_inner();
-                    if remaining.limit() != 0 {
-                        std::io::copy(&mut remaining, &mut std::io::sink()).map_err(|error| {
-                            format!("cannot finish REVEL ZIP member {name}: {error}")
-                        })?;
-                    }
-                    if written != uncompressed || crc.finalize() != crc32 {
-                        return Err(format!(
-                            "REVEL ZIP member {name} failed size or CRC validation"
-                        ));
-                    }
-                }
-                [0x50, 0x4b, 0x01, 0x02] => {
-                    std::io::copy(&mut input, &mut std::io::sink())
-                        .map_err(|error| format!("cannot finish REVEL ZIP validation: {error}"))?;
-                    break;
-                }
-                _ => return Err("REVEL ZIP has an unexpected record signature".into()),
+                            consumed as f64 / elapsed
+                        },
+                    );
+                },
+            )?;
+            if copied != metadata.uncompressed_bytes {
+                return Err(format!(
+                    "REVEL ZIP member {} has an unexpected decompressed size",
+                    metadata.name
+                ));
             }
+            processed_compressed = processed_compressed.saturating_add(metadata.compressed_bytes);
         }
         drop(stdin);
-        let received = count.load(Ordering::Relaxed);
-        if csv_members == 0 || received != archive.bytes {
-            return Err(format!(
-                "REVEL chromosome {} ZIP is incomplete",
-                archive.chromosome
-            ));
-        }
-        let actual_md5 = format!("{:x}", input.hasher.finalize());
-        if actual_md5 != archive.md5 {
-            return Err(format!(
-                "REVEL chromosome {} MD5 mismatch",
-                archive.chromosome
-            ));
-        }
         Ok(received)
     })();
     let received = match result {
@@ -5251,6 +5241,113 @@ mod tests {
         assert!(!paths.partial_data(CacheFormat::OsaV1).exists());
         assert!(!paths.partial_index(CacheFormat::OsaV1).unwrap().exists());
         assert!(!paths.final_directory.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn revel_zip_members_are_ordered_by_genomic_range() {
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut bytes);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for name in [
+                "revel-v1.3/revel_grch38_chrom_01_000000201_000000300.csv",
+                "revel-v1.3/revel_grch38_chrom_01_000000001_000000100.csv",
+                "revel-v1.3/revel_grch38_chrom_01_000000101_000000200.csv",
+            ] {
+                writer.start_file(name, options).unwrap();
+                writer.write_all(b"fixture\n").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes.set_position(0);
+        let mut archive = zip::ZipArchive::new(bytes).unwrap();
+        let members = ordered_revel_csv_members(&mut archive, "1").unwrap();
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| (member.start, member.end))
+                .collect::<Vec<_>>(),
+            [(1, 100), (101, 200), (201, 300)]
+        );
+    }
+
+    #[test]
+    fn out_of_order_revel_zip_builds_a_sorted_cache() {
+        let fastvep = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tools")
+            .join("fastvep")
+            .join("fastvep.exe");
+        if !fastvep.is_file() {
+            return;
+        }
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut bytes);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, position) in [
+                (
+                    "revel-v1.3/revel_grch38_chrom_01_000000201_000000300.csv",
+                    210,
+                ),
+                (
+                    "revel-v1.3/revel_grch38_chrom_01_000000001_000000100.csv",
+                    10,
+                ),
+                (
+                    "revel-v1.3/revel_grch38_chrom_01_000000101_000000200.csv",
+                    110,
+                ),
+            ] {
+                writer.start_file(name, options).unwrap();
+                writeln!(writer, "chr,hg19_pos,grch38_pos,ref,alt,aaref,aaalt,REVEL").unwrap();
+                writeln!(writer, "1,{position},{position},G,A,T,M,0.2").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let body: &'static [u8] = Box::leak(bytes.into_inner().into_boxed_slice());
+        let root = root("revel-out-of-order");
+        let paths = ShardPaths::new(&root, "1").unwrap();
+        let mut expected = identity("1");
+        expected.resource_id = "revel".into();
+        expected.source_url = range_fixture(body, 1);
+        expected.expected_compressed_bytes = body.len() as u64;
+        expected.source_etag = Some(format!("md5:{:x}", md5::compute(body)));
+        initialize_partial(&paths, expected.clone()).unwrap();
+        let archive = RevelArchive {
+            chromosome: "1".into(),
+            filename: "fixture.zip".into(),
+            bytes: body.len() as u64,
+            md5: format!("{:x}", md5::compute(body)),
+        };
+        let build = stream_revel_archive_to_partial_osa(
+            &StreamingBuildRequest {
+                fastvep_executable: &fastvep,
+                source_type: "revel",
+                paths: &paths,
+                identity: &expected,
+                log_path: &paths.partial_directory.join("fastvep.log"),
+                dbnsfp_fields: None,
+                source_fields: None,
+            },
+            &archive,
+            0,
+            archive.bytes,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(build.compressed_bytes_read, body.len() as u64);
+        assert_eq!(
+            verify_partial_osa(&fastvep, &paths, &expected)
+                .unwrap()
+                .record_count,
+            3
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

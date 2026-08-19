@@ -41,6 +41,7 @@ fn source_is_corrupt(message: &str) -> bool {
         "gzip checksum",
         "matching checksum",
         "checksum mismatch",
+        "invalid checksum",
         "crc mismatch",
         "crc validation",
         "invalid gzip",

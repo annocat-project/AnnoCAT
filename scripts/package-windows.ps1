@@ -71,15 +71,26 @@ $builtFastVepHash = (Get-FileHash -LiteralPath $builtFastVep -Algorithm SHA256).
 if ($builtFastVepHash -ne $pin.windowsX86_64.sha256) {
     throw "fastVEP binary hash mismatch: expected $($pin.windowsX86_64.sha256), found $builtFastVepHash"
 }
-& cargo build --manifest-path (Join-Path $projectRoot "Cargo.toml") --release --locked -p annocat-cli --bins
+$previousCxxFlags = $env:CXXFLAGS
+$pathMapFlags = @(
+    $previousCxxFlags,
+    "/pathmap:$env:USERPROFILE=C:\build\source /pathmap:$projectRoot=C:\build\source"
+) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$env:CXXFLAGS = $pathMapFlags -join " "
+$annocatTarget = Join-Path $projectRoot "target\package"
+& cargo build --manifest-path (Join-Path $projectRoot "Cargo.toml") --target-dir $annocatTarget --release --locked -p annocat-cli --bins
 if ($LASTEXITCODE -ne 0) { throw "AnnoCat release build failed" }
-Assert-NoPrivateBuildPaths -Executable (Join-Path $projectRoot "target\release\annocat.exe")
-Assert-NoPrivateBuildPaths -Executable (Join-Path $projectRoot "target\release\annocat-report-worker.exe")
+$annocatExe = Join-Path $annocatTarget "release\annocat.exe"
+$reportWorkerExe = Join-Path $annocatTarget "release\annocat-report-worker.exe"
+Assert-NoPrivateBuildPaths -Executable $annocatExe
+Assert-NoPrivateBuildPaths -Executable $reportWorkerExe
 
 $env:CARGO_ENCODED_RUSTFLAGS = $previousEncodedRustFlags
 $env:AWS_LC_SYS_CFLAGS = $previousAwsLcCFlags
+$env:CXXFLAGS = $previousCxxFlags
 
-$version = (& (Join-Path $projectRoot "target\release\annocat.exe") --version).Split()[-1]
+$version = (& $annocatExe --version).Split()[-1]
 $outputRoot = Join-Path $projectRoot $OutputDirectory
 $bundleRoot = Join-Path $outputRoot "AnnoCat-$version-windows-x86_64"
 $resolvedOutputRoot = [System.IO.Path]::GetFullPath($outputRoot)
@@ -95,14 +106,14 @@ New-Item -ItemType Directory -Path (Join-Path $bundleRoot "licenses") -Force | O
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "docs") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "config") -Force | Out-Null
 
-$annocatExe = Join-Path $projectRoot "target\release\annocat.exe"
-$reportWorkerExe = Join-Path $projectRoot "target\release\annocat-report-worker.exe"
 $fastVepExe = Join-Path $fastVepRoot "target\release\fastvep.exe"
 Copy-Item -LiteralPath $annocatExe -Destination (Join-Path $bundleRoot "annocat.exe")
 Copy-Item -LiteralPath $reportWorkerExe -Destination (Join-Path $bundleRoot "annocat-report-worker.exe")
 Copy-Item -LiteralPath $fastVepExe -Destination (Join-Path $bundleRoot "tools\fastvep\fastvep.exe")
 Copy-Item -LiteralPath (Join-Path $projectRoot "launch-annocat.cmd") -Destination $bundleRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $bundleRoot
+$releaseReadme = Get-Content -LiteralPath (Join-Path $projectRoot "README.md") -Raw
+$releaseReadme = $releaseReadme -replace '(?m)^!\[[^\r\n]*\]\(docs/images/[^\r\n]+\)\r?\n?', ''
+$releaseReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "README.md") -Encoding utf8
 Copy-Item -Path (Join-Path $projectRoot "docs\*.md") -Destination (Join-Path $bundleRoot "docs")
 $fastVepSourceBase = "$($pin.repository)/blob/$($pin.commit)"
 $fastVepReadme = Get-Content -LiteralPath (Join-Path $fastVepRoot "README.md") -Raw

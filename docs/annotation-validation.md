@@ -1,4 +1,4 @@
-# Validate annotation results
+# Annotation validation
 
 Status: Implemented for consequence concordance, supplementary-source cache
 parity, genotype preservation, selected evidence, and result projection
@@ -56,9 +56,8 @@ substitution. For `ENST00000380903.7:c.2001A>C`, the oracle requires
 `ENSP00000370288.2:p.Sec667Cys`.
 
 The current corpus contains more than 3,400 comparable allele-transcript
-identities. It
-has no missing identities, extra identities, or mapped-field differences after
-two narrow input-contract rules are applied:
+identities. It has no missing identities, extra identities, or mapped-field
+differences after two narrow input-contract rules are applied:
 
 - Ensembl's public release-115 GFF3 does not contain the transcript-end
   completeness metadata needed for `cds_start_NF` and `cds_end_NF`, so `FLAGS`

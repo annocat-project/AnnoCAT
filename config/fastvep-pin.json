@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
-  "commit": "1134afe6dafb831c33f24752a78499ca74107033",
+  "commit": "8b4a8114c71270872edc6fc04665f1e1b09a5fa2",
   "branch": "codex/annotation-performance-instrumentation",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
@@ -186,16 +186,24 @@
         "3a741b85b662b549e1718beb448f5ac585e53088"
       ],
       "purpose": "Publish rebuilt transcript caches atomically, reject incomplete transcript sources, prevent region-limited sidecar reuse, and correct in-frame HGVSp and selenocysteine handling"
+    },
+    {
+      "commit": "243ee7ab7b6aa1f2672d9ea214b98a95a3185ab2",
+      "purpose": "Skip REVEL records that explicitly lack a GRCh38 mapping while retaining strict validation for malformed coordinates"
+    },
+    {
+      "commit": "8b4a8114c71270872edc6fc04665f1e1b09a5fa2",
+      "purpose": "Sort REVEL records by lifted GRCh38 coordinates before cache writing because the published source-coordinate partitions are not GRCh38 ordered"
     }
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 7387648,
-    "sha256": "fcf2c46e1d60735aae630d33f113b45d61b67b1f1826d6d1c7d68f5a3d7ac6d9",
+    "sizeBytes": 7349760,
+    "sha256": "c0fbb789cbcdcd9f417cb8760de7801ee094bdbd4659db252d81701747f0d645",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
-  "reviewedOn": "2026-08-18",
+  "reviewedOn": "2026-08-19",
   "windowsTestStatus": "passed",
-  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP and SpliceAI chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 preserves rare ambiguous-reference allele keys in a lossless overflow array while ordinary A/C/G/T alleles keep the compact lookup path. OSA2 startup reads each ZIP central directory sequentially, defers local-header reads until the corresponding chunk is queried, and opens supplementary providers in deterministic parallel order. Chunks are read directly from mapped archives, keep decoded JSON records in contiguous storage, and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact. AnnoCAT can omit duplicate supplementary VCF INFO projections from its internal temporary VCF while retaining complete structured evidence; requested annotated VCFs remain complete. Transcript consequences now normalize each alternate allele independently, preserve reverse-strand multibase alleles, retain public GFF3 transcript metadata, and produce sequence-aware 3-prime HGVS for coding, noncoding, and splice-boundary deletions without changing OSA or transcript-cache schemas. Opt-in aggregate profiling measures annotation phases and source cache behavior, including ZIP inflation and opaque JSON-blob decoding, without recording variant values. Repeated supplementary source directories are loaded in deterministic order and may reside on different volumes; annotation no longer needs per-run hard links or cache copies. Rebuilt transcript caches publish atomically with checksums, region-restricted GFF3 loads are never reused as complete caches, and annotation fails rather than silently continuing with an unusable transcript source. In-frame HGVSp anchoring and complete nuclear selenoprotein translation follow the reviewed upstream fixes without changing result or supplementary-cache schemas."
+  "notes": "Pinned to the tested upstream-v0.3.0 merge plus the unified OSA1/OSA2 reader and verifier boundary. The release artifact keeps AnnoCAT's raw BGZF framing, chromosome filtering, sorted multi-artifact merging, configurable-field serialization, bounded parallel parsing, shard verification, transcript-cache safeguards, configurable annotation batches, and allele-level structured evidence. It also includes upstream mitochondrial correctness, web hardening, canonical columnar OSA2 support, bounded dbNSFP and SpliceAI chunks, record-list lookup for dbNSFP, SpliceAI, and REVEL, exact per-chunk conversion parity checks, and shared thread-scaled OSA caches for dense supplementary sources. OSA2 preserves rare ambiguous-reference allele keys in a lossless overflow array while ordinary A/C/G/T alleles keep the compact lookup path. OSA2 startup reads each ZIP central directory sequentially, defers local-header reads until lookup, and opens supplementary providers in deterministic parallel order. Chunks are read directly from mapped archives, keep decoded JSON records in contiguous storage, and still receive strict path, size, compression, CRC, JSON, and record-multiset validation. CADD and other scalar sources retain scalar lookup; population AF values use upstream 5e-7 resolution while AC, AN, and homozygote counts remain exact. AnnoCAT can omit duplicate supplementary VCF INFO projections from its internal temporary VCF while retaining complete structured evidence; requested annotated VCFs remain complete. Transcript consequences normalize each alternate allele independently, preserve reverse-strand multibase alleles, retain public GFF3 transcript metadata, and produce sequence-aware 3-prime HGVS for coding, noncoding, and splice-boundary deletions without changing OSA or transcript-cache schemas. Opt-in aggregate profiling measures annotation phases and source cache behavior, including ZIP inflation and opaque JSON-blob decoding, without recording variant values. Repeated supplementary source directories are loaded in deterministic order and may reside on different volumes; annotation no longer needs per-run hard links or cache copies. Rebuilt transcript caches publish atomically with checksums, region-restricted GFF3 loads are never reused as complete caches, and annotation fails rather than silently continuing with an unusable transcript source. In-frame HGVSp anchoring and complete nuclear selenoprotein translation follow the reviewed upstream fixes without changing result or supplementary-cache schemas. REVEL cache builds omit only records explicitly marked as unavailable on GRCh38, continue to reject malformed coordinates, and sort retained records by their lifted GRCh38 coordinates before writing either OSA format."
 }

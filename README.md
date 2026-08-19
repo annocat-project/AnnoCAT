@@ -4,18 +4,22 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-4057d6.svg)](#installation)
 [![Release](https://img.shields.io/github/v/release/annocat-project/AnnoCAT?include_prereleases)](https://github.com/annocat-project/AnnoCAT/releases)
 
-AnnoCAT is a portable application for annotating and reviewing genomic variants.
-It accepts GRCh38 panel, exome, and whole-genome VCF files, adds gene and
-transcript consequences with its bundled annotation engine, and presents
-annotation evidence in a searchable local viewer.
+AnnoCAT is a local application for genomic variant annotation and review. It is
+designed to process GRCh38 VCF files from panels, exomes, and whole genomes, and
+to make the resulting alleles easy to search, filter, sort, and inspect.
 
-AnnoCAT can add clinical records, population frequencies, identifiers,
-prediction scores, splicing scores, and conservation measurements from installed
-or online sources. It does not process FASTQ, BAM, or CRAM files.
+![AnnoCAT result viewer showing a sorted whole-genome variant table and variant evidence details](docs/images/annocat-result-viewer.png)
 
-VCF inputs and AnnoCAT results stay on the local computer unless they are
-exported. AnnoCAT uses the internet to install or update data sources, request
-online annotations, and open external links.
+AnnoCAT uses a bundled, pinned [fastVEP](https://github.com/annocat-project/fastVEP)
+build to add Ensembl transcript consequences and HGVS descriptions. Installed
+data sources add clinical assertions, population frequencies, reference
+identifiers, conservation scores, and computational predictions. AnnoCAT
+provides a desktop viewer and command-line interface. Result ZIPs can be opened
+on another AnnoCAT installation.
+
+Core annotation and result review run locally. Network access is used to install
+or update data sources. After a result opens, the viewer can request FAVOR
+annotations for selected variants or the current filtered result.
 
 ## Installation
 
@@ -51,7 +55,7 @@ creates a separate AnnoCAT result. AnnoCAT does not combine VCF files or samples
 |---|---|
 | **Standard** | Core annotation, ClinVar, dbSNP, gnomAD exomes, PhyloP, and REVEL |
 | **Comprehensive** | Core annotation, dbNSFP, ClinVar, dbSNP, gnomAD genomes, CADD, PhyloP, and SpliceAI |
-| **Core annotation** | Core annotation with requested FAVOR annotations |
+| **Core annotation** | fastVEP transcript consequences and HGVS; FAVOR annotations can be requested later in the result viewer |
 | **Custom** | A user-selected combination of installed sources |
 
 Use **Data sources** to install, configure, verify, update, or remove annotation
@@ -64,16 +68,16 @@ search, structured filters, multi-column sorting, selectable columns, gene lists
 and transcript-aware evidence. Select a row to review its consequences, HGVS
 descriptions, sample call, source annotations, and provenance.
 
-Candidates are manual bookmarks. They are not automatic classifications. Export
-selected or filtered variants, visible columns, or genes from the current result.
+Use Candidates to bookmark variants for follow-up. Select individual variants or
+all variants in the current search or filter, then export the selection as a CSV
+file or a gene list.
 
 AnnoCAT can export a result as a validated ZIP containing its variants,
 annotations, provenance, online annotations, and candidate bookmarks. Imported
 results appear under **Results**. Notes remain on the computer where they were
 created.
 
-Prediction colors and scores organize evidence. They are not diagnoses or final
-pathogenicity classifications.
+Prediction colors and scores help compare computational evidence across variants.
 
 ## Command line
 

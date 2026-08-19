@@ -32,8 +32,8 @@ script performs the same check before it builds `fastvep.exe`.
 
 ## Maintained differences
 
-The complete ordered list belongs in the pin, not in prose that can drift away
-from the code. At a high level, the maintained fork adds:
+`config/fastvep-pin.json` is the authoritative list of maintained changes. Do
+not duplicate that list in prose. The fork adds:
 
 - streaming builders for AnnoCAT's managed supplementary sources;
 - strict OSA1 and OSA2 validation and compatibility;

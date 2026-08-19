@@ -1,6 +1,6 @@
 # AnnoCAT documentation
 
-## Use AnnoCAT
+## User guide
 
 - [Installation and updates](installation.md)
 - [Annotation](annotation.md)
@@ -9,7 +9,7 @@
 - [Command line](cli.md)
 - [Data and privacy](data-and-privacy.md)
 
-## Technical contracts
+## Technical reference
 
 - [How AnnoCAT selects transcripts and evidence](transcript-and-evidence-selection.md)
 - [How AnnoCAT displays prediction evidence](evidence-display.md)

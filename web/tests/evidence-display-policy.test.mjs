@@ -300,9 +300,44 @@ test('tooltips and summary use the same structured interpretation',()=>{
     item('dbnsfp','Polyphen2_HVAR_pred','P'),
     item('cadd','phred','20','stop_gained')
   ]);
-  assert.match(summary,/REVEL 0\.8/);
-  assert.match(summary,/2 direct categorical predictors/);
-  assert.doesNotMatch(summary,/3 direct categorical predictors/);
+  assert.doesNotMatch(summary,/REVEL 0\.8/);
+  assert.match(summary,/4 prediction directions/);
+  assert.match(summary,/REVEL: 0\.8/);
+  assert.match(summary,/CADD PHRED: 20/);
+});
+
+test('REVEL contributes one summary direction without duplicating its score pill',()=>{
+  const summary=presenter.predictionSummaryBar([
+    item('revel','score','0.153'),
+    item('dbnsfp','REVEL_score','0.153'),
+    item('dbnsfp','SIFT_pred','D')
+  ]);
+  assert.match(summary,/2 prediction directions/);
+  assert.match(summary,/REVEL: 0\.153/);
+  assert.doesNotMatch(summary,/prediction-summary-primary[^>]*>REVEL/);
+
+  useCalibratedEvidenceColors=false;
+  const nativeSummary=presenter.predictionSummaryBar([item('revel','score','0.8')]);
+  assert.match(nativeSummary,/1 prediction directions/);
+  assert.match(nativeSummary,/REVEL: 0\.8/);
+  useCalibratedEvidenceColors=true;
+});
+
+test('CADD PHRED contributes one summary direction without duplicating its score pill',()=>{
+  const summary=presenter.predictionSummaryBar([
+    item('cadd','phred','25.3','missense_variant'),
+    item('dbnsfp','CADD_phred','25.3','missense_variant'),
+    item('favor-online','codingCaddPhred','25.3','missense_variant')
+  ]);
+  assert.match(summary,/1 prediction directions/);
+  assert.match(summary,/CADD PHRED: 25\.3/);
+  assert.doesNotMatch(summary,/prediction-summary-primary[^>]*>CADD PHRED/);
+
+  useCalibratedEvidenceColors=false;
+  const nativeSummary=presenter.predictionSummaryBar([item('cadd','phred','20','stop_gained')]);
+  assert.match(nativeSummary,/1 prediction directions/);
+  assert.match(nativeSummary,/CADD PHRED: 20/);
+  useCalibratedEvidenceColors=true;
 });
 
 test('FAVOR transcript-dependent predictors remain explicit variant summaries',()=>{

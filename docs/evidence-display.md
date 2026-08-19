@@ -1,4 +1,4 @@
-# How AnnoCAT displays prediction evidence
+# Prediction evidence display
 
 Status: Active policy; implemented rules are tested, and unresolved score identities remain neutral  
 Last updated: 2026-08-17  
@@ -14,15 +14,22 @@ The numeric thresholds in this document were checked directly against the follow
 
 Verification here means that the numeric boundaries match the cited table. Runtime use still requires an exact score identity, compatible model or source release, applicable consequence, and correct allele and transcript.
 
-This verification corrected two material errors in an earlier draft: the Pejaver PolyPhen-2 calibration was mislabeled as HumDiv instead of HumVar, and the upper endpoint of the ESM1b indeterminate interval was transcribed as `-6.2` instead of `-6.4`. The 2025 intervals below now preserve the source table's reported decimal precision rather than silently converting adjacent displayed intervals into continuous comparisons.
+The verified PolyPhen-2 calibration is HumVar, not HumDiv. The ESM1b
+indeterminate interval ends at `-6.4`, not `-6.2`. The 2025 intervals below use
+the decimal precision reported in the source table; AnnoCAT does not convert
+adjacent displayed intervals into continuous comparisons.
 
 The non-calibrated display rules were checked against primary or first-party documentation for CADD, SpliceAI, AlphaMissense, SIFT, PolyPhen-2, REVEL, BayesDel, PrimateAI, phyloP, GERP++, and dbNSFP field identities.[^cadd-interpretation][^spliceai-developer][^alphamissense-developer][^sift-developer][^polyphen-developer][^revel-developer][^bayesdel-developer][^primateai-developer][^phylop-semantics][^gerp-semantics][^dbnsfp-source] These rules are display interpretations, not additional ACMG/AMP criteria. Where a source documents rank or direction but no clinically calibrated cutoff, the document labels the resulting color rule as an AnnoCAT display mapping.
 
-The visual grammar also follows WCAG requirements and Fluent 2 semantic-color guidance: color is supplementary rather than the sole carrier of meaning, ordinary-size text must meet at least 4.5:1 contrast, meaningful non-text indicators must meet at least 3:1 contrast, and status colors are reserved for meaningful states rather than decoration.[^wcag-color][^wcag-contrast][^fluent-color]
+Presentation follows WCAG requirements and Fluent 2 semantic-color guidance.
+Color is supplementary rather than the sole carrier of meaning. Ordinary-size
+text must meet at least 4.5:1 contrast, and meaningful non-text indicators must
+meet at least 3:1 contrast. Status colors are reserved for meaningful states,
+not decoration.[^wcag-color][^wcag-contrast][^fluent-color]
 
 ## 1. Decision
 
-AnnoCAT will use a five-tier interpretation system for computational evidence:
+AnnoCAT uses five interpretation tiers for computational evidence:
 
 1. Use published ClinGen Sequence Variant Interpretation (SVI) calibrated score intervals when the exact predictor, score field, model or release, and variant type match the calibration.
 2. Otherwise, use a verified developer or source-native category when it is explicitly defined for the exact field.
@@ -54,9 +61,13 @@ Blue is reserved for links, actions, selection, explicit phenotype or candidate-
 
 Calibration status is communicated by the pill shape, tooltip prefix, and accessible label. Strength is communicated by text and tooltip, not by changing hue or saturation. All pathogenic-direction calibrated bands are red pills, all benign-direction calibrated bands are green pills, and calibrated indeterminate bands are neutral pills. A supporting-pathogenic interval must not become amber merely because its evidence strength is supporting.
 
-The neutral calibrated pill is intentional. An `indeterminate` interval in a ClinGen calibration means that the score does not support either PP3 or BP4 at the calibrated evidence levels; it is not an amber warning or an uncertain clinical classification.[^pejaver-2022-table2] Amber remains available for an exact source category such as `uncertain` or `possibly damaging`, and for a documented intermediate adverse rank.
+An `indeterminate` interval in a ClinGen calibration uses a neutral pill. The
+score does not support either PP3 or BP4 at the calibrated evidence levels; it
+is not an amber warning or an uncertain clinical classification.[^pejaver-2022-table2]
+Amber remains available for an exact source category such as `uncertain` or
+`possibly damaging`, and for a documented intermediate adverse rank.
 
-This separates two independent visual questions:
+The UI encodes two properties:
 
 - **Was the score interpreted through an approved calibration?** Pill means yes; plain text means no.
 - **What direction did that interpretation support?** Red means adverse, green means reassuring, amber means explicit caution or uncertainty, and neutral means no direction.
@@ -65,7 +76,9 @@ The pill is a noninteractive status badge, not a button or editable tag. Fluent 
 
 Color is a display aid. It is not an AnnoCAT pathogenicity classification.
 
-The goal is maximum **scientifically defensible** color coverage, not the maximum number of colored cells. A value receives semantic color only when its exact identity, applicability, and interpretation source justify a direction or caution state. Available but undirected data remain neutral so red, amber, and green retain meaning.
+A value receives semantic color only when its exact identity, applicability,
+and interpretation source justify a direction or caution state. Available but
+undirected data remain neutral so red, amber, and green retain meaning.
 
 ## 2. Non-goals
 
@@ -123,13 +136,7 @@ The code must not apply a threshold first and check consequence later.
 
 ### 3.3 Selected transcript context
 
-Missense calibrations apply only when the selected transcript has a missense consequence. The preferred transcript order remains:
-
-1. MANE Select.
-2. MANE Plus Clinical.
-3. Canonical transcript.
-4. Most severe biologically relevant consequence.
-5. Deterministic fallback.
+Missense calibrations apply only when the selected transcript has a missense consequence. AnnoCAT does not define a separate transcript order for evidence display. The default context uses the gene-first, two-stage `allele-gene-severity-v1` representative selected by [How AnnoCAT selects transcripts and evidence](transcript-and-evidence-selection.md). If the user selects another transcript in Variant Details, interpretation uses that transcript's consequence and matching transcript-scoped evidence.
 
 A score available at the variant level does not make a non-missense selected transcript eligible for missense calibration.
 
@@ -747,10 +754,10 @@ For each predictor family:
 
 1. Select one value for the selected transcript and allele.
 2. Resolve a valid calibrated interpretation separately from the direction-count summary.
-3. For the direction-count summary, use one verified source category per family.
+3. For the direction-count summary, use one verified source category per family. The selected REVEL and verified CADD PHRED scores also contribute one direction each from their existing interpretations.
 4. Deduplicate numeric and `_pred` representations of the same predictor.
 5. Count the family at most once.
-6. Exclude calibrated alternatives, missing, not applicable, directional-rank context, and neutral measurements from the count.
+6. Exclude other calibrated alternatives, missing, not applicable, and unrelated neutral measurements from the count. Preserve an indeterminate selected REVEL interpretation or a below-threshold CADD PHRED interpretation as one neutral direction.
 
 The direct-prediction summary may count:
 
@@ -762,19 +769,19 @@ It must not count:
 
 - Allele frequency.
 - Conservation shown only as context.
-- Non-missense CADD.
+- CADD raw scores, rank scores, or CADD PHRED fields whose identity is not verified.
 - Missing values.
 - Scores with unverified identities.
 - Both a score and category from the same predictor.
 - Multiple transcript values from the same predictor.
-- Calibrated alternative predictors as additional votes.
+- Other calibrated alternative predictors as additional votes. REVEL and CADD PHRED are the only numeric predictors included in the direction count.
 
 ### 7.2 Separate calibrated evidence from agreement counts
 
 The UI should distinguish:
 
-- `Primary calibrated interpretation`: a red, neutral, or green calibrated pill for the predeclared REVEL or SpliceAI result when applicable.
-- `Other prediction directions`: display-only counts of exact source categories rendered as red, amber, and green segments.
+- `Primary calibrated interpretation`: a red, neutral, or green calibrated pill for the predeclared SpliceAI result when applicable.
+- `Prediction directions`: display-only counts of exact source categories plus one selected REVEL direction and one verified CADD PHRED direction, rendered as red, amber, green, or neutral segments.
 - `Contextual scores`: individually displayed plain text that does not enter either summary.
 
 The prediction summary must not be labeled `ACMG evidence`, `PP3 count`, `BP4 count`, or `consensus classification`.
@@ -889,7 +896,7 @@ Implemented and covered by executable boundary tests:
 8. Native SIFT uses `< 0.05` as deleterious and `>= 0.05` as tolerated.
 9. Low mappability is amber technical caution; high mappability is neutral without a quality profile.
 10. The table, summary grid, detailed evidence rows, and tooltips consume the same structured interpretation.
-11. Prediction counts include only exact source-native categorical calls, deduplicated by predictor family. Primary calibrated REVEL and SpliceAI interpretations are separate pills.
+11. Prediction counts include exact source-native categorical calls plus one selected REVEL interpretation and one verified CADD PHRED interpretation, deduplicated by predictor family. SpliceAI remains a separate primary pill.
 12. The calibrated-color setting switches between calibrated pills and exact non-calibrated source-native colors without changing raw values.
 13. Native numeric colors cover verified REVEL, BayesDel no-AF, PrimateAI, PolyPhen-2 HVAR, SIFT, AlphaMissense, CADD PHRED, SpliceAI maximum delta, phyloP, and population-frequency fields; unsupported numeric predictors remain neutral.
 14. FAVOR MutPred2 is an optional calibrated alternative exposed in Columns and prediction details; it is not a recommended default column or an independent prediction-summary vote alongside REVEL.
@@ -999,7 +1006,7 @@ green, or amber.
 - Numeric and category fields from one predictor are deduplicated.
 - The selected transcript determines missense applicability.
 - Summary colors exactly match the detailed predictor rows.
-- Directional-rank context and neutral measurements are excluded from counts.
+- Directional-rank context and neutral measurements are excluded from counts except for the verified CADD PHRED family.
 - The primary calibrated REVEL or SpliceAI interpretation is shown as a pill separate from direction counts.
 - Correlated missense predictors are not stacked into ACMG evidence.
 

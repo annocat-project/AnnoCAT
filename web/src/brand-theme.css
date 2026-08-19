@@ -364,10 +364,10 @@ body:not(:has(#results.active-page)) .topbar { display: none; }
 }
 #results .results-heading { align-items: flex-end; margin-bottom: 16px; }
 #results .results-heading h1 { font-size:var(--font-size-3xl); }
-#results .results-heading p { color: var(--muted); font-size:var(--text-supporting-size); }
+#results .results-heading p { color: var(--color-text-secondary); font-size:var(--text-supporting-size); }
 #results .results-tools { flex-wrap: wrap; justify-content: flex-end; }
 #results .result-view-tabs { min-height: 52px; flex: 0 0 auto; align-items: flex-end; margin: -18px -18px 14px; padding: 0 16px; border-radius: var(--radius-large) var(--radius-large) 0 0; background: var(--color-surface); }
-#results .result-view-tabs .result-count-status { display: inline-flex; align-self: center; align-items: center; gap: 5px; margin-left: auto; color: var(--color-text-muted); font-size:var(--text-supporting-size); font-weight:var(--text-supporting-weight); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#results .result-view-tabs .result-count-status { display: inline-flex; align-self: center; align-items: center; gap: 5px; margin-left: auto; color: var(--color-text-secondary); font-size:var(--text-supporting-size); font-weight:var(--text-supporting-weight); font-variant-numeric: tabular-nums; white-space: nowrap; }
 #results .result-view-tabs .result-count-status.error { color: var(--color-status-danger); }
 #results .result-query-spinner { width: 11px; height: 11px; border: 2px solid var(--color-border); border-top-color: var(--blue); border-radius: var(--radius-circular); animation: result-query-spin .7s linear infinite; }
 @keyframes result-query-spin { to { transform: rotate(360deg); } }

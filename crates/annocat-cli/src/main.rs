@@ -4058,6 +4058,8 @@ struct FilteredExportRequest {
     filters: results::PageRequest,
     #[serde(default)]
     columns: Vec<String>,
+    #[serde(default)]
+    column_labels: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -4098,13 +4100,14 @@ fn export_filtered_results_interactive(
     };
     match request.format.as_str() {
         "rowsCsv" => {
-            let rows = results::export_filtered_rows_with_details(
+            let rows = results::export_filtered_rows_with_details_and_labels(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 &destination,
                 &request.filters,
                 &request.columns,
+                &request.column_labels,
             )?;
             Ok(Some(FilteredExportSummary {
                 path: destination,
@@ -4824,11 +4827,9 @@ mod profile_status_tests {
         assert!(html.contains("class=\"about-section\""));
         assert!(!html.contains("class=\"privacy\""));
         assert!(html.contains(">Apache-2.0</a>"));
-        assert!(
-            html.contains(
-                "AnnoCAT is an application for annotating and reviewing genomic variants."
-            )
-        );
+        assert!(html.contains("AnnoCAT annotates GRCh38 VCF files"));
+        assert!(html.contains("Core annotation and review run on this computer."));
+        assert!(html.contains("FAVOR annotations can be added after a result opens."));
         assert!(html.contains("Research use only"));
         assert!(html.contains("Do not use AnnoCAT for diagnosis or patient-care decisions."));
         assert!(manifest.contains("license = \"Apache-2.0\""));

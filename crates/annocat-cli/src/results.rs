@@ -8021,21 +8021,59 @@ pub fn export_filtered_rows_with_details(
     request: &PageRequest,
     columns: &[String],
 ) -> Result<u64, String> {
-    prepare_sample_call_projection(parquet, request)?;
-    prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
-    with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
-        export_filtered_rows_with_details_once(
-            parquet,
-            query_evidence,
-            query_files,
-            catalog,
-            destination,
-            request,
-            columns,
-        )
-    })
+    export_filtered_rows_with_details_and_labels(
+        parquet,
+        evidence,
+        catalog,
+        destination,
+        request,
+        columns,
+        &[],
+    )
 }
 
+pub fn export_filtered_rows_with_details_and_labels(
+    parquet: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    destination: &Path,
+    request: &PageRequest,
+    columns: &[String],
+    column_labels: &[String],
+) -> Result<u64, String> {
+    let mut request = request.clone();
+    request
+        .evidence_columns
+        .extend(export_evidence_indices(columns)?);
+    request.evidence_columns.sort_unstable();
+    request.evidence_columns.dedup();
+    prepare_sample_call_projection(parquet, &request)?;
+    prepare_requested_evidence_resolution(parquet, evidence, catalog, &request)?;
+    if let (Some(evidence), Some(catalog)) = (evidence, catalog) {
+        if let Some(fields) = request_query_projection_fields(catalog, &request)? {
+            prepare_query_projection(evidence, catalog, &fields)?;
+        }
+    }
+    with_query_evidence(
+        evidence,
+        catalog,
+        &request,
+        |query_evidence, query_files| {
+            export_filtered_rows_with_details_once_with_labels(
+                parquet,
+                query_evidence,
+                query_files,
+                catalog,
+                destination,
+                &request,
+                columns,
+                column_labels,
+            )
+        },
+    )
+}
+
+#[cfg(test)]
 fn export_filtered_rows_with_details_once(
     parquet: &Path,
     evidence: Option<&Path>,
@@ -8045,12 +8083,68 @@ fn export_filtered_rows_with_details_once(
     request: &PageRequest,
     columns: &[String],
 ) -> Result<u64, String> {
+    export_filtered_rows_with_details_once_with_labels(
+        parquet,
+        evidence,
+        evidence_files,
+        catalog,
+        destination,
+        request,
+        columns,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_filtered_rows_with_details_once_with_labels(
+    parquet: &Path,
+    evidence: Option<&Path>,
+    evidence_files: Option<&[PathBuf]>,
+    catalog: Option<&Path>,
+    destination: &Path,
+    request: &PageRequest,
+    columns: &[String],
+    column_labels: &[String],
+) -> Result<u64, String> {
     let filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
     let (evidence_rule_sql, evidence_rule_params) =
         evidence_filter_rules_sql(evidence, evidence_files, catalog, request)?;
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
-    let requested = export_columns(columns)?;
+    let mut requested = export_columns(columns)?;
+    let evidence_indices = requested
+        .iter()
+        .filter_map(|column| match column {
+            ExportColumn::Evidence(index) => Some(*index),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let evidence_fields = if evidence_indices.is_empty() {
+        Vec::new()
+    } else {
+        selected_evidence_columns(
+            catalog.ok_or("annotation columns require a field catalog")?,
+            &evidence_indices,
+        )?
+    };
+    let has_reference_snp = requested.contains(&ExportColumn::RsId)
+        || evidence_fields.iter().any(|field| {
+            let leaf = normalized_evidence_key(&field.field_path);
+            leaf == "rsid" || catalog_source_is(&field.source_id, "dbsnp") && leaf == "id"
+        });
+    if !has_reference_snp {
+        let insertion = requested
+            .iter()
+            .rposition(|column| matches!(column, ExportColumn::Alternate | ExportColumn::VariantId))
+            .map_or(requested.len(), |index| index + 1);
+        requested.insert(insertion, ExportColumn::RsId);
+    }
+    let headers = export_column_labels(&requested, columns, column_labels)?;
+    let reference_snp_projection = requested
+        .contains(&ExportColumn::RsId)
+        .then(|| export_reference_snp_projection(evidence, catalog))
+        .transpose()?
+        .flatten();
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
     let (search_sql, mut search_params) = displayed_field_search_sql(
@@ -8066,16 +8160,88 @@ fn export_filtered_rows_with_details_once(
     );
     search_params.extend(excluded_params);
     let path = parquet.to_string_lossy();
+    let (reference_snp_select, reference_snp_join) = if reference_snp_projection.is_some() {
+        (
+            "export_rsid.value",
+            "LEFT JOIN (
+                     SELECT record_number, alt_index,
+                            min(coalesce(string_value, cast(integer_value AS VARCHAR),
+                                         cast(number_value AS VARCHAR),
+                                         cast(boolean_value AS VARCHAR), json_value)) AS value
+                     FROM read_parquet(?)
+                     WHERE field_index=CAST(? AS INTEGER)
+                     GROUP BY record_number, alt_index
+                 ) export_rsid USING(record_number, alt_index)",
+        )
+    } else {
+        ("CAST(NULL AS VARCHAR)", "")
+    };
+    let mut evidence_selects = String::new();
+    let mut evidence_joins = String::new();
+    let mut join_params = Vec::<SqlValue>::new();
+    for (ordinal, field) in evidence_fields.iter().enumerate() {
+        let alias = format!("export_evidence_{ordinal}");
+        evidence_selects.push_str(&format!(", {alias}.value"));
+        if field.resolution == EvidenceResolutionStrategy::GeneDirect {
+            let gene_evidence =
+                gene_evidence_path(catalog.ok_or("annotation columns require a field catalog")?)?
+                    .ok_or("gene annotation data is not ready")?;
+            evidence_joins.push_str(&format!(
+                " LEFT JOIN (
+                     SELECT upper(gene_symbol) AS gene_symbol,
+                            string_agg(DISTINCT coalesce(string_value,
+                                cast(integer_value AS VARCHAR), cast(number_value AS VARCHAR),
+                                cast(boolean_value AS VARCHAR), json_value), '; ') AS value
+                     FROM read_parquet(?)
+                     WHERE source_id=? AND field_path=?
+                     GROUP BY upper(gene_symbol)
+                  ) {alias} ON {alias}.gene_symbol=upper(v.gene_symbol)"
+            ));
+            join_params.push(gene_evidence.to_string_lossy().into_owned().into());
+            join_params.push(field.source_id.clone().into());
+            join_params.push(field.field_path.clone().into());
+            continue;
+        }
+        let evidence = evidence.ok_or("annotation columns require an evidence table")?;
+        if !is_query_projection(evidence) {
+            return Err("annotation export projection is not ready".into());
+        }
+        let (read_sql, mut read_params) =
+            evidence_read_for_fields(evidence, evidence_files, [field.index]);
+        evidence_joins.push_str(&format!(
+            " LEFT JOIN (
+                 SELECT record_number, alt_index,
+                        string_agg(DISTINCT coalesce(string_value,
+                            cast(integer_value AS VARCHAR), cast(number_value AS VARCHAR),
+                            cast(boolean_value AS VARCHAR), json_value), '; ') AS value
+                 FROM {read_sql}
+                 WHERE field_index=CAST(? AS INTEGER)
+                 GROUP BY record_number, alt_index
+              ) {alias} USING(record_number, alt_index)"
+        ));
+        join_params.append(&mut read_params);
+        join_params.push((field.index as i64).into());
+    }
     let mut statement = connection
         .prepare(&format!(
             "SELECT chromosome, position, reference, alternate, variant_id, quality, filter,
                     gene_symbol, gene_id, transcript_id, consequence, impact, canonical, mane_select,
-                    alt_index, alternate_count, format, samples_json
-             FROM annocat_variants(?) v WHERE {where_sql}
+                    alt_index, alternate_count, format, samples_json, {reference_snp_select}{evidence_selects}
+             FROM annocat_variants(?) v {reference_snp_join}{evidence_joins} WHERE {where_sql}
              ORDER BY record_number ASC, alt_index ASC"
         ))
         .map_err(|error| format!("cannot prepare filtered row export: {error}"))?;
     let mut params = core_page_params(path.as_ref(), request, &filters);
+    if let Some((projection, field_index)) = &reference_snp_projection {
+        params.insert(1, projection.to_string_lossy().into_owned().into());
+        params.insert(2, (*field_index as i64).into());
+    }
+    let join_parameter_offset = if reference_snp_projection.is_some() {
+        3
+    } else {
+        1
+    };
+    params.splice(join_parameter_offset..join_parameter_offset, join_params);
     params.extend(core_rule_params);
     params.extend(evidence_rule_params);
     params.extend(search_params);
@@ -8086,18 +8252,21 @@ fn export_filtered_rows_with_details_once(
         writer
             .write_all(b"\xEF\xBB\xBF")
             .map_err(|error| error.to_string())?;
-        write_csv_record(
-            writer,
-            requested
-                .iter()
-                .map(|column| column.label())
-                .collect::<Vec<_>>(),
-        )?;
+        write_csv_record(writer, headers.iter().map(String::as_str))?;
         let mut count = 0_u64;
         while let Some(row) = rows
             .next()
             .map_err(|error| format!("cannot read filtered export row: {error}"))?
         {
+            let mut exported_evidence = HashMap::new();
+            for (offset, field) in evidence_fields.iter().enumerate() {
+                if let Some(value) = row
+                    .get::<_, Option<String>>(19 + offset)
+                    .map_err(|error| error.to_string())?
+                {
+                    exported_evidence.insert(field.index, value);
+                }
+            }
             let values = ExportRow {
                 chromosome: row.get(0).map_err(|error| error.to_string())?,
                 position: row.get(1).map_err(|error| error.to_string())?,
@@ -8113,6 +8282,7 @@ fn export_filtered_rows_with_details_once(
                     row.get(15).map_err(|error| error.to_string())?,
                 ),
                 variant_id: row.get(4).map_err(|error| error.to_string())?,
+                reference_snp_id: row.get(18).map_err(|error| error.to_string())?,
                 quality: row.get(5).map_err(|error| error.to_string())?,
                 filter: row.get(6).map_err(|error| error.to_string())?,
                 gene: row.get(7).map_err(|error| error.to_string())?,
@@ -8122,6 +8292,7 @@ fn export_filtered_rows_with_details_once(
                 impact: row.get(11).map_err(|error| error.to_string())?,
                 canonical: row.get(12).map_err(|error| error.to_string())?,
                 mane_select: row.get(13).map_err(|error| error.to_string())?,
+                evidence: exported_evidence,
             };
             write_csv_record(
                 writer,
@@ -8134,6 +8305,50 @@ fn export_filtered_rows_with_details_once(
         }
         Ok(count)
     })
+}
+
+fn export_reference_snp_projection(
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+) -> Result<Option<(PathBuf, usize)>, String> {
+    let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
+        return Ok(None);
+    };
+    let catalog_value = query_field_catalog(catalog)?;
+    let fields = catalog_value["fields"]
+        .as_array()
+        .ok_or("field catalog has no fields array")?;
+    let Some(index) = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let source = field["sourceId"].as_str().unwrap_or_default();
+            let leaf = catalog_field_leaf(field);
+            let priority = if catalog_source_is(source, "dbsnp") && leaf == "id" {
+                0
+            } else if catalog_source_is(source, "dbsnp") && leaf == "rsid" {
+                1
+            } else if leaf == "rsid" {
+                2
+            } else {
+                return None;
+            };
+            Some((priority, index))
+        })
+        .min()
+        .map(|(_, index)| index)
+    else {
+        return Ok(None);
+    };
+    let mut selected = selected_evidence_columns(catalog, &[index])?;
+    let field = selected.pop().ok_or("rsID field selection failed")?;
+    let canonical = canonical_evidence_path(evidence);
+    let projections = prepare_query_projection(&canonical, catalog, std::slice::from_ref(&field))?
+        .ok_or("rsID query projection was not created")?;
+    Ok(projections
+        .into_iter()
+        .next()
+        .map(|projection| (projection, field.index)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8413,12 +8628,13 @@ fn export_filtered_genes_with_details_once(
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ExportColumn {
     Chromosome,
     Position,
     Reference,
     Alternate,
+    RsId,
     Zygosity,
     VariantId,
     Quality,
@@ -8430,26 +8646,51 @@ enum ExportColumn {
     Impact,
     Canonical,
     ManeSelect,
+    Evidence(usize),
 }
 
 impl ExportColumn {
-    fn label(self) -> &'static str {
+    fn key(self) -> String {
         match self {
-            Self::Chromosome => "Chr",
-            Self::Position => "Position",
-            Self::Reference => "Ref",
-            Self::Alternate => "Alt",
-            Self::Zygosity => "Zygosity",
-            Self::VariantId => "Variant ID",
-            Self::Quality => "QUAL",
-            Self::Filter => "VCF filter",
-            Self::Gene => "Gene",
-            Self::GeneId => "Gene ID",
-            Self::TranscriptId => "Transcript",
-            Self::Consequence => "Consequence",
-            Self::Impact => "Impact",
-            Self::Canonical => "Canonical",
-            Self::ManeSelect => "MANE Select",
+            Self::Chromosome => "chromosome".into(),
+            Self::Position => "position".into(),
+            Self::Reference => "reference".into(),
+            Self::Alternate => "alternate".into(),
+            Self::RsId => "rsid".into(),
+            Self::Zygosity => "zygosity".into(),
+            Self::VariantId => "variantId".into(),
+            Self::Quality => "quality".into(),
+            Self::Filter => "filter".into(),
+            Self::Gene => "gene".into(),
+            Self::GeneId => "geneId".into(),
+            Self::TranscriptId => "transcriptId".into(),
+            Self::Consequence => "consequence".into(),
+            Self::Impact => "impact".into(),
+            Self::Canonical => "canonical".into(),
+            Self::ManeSelect => "maneSelect".into(),
+            Self::Evidence(index) => format!("evidence:{index}"),
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Chromosome => "Chr".into(),
+            Self::Position => "Position".into(),
+            Self::Reference => "Ref".into(),
+            Self::Alternate => "Alt".into(),
+            Self::RsId => "rsID".into(),
+            Self::Zygosity => "Zygosity".into(),
+            Self::VariantId => "Variant ID".into(),
+            Self::Quality => "QUAL".into(),
+            Self::Filter => "VCF filter".into(),
+            Self::Gene => "Gene".into(),
+            Self::GeneId => "Gene ID".into(),
+            Self::TranscriptId => "Transcript".into(),
+            Self::Consequence => "Consequence".into(),
+            Self::Impact => "Impact".into(),
+            Self::Canonical => "Canonical".into(),
+            Self::ManeSelect => "MANE Select".into(),
+            Self::Evidence(index) => format!("Evidence {index}"),
         }
     }
 
@@ -8459,6 +8700,9 @@ impl ExportColumn {
             Self::Position => row.position.to_string(),
             Self::Reference => row.reference.clone(),
             Self::Alternate => row.alternate.clone(),
+            Self::RsId => {
+                reference_snp_id(row.reference_snp_id.as_deref(), row.variant_id.as_deref())
+            }
             Self::Zygosity => row.zygosity.clone(),
             Self::VariantId => row.variant_id.clone().unwrap_or_default(),
             Self::Quality => row
@@ -8484,6 +8728,7 @@ impl ExportColumn {
                 }
             }
             Self::ManeSelect => row.mane_select.clone().unwrap_or_default(),
+            Self::Evidence(index) => row.evidence.get(&index).cloned().unwrap_or_default(),
         }
     }
 }
@@ -8495,6 +8740,7 @@ struct ExportRow {
     alternate: String,
     zygosity: String,
     variant_id: Option<String>,
+    reference_snp_id: Option<String>,
     quality: Option<f64>,
     filter: String,
     gene: Option<String>,
@@ -8504,6 +8750,7 @@ struct ExportRow {
     impact: Option<String>,
     canonical: bool,
     mane_select: Option<String>,
+    evidence: HashMap<usize, String>,
 }
 
 fn export_columns(columns: &[String]) -> Result<Vec<ExportColumn>, String> {
@@ -8517,6 +8764,7 @@ fn export_columns(columns: &[String]) -> Result<Vec<ExportColumn>, String> {
             "position" => Ok(ExportColumn::Position),
             "reference" => Ok(ExportColumn::Reference),
             "alternate" => Ok(ExportColumn::Alternate),
+            "rsid" | "rsID" => Ok(ExportColumn::RsId),
             "zygosity" => Ok(ExportColumn::Zygosity),
             "variantId" => Ok(ExportColumn::VariantId),
             "quality" => Ok(ExportColumn::Quality),
@@ -8528,9 +8776,76 @@ fn export_columns(columns: &[String]) -> Result<Vec<ExportColumn>, String> {
             "impact" => Ok(ExportColumn::Impact),
             "canonical" => Ok(ExportColumn::Canonical),
             "maneSelect" => Ok(ExportColumn::ManeSelect),
-            _ => Err(format!("unknown export column: {column}")),
+            _ => column
+                .strip_prefix("evidence:")
+                .and_then(|index| index.parse().ok())
+                .map(ExportColumn::Evidence)
+                .ok_or_else(|| format!("unknown export column: {column}")),
         })
         .collect()
+}
+
+fn export_evidence_indices(columns: &[String]) -> Result<Vec<usize>, String> {
+    let mut indices = columns
+        .iter()
+        .filter_map(|column| column.strip_prefix("evidence:"))
+        .map(|index| {
+            index
+                .parse::<usize>()
+                .map_err(|_| format!("unknown export column: evidence:{index}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    indices.sort_unstable();
+    indices.dedup();
+    Ok(indices)
+}
+
+fn export_column_labels(
+    requested: &[ExportColumn],
+    columns: &[String],
+    labels: &[String],
+) -> Result<Vec<String>, String> {
+    if !labels.is_empty() && labels.len() != columns.len() {
+        return Err("export column labels do not match the requested columns".into());
+    }
+    let mut supplied = HashMap::new();
+    for (column, label) in columns.iter().zip(labels) {
+        let label = label.trim();
+        if label.is_empty()
+            || label.len() > 160
+            || label
+                .bytes()
+                .any(|byte| byte == 0 || byte.is_ascii_control())
+        {
+            return Err("export column label is invalid".into());
+        }
+        supplied.insert(column.as_str(), label.to_owned());
+    }
+    Ok(requested
+        .iter()
+        .map(|column| {
+            supplied
+                .get(column.key().as_str())
+                .cloned()
+                .unwrap_or_else(|| column.label())
+        })
+        .collect())
+}
+
+fn reference_snp_id(evidence: Option<&str>, variant_id: Option<&str>) -> String {
+    [evidence, variant_id]
+        .into_iter()
+        .flatten()
+        .flat_map(|value| value.split(|character: char| !character.is_ascii_alphanumeric()))
+        .find(|part| {
+            let bytes = part.as_bytes();
+            bytes.len() > 2
+                && bytes[0].eq_ignore_ascii_case(&b'r')
+                && bytes[1].eq_ignore_ascii_case(&b's')
+                && bytes[2..].iter().all(u8::is_ascii_digit)
+        })
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn write_export_file<T>(
@@ -12158,7 +12473,7 @@ mod tests {
         assert_eq!(exported, 1);
         assert_eq!(
             fs::read_to_string(csv).unwrap(),
-            "\u{feff}\"Chr\",\"Alt\",\"Gene\"\r\n\"1\",\"G\",\"GENE_G\"\r\n"
+            "\u{feff}\"Chr\",\"Alt\",\"rsID\",\"Gene\"\r\n\"1\",\"G\",\"rs1\",\"GENE_G\"\r\n"
         );
         let genes = root.join("genes.txt");
         assert_eq!(
@@ -12185,7 +12500,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(excluded_csv).unwrap(),
-            "\u{feff}\"Chr\",\"Alt\",\"Gene\"\r\n"
+            "\u{feff}\"Chr\",\"Alt\",\"rsID\",\"Gene\"\r\n"
         );
         let excluded_genes = root.join("excluded-genes.txt");
         assert_eq!(
@@ -14480,6 +14795,11 @@ mod tests {
         {
             let mut record: Value = serde_json::from_str(line).unwrap();
             let position = record["start"].as_i64().unwrap();
+            if position == 20000 {
+                for allele in record["alleles"].as_array_mut().unwrap() {
+                    allele["dbsnp"]["id"] = json!("rs900001");
+                }
+            }
             let consequences = consequence_specs[&position]
                 .iter()
                 .map(|(alternate, gene, transcript, amino_acids)| {
@@ -14639,6 +14959,14 @@ mod tests {
                 field["sourceId"] == "clinvar" && field["fieldPath"] == "significance"
             })
             .unwrap();
+        let cadd_index = fields
+            .iter()
+            .position(|field| field["sourceId"] == "cadd" && field["fieldPath"] == "phred")
+            .unwrap();
+        let phylop_index = fields
+            .iter()
+            .position(|field| field["sourceId"] == "phylop" && field["fieldPath"] == "value")
+            .unwrap();
         let pathogenic: Value = serde_json::from_str(
             &page_json_with_evidence(
                 &variants,
@@ -14663,6 +14991,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pathogenic["total"], 1);
+
+        let (rsid_projection, rsid_index) =
+            export_reference_snp_projection(Some(&evidence), Some(&catalog))
+                .unwrap()
+                .unwrap();
+        let projected_rsid: String = connection
+            .query_row(
+                "SELECT string_value FROM read_parquet(?) WHERE field_index=? LIMIT 1",
+                params![
+                    rsid_projection.to_string_lossy().as_ref(),
+                    rsid_index as i64
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projected_rsid, "rs900001");
+        let joined_rsid_rows: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM read_parquet(?) v
+                 JOIN read_parquet(?) p USING(record_number, alt_index)
+                 WHERE v.position=20000 AND p.field_index=?",
+                params![
+                    variants.to_string_lossy().as_ref(),
+                    rsid_projection.to_string_lossy().as_ref(),
+                    rsid_index as i64
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined_rsid_rows, 2);
+
+        let exported = root.join("dbsnp-rsid.csv");
+        assert_eq!(
+            export_filtered_rows_with_details(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                &exported,
+                &PageRequest {
+                    position_min: Some(20000),
+                    position_max: Some(20000),
+                    ..PageRequest::default()
+                },
+                &["chromosome".into(), "position".into()],
+            )
+            .unwrap(),
+            2
+        );
+        let exported = fs::read_to_string(exported).unwrap();
+        assert_eq!(exported.matches("rs900001").count(), 2);
+        assert!(exported.starts_with("\u{feff}\"Chr\",\"Position\",\"rsID\"\r\n"));
+
+        let exported = root.join("filtered-visible-columns.csv");
+        let columns = vec![
+            "chromosome".into(),
+            "position".into(),
+            "rsid".into(),
+            format!("evidence:{cadd_index}"),
+            format!("evidence:{phylop_index}"),
+        ];
+        let labels = vec![
+            "Chr".into(),
+            "Pos".into(),
+            "rsID".into(),
+            "CADD PHRED score".into(),
+            "phyloP 100-way score".into(),
+        ];
+        assert_eq!(
+            export_filtered_rows_with_details_and_labels(
+                &variants,
+                Some(&evidence),
+                Some(&catalog),
+                &exported,
+                &PageRequest {
+                    position_min: Some(10001),
+                    position_max: Some(10001),
+                    ..PageRequest::default()
+                },
+                &columns,
+                &labels,
+            )
+            .unwrap(),
+            1
+        );
+        let exported = fs::read_to_string(exported).unwrap();
+        assert!(exported.starts_with(
+            "\u{feff}\"Chr\",\"Pos\",\"rsID\",\"CADD PHRED score\",\"phyloP 100-way score\"\r\n"
+        ));
+        assert!(exported.contains("\"12.4\",\"3.14\""));
 
         let detail: Value =
             serde_json::from_str(&detail_json(&consequences, &evidence, &first).unwrap()).unwrap();
