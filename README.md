@@ -79,6 +79,19 @@ created.
 
 Prediction colors and scores help compare computational evidence across variants.
 
+### Result format
+
+Each result contains versioned Parquet tables for alleles, transcript
+consequences, and source evidence, together with a field catalog, provenance,
+and a manifest. An embedded DuckDB query engine reads these files directly for
+whole-result search, filters, and sorting. No separate database server or import
+step is required.
+
+AnnoCAT can create derived Parquet indexes and projections to make repeated
+queries faster. These files are caches and can be rebuilt from the result data.
+Exported result ZIPs include the required data and file hashes so AnnoCAT can
+validate them before import.
+
 ## Command line
 
 The CLI uses the same configuration, annotation data, results, validation, and
@@ -137,6 +150,7 @@ sources. Do not treat AnnoCAT output as a validated clinical finding.
 AnnoCAT is licensed under the [Apache License 2.0](LICENSE). It bundles a modified
 Apache-2.0 fastVEP build. Downloaded reference and annotation data remain subject
 to their publishers' licenses, permitted uses, and citation requirements.
+The Windows package includes dependency notices in its `licenses` directory.
 
 For problems and feature requests, use
 [GitHub Issues](https://github.com/annocat-project/AnnoCAT/issues).

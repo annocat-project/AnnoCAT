@@ -113,6 +113,7 @@ Copy-Item -LiteralPath $fastVepExe -Destination (Join-Path $bundleRoot "tools\fa
 Copy-Item -LiteralPath (Join-Path $projectRoot "launch-annocat.cmd") -Destination $bundleRoot
 $releaseReadme = Get-Content -LiteralPath (Join-Path $projectRoot "README.md") -Raw
 $releaseReadme = $releaseReadme -replace '(?m)^!\[[^\r\n]*\]\(docs/images/[^\r\n]+\)\r?\n?', ''
+$releaseReadme = $releaseReadme.Replace("(LICENSE)", "(LICENSE.txt)")
 $releaseReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "README.md") -Encoding utf8
 Copy-Item -Path (Join-Path $projectRoot "docs\*.md") -Destination (Join-Path $bundleRoot "docs")
 $fastVepSourceBase = "$($pin.repository)/blob/$($pin.commit)"
@@ -122,8 +123,10 @@ $fastVepReadme = Get-Content -LiteralPath (Join-Path $fastVepRoot "README.md") -
 }
 $fastVepReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "docs\fastvep.md") -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $projectRoot "config\fastvep-pin.json") -Destination (Join-Path $bundleRoot "config\fastvep-pin.json")
-Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE")
+Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
+Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\annocat-rust-licenses.html") -Destination (Join-Path $bundleRoot "licenses\AnnoCAT-third-party-licenses.html")
+Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep-rust-licenses.html") -Destination (Join-Path $bundleRoot "licenses\fastVEP-third-party-licenses.html")
 
 $zipPath = "$bundleRoot.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
