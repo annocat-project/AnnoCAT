@@ -3150,9 +3150,24 @@ html.annocat-results-ui .source-actions {
 
 /* Dialog layout ---------------------------------------------------------- */
 
+html.annocat-results-ui .setup-modal {
+  width: min(50rem, calc(100% - (2 * var(--space-4))));
+  padding: var(--space-7);
+}
+
+html.annocat-results-ui .setup-modal>.setup-wordmark {
+  margin: 0;
+  line-height: var(--line-height-title-2);
+}
+
+html.annocat-results-ui .setup-modal>.fui-dialog__description {
+  margin-top: var(--space-2);
+  text-align: center;
+}
+
 html.annocat-results-ui .setup-actions {
   gap: var(--space-3);
-  margin: var(--space-7) 0 var(--space-5);
+  margin: var(--space-5) 0 var(--space-4);
 }
 
 html.annocat-results-ui .setup-choice {
@@ -3161,7 +3176,7 @@ html.annocat-results-ui .setup-choice {
   align-content: center;
   align-items: center;
   gap: var(--space-1) var(--space-3);
-  padding: var(--space-5);
+  padding: var(--space-4);
 }
 
 html.annocat-results-ui .setup-choice>.ui-icon {

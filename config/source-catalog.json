@@ -272,7 +272,7 @@
     },
     {
       "id": "online",
-      "name": "Core + online annotations",
+      "name": "Core annotation",
       "purpose": "Core consequence annotation with FAVOR annotations for selected or matching variants",
       "sourceIds": [],
       "serviceIds": ["favor-variant-annotation"]

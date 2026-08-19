@@ -1,9 +1,11 @@
-# fastVEP fork maintenance
+# Maintain AnnoCAT's fastVEP build
 
-AnnoCAT supports the exact fastVEP revision recorded in
-[`config/fastvep-pin.json`](../config/fastvep-pin.json). Source update checks do
-not update the annotation engine. A new engine is adopted only with a reviewed
-pin change.
+AnnoCAT uses the exact fastVEP revision recorded in
+[`config/fastvep-pin.json`](../config/fastvep-pin.json) as an internal annotation
+engine. The standalone fastVEP command line, web interface, cache-building
+workflows, and experimental ACMG classifier are not AnnoCAT interfaces. Source
+update checks do not update the engine. A new revision is adopted only with a
+reviewed pin change.
 
 ## Repositories and pin
 
@@ -38,6 +40,8 @@ from the code. At a high level, the maintained fork adds:
 - lossless record lists for transcript- and gene-scoped evidence;
 - bounded parsing, compression, cache, and memory behavior;
 - deterministic parallel supplementary-source loading and lookup;
+- repeated supplementary-source directories so installed caches are used
+  directly without per-run hard links or copies;
 - structured output without duplicate source lookup;
 - transcript-cache integrity and read-only runtime safeguards;
 - consequence and HGVS corrections validated against Ensembl 115; and

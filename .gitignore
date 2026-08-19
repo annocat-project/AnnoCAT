@@ -20,6 +20,7 @@ __pycache__/
 /.tmp/
 /tools/
 /dist/
+/dist-portability/
 /.pnpm-store/
 /web/assets/annocat-logo-concept*.png
 /resources/*

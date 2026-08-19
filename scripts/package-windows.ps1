@@ -91,8 +91,6 @@ if (Test-Path -LiteralPath $bundleRoot) {
     Remove-Item -LiteralPath $bundleRoot -Recurse -Force
 }
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep") -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep\docs") -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $bundleRoot "tools\fastvep\data\benchmark\sa_sources") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "licenses") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "docs") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $bundleRoot "config") -Force | Out-Null
@@ -103,55 +101,18 @@ $fastVepExe = Join-Path $fastVepRoot "target\release\fastvep.exe"
 Copy-Item -LiteralPath $annocatExe -Destination (Join-Path $bundleRoot "annocat.exe")
 Copy-Item -LiteralPath $reportWorkerExe -Destination (Join-Path $bundleRoot "annocat-report-worker.exe")
 Copy-Item -LiteralPath $fastVepExe -Destination (Join-Path $bundleRoot "tools\fastvep\fastvep.exe")
-Copy-Item -LiteralPath (Join-Path $fastVepRoot "README.md") -Destination (Join-Path $bundleRoot "tools\fastvep\README.md")
-Copy-Item -LiteralPath (Join-Path $fastVepRoot "LICENSE.md") -Destination (Join-Path $bundleRoot "tools\fastvep\LICENSE.md")
-@("SUPPLEMENTARY_ANNOTATIONS.md", "ACMG.md", "ACMG_SETUP.md") | ForEach-Object {
-    Copy-Item -LiteralPath (Join-Path $fastVepRoot "docs\$_") -Destination (Join-Path $bundleRoot "tools\fastvep\docs\$_")
-}
-Copy-Item -LiteralPath (Join-Path $fastVepRoot "data\benchmark\sa_sources\download_sa_sources.sh") -Destination (Join-Path $bundleRoot "tools\fastvep\data\benchmark\sa_sources\download_sa_sources.sh")
 Copy-Item -LiteralPath (Join-Path $projectRoot "launch-annocat.cmd") -Destination $bundleRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot "README.md") -Destination $bundleRoot
 Copy-Item -Path (Join-Path $projectRoot "docs\*.md") -Destination (Join-Path $bundleRoot "docs")
+$fastVepSourceBase = "$($pin.repository)/blob/$($pin.commit)"
+$fastVepReadme = Get-Content -LiteralPath (Join-Path $fastVepRoot "README.md") -Raw
+@("LICENSE.md", "docs/SUPPLEMENTARY_ANNOTATIONS.md", "docs/ACMG.md", "docs/ACMG_SETUP.md") | ForEach-Object {
+    $fastVepReadme = $fastVepReadme.Replace("($_)", "($fastVepSourceBase/$_)")
+}
+$fastVepReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "docs\fastvep.md") -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $projectRoot "config\fastvep-pin.json") -Destination (Join-Path $bundleRoot "config\fastvep-pin.json")
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
-
-$fastVepHash = (Get-FileHash -LiteralPath (Join-Path $bundleRoot "tools\fastvep\fastvep.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
-$manifestFiles = [ordered]@{}
-Get-ChildItem -LiteralPath $bundleRoot -Recurse -File |
-    Sort-Object FullName |
-    ForEach-Object {
-        $relativePath = [IO.Path]::GetRelativePath($bundleRoot, $_.FullName).Replace("\", "/")
-        $manifestFiles[$relativePath] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
-$manifest = [ordered]@{
-    schemaVersion = 1
-    product = "AnnoCat"
-    version = $version
-    platform = "windows-x86_64"
-    createdUtc = [DateTime]::UtcNow.ToString("o")
-    fastVep = [ordered]@{
-        version = $pin.upstreamVersion
-        repository = $pin.repository
-        commit = $pin.commit
-        branch = $pin.branch
-        upstreamRepository = $pin.upstreamRepository
-        upstreamCommit = $pin.upstreamCommit
-        cargoLockSha256 = $pin.cargoLockSha256
-        changes = @($pin.changes | ForEach-Object {
-            [ordered]@{
-                commit = $_.commit
-                purpose = $_.purpose
-            }
-        })
-        executable = "tools/fastvep/fastvep.exe"
-        sizeBytes = (Get-Item -LiteralPath (Join-Path $bundleRoot "tools\fastvep\fastvep.exe")).Length
-        sha256 = $fastVepHash
-        license = $pin.license
-    }
-    files = $manifestFiles
-}
-$manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $bundleRoot "bundle-manifest.json") -Encoding utf8
 
 $zipPath = "$bundleRoot.zip"
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }

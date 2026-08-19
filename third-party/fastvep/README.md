@@ -11,4 +11,4 @@ the packaged release.
 Packaging verifies the exact source history and lockfile, runs the locked test
 suite, builds the release binary, and checks its recorded size and SHA-256. The
 maintenance process is documented in
-[`docs/FASTVEP_FORK.md`](../../docs/FASTVEP_FORK.md).
+[`docs/fastvep-maintenance.md`](../../docs/fastvep-maintenance.md).

@@ -1,4 +1,4 @@
-# Computational Evidence Display Policy
+# How AnnoCAT displays prediction evidence
 
 Status: Active policy; implemented rules are tested, and unresolved score identities remain neutral  
 Last updated: 2026-08-17  

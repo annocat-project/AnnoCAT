@@ -20,7 +20,7 @@ or repair alleles.
 |---|---|
 | **Standard** | Core, ClinVar, dbSNP, gnomAD exomes, PhyloP, and REVEL |
 | **Comprehensive** | Core, dbNSFP, ClinVar, dbSNP, gnomAD genomes, CADD, PhyloP, and SpliceAI |
-| **Core + online annotations** | Core annotation with FAVOR available after the result opens |
+| **Core annotation** | Core annotation with FAVOR available after the result opens |
 | **Custom** | The installed sources selected for this run |
 
 Core annotation uses the pinned GRCh38 reference, Ensembl transcript data, and

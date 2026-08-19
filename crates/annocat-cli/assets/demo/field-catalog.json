@@ -1,0 +1,1392 @@
+{
+  "alignmentGroups": [],
+  "coreCategorical": {
+    "consequence": {
+      "countBasis": "variantAlleles",
+      "missingCount": 1655,
+      "observedValueCounts": [
+        {
+          "count": 40622,
+          "value": "3_prime_UTR_variant"
+        },
+        {
+          "count": 5330,
+          "value": "5_prime_UTR_variant"
+        },
+        {
+          "count": 3,
+          "value": "coding_sequence_variant"
+        },
+        {
+          "count": 4,
+          "value": "coding_transcript_variant"
+        },
+        {
+          "count": 158963,
+          "value": "downstream_gene_variant"
+        },
+        {
+          "count": 121,
+          "value": "frameshift_variant"
+        },
+        {
+          "count": 165,
+          "value": "inframe_deletion"
+        },
+        {
+          "count": 150,
+          "value": "inframe_insertion"
+        },
+        {
+          "count": 871448,
+          "value": "intergenic_variant"
+        },
+        {
+          "count": 2730428,
+          "value": "intron_variant"
+        },
+        {
+          "count": 9888,
+          "value": "missense_variant"
+        },
+        {
+          "count": 23677,
+          "value": "NMD_transcript_variant"
+        },
+        {
+          "count": 64004,
+          "value": "non_coding_transcript_exon_variant"
+        },
+        {
+          "count": 1152750,
+          "value": "non_coding_transcript_variant"
+        },
+        {
+          "count": 147,
+          "value": "splice_acceptor_variant"
+        },
+        {
+          "count": 213,
+          "value": "splice_donor_5th_base_variant"
+        },
+        {
+          "count": 682,
+          "value": "splice_donor_region_variant"
+        },
+        {
+          "count": 212,
+          "value": "splice_donor_variant"
+        },
+        {
+          "count": 4953,
+          "value": "splice_polypyrimidine_tract_variant"
+        },
+        {
+          "count": 3707,
+          "value": "splice_region_variant"
+        },
+        {
+          "count": 13,
+          "value": "start_lost"
+        },
+        {
+          "count": 72,
+          "value": "stop_gained"
+        },
+        {
+          "count": 26,
+          "value": "stop_lost"
+        },
+        {
+          "count": 13,
+          "value": "stop_retained_variant"
+        },
+        {
+          "count": 10979,
+          "value": "synonymous_variant"
+        },
+        {
+          "count": 201380,
+          "value": "upstream_gene_variant"
+        }
+      ]
+    },
+    "filter": {
+      "countBasis": "variantAlleles",
+      "missingCount": 26184,
+      "observedValueCounts": [
+        {
+          "count": 4069427,
+          "value": "PASS"
+        }
+      ]
+    },
+    "impact": {
+      "countBasis": "variantAlleles",
+      "missingCount": 1655,
+      "observedValueCounts": [
+        {
+          "count": 588,
+          "value": "HIGH"
+        },
+        {
+          "count": 18160,
+          "value": "LOW"
+        },
+        {
+          "count": 10203,
+          "value": "MODERATE"
+        },
+        {
+          "count": 4065005,
+          "value": "MODIFIER"
+        }
+      ]
+    },
+    "zygosity": {
+      "countBasis": "variantAlleles",
+      "missingCount": 0,
+      "observedValueCounts": [
+        {
+          "count": 2538793,
+          "value": "Heterozygous"
+        },
+        {
+          "count": 1556817,
+          "value": "Homozygous alternate"
+        },
+        {
+          "count": 1,
+          "value": "Other alternate"
+        }
+      ]
+    }
+  },
+  "fields": [
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "phred",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4063510,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "cadd",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "raw",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4063510,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "cadd",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "afEsp",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 12411,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "afExac",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 11427,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "afTgp",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 35911,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "phenotypes",
+      "observedTypes": [
+        "json"
+      ],
+      "occurrences": 15353,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "json"
+    },
+    {
+      "biologicalScope": "allele",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4055182,
+        "observedValueCounts": [
+          {
+            "count": 146,
+            "value": "criteria_provided,_conflicting_classifications"
+          },
+          {
+            "count": 22973,
+            "value": "criteria_provided,_multiple_submitters,_no_conflicts"
+          },
+          {
+            "count": 15757,
+            "value": "criteria_provided,_single_submitter"
+          },
+          {
+            "count": 1199,
+            "value": "no_assertion_criteria_provided"
+          },
+          {
+            "count": 40,
+            "value": "no_classification_for_the_single_variant"
+          },
+          {
+            "count": 57,
+            "value": "no_classification_provided"
+          },
+          {
+            "count": 257,
+            "value": "reviewed_by_expert_panel"
+          }
+        ],
+        "observedValues": [
+          "criteria_provided,_conflicting_classifications",
+          "criteria_provided,_multiple_submitters,_no_conflicts",
+          "criteria_provided,_single_submitter",
+          "no_assertion_criteria_provided",
+          "no_classification_for_the_single_variant",
+          "no_classification_provided",
+          "reviewed_by_expert_panel"
+        ],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "reviewStatus",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 40429,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "set",
+        "missingCount": 4055182,
+        "observedValueCounts": [
+          {
+            "count": 6,
+            "value": "Affects"
+          },
+          {
+            "count": 93,
+            "value": "association"
+          },
+          {
+            "count": 2,
+            "value": "association_not_found"
+          },
+          {
+            "count": 38331,
+            "value": "Benign"
+          },
+          {
+            "count": 757,
+            "value": "Benign/Likely_benign"
+          },
+          {
+            "count": 6,
+            "value": "confers_sensitivity"
+          },
+          {
+            "count": 151,
+            "value": "Conflicting_classifications_of_pathogenicity"
+          },
+          {
+            "count": 77,
+            "value": "drug_response"
+          },
+          {
+            "count": 1,
+            "value": "Established_risk_allele"
+          },
+          {
+            "count": 603,
+            "value": "Likely_benign"
+          },
+          {
+            "count": 1,
+            "value": "Likely_pathogenic"
+          },
+          {
+            "count": 6,
+            "value": "Likely_risk_allele"
+          },
+          {
+            "count": 40,
+            "value": "no_classification_for_the_single_variant"
+          },
+          {
+            "count": 57,
+            "value": "not_provided"
+          },
+          {
+            "count": 57,
+            "value": "other"
+          },
+          {
+            "count": 1,
+            "value": "Pathogenic"
+          },
+          {
+            "count": 15,
+            "value": "protective"
+          },
+          {
+            "count": 52,
+            "value": "risk_factor"
+          },
+          {
+            "count": 6,
+            "value": "Uncertain_risk_allele"
+          },
+          {
+            "count": 210,
+            "value": "Uncertain_significance"
+          }
+        ],
+        "observedValues": [
+          "Affects",
+          "association",
+          "association_not_found",
+          "Benign",
+          "Benign/Likely_benign",
+          "confers_sensitivity",
+          "Conflicting_classifications_of_pathogenicity",
+          "drug_response",
+          "Established_risk_allele",
+          "Likely_benign",
+          "Likely_pathogenic",
+          "Likely_risk_allele",
+          "no_classification_for_the_single_variant",
+          "not_provided",
+          "other",
+          "Pathogenic",
+          "protective",
+          "risk_factor",
+          "Uncertain_risk_allele",
+          "Uncertain_significance"
+        ],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "significance",
+      "observedTypes": [
+        "json"
+      ],
+      "occurrences": 40429,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "json"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "soAccession",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 44563,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4051048,
+        "observedValueCounts": [
+          {
+            "count": 1640,
+            "value": "Deletion"
+          },
+          {
+            "count": 1219,
+            "value": "Duplication"
+          },
+          {
+            "count": 448,
+            "value": "Insertion"
+          },
+          {
+            "count": 1068,
+            "value": "Microsatellite"
+          },
+          {
+            "count": 40188,
+            "value": "single_nucleotide_variant"
+          }
+        ],
+        "observedValues": [
+          "Deletion",
+          "Duplication",
+          "Insertion",
+          "Microsatellite",
+          "single_nucleotide_variant"
+        ],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "variantClass",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 44563,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "clinvar",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "GERP++_RS",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 10549,
+      "physicalScope": "allele",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "id",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 3712267,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "dbsnp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "afrAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4085098,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "allAc",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 4086518,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "allAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4085336,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "allAn",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 4086518,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "allHc",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 4086518,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "amrAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4084909,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "asjAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4083788,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "easAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4083673,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "faf95",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 4086518,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "faf99",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 4086518,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "filters",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 63830,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "finAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4083666,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "grpmaxAf",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 4079406,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "grpmaxPopulation",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 4079406,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "midAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4083347,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "nfeAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4085002,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "remainingAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4084434,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "sasAf",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 4084076,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "gnomad-genomes",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "allele",
+      "fieldPath": "value",
+      "observedTypes": [
+        "integer",
+        "number"
+      ],
+      "occurrences": 4042406,
+      "physicalScope": "allele",
+      "resolutionPolicy": "direct",
+      "scope": "allele",
+      "sourceId": "phylop",
+      "storageEncoding": "scalar",
+      "valueType": "mixed"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "APPRIS",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8564,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4087277,
+        "observedValueCounts": [
+          {
+            "count": 238,
+            "value": "A"
+          },
+          {
+            "count": 7926,
+            "value": "B"
+          },
+          {
+            "count": 170,
+            "value": "P"
+          }
+        ],
+        "observedValues": [],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "AlphaMissense_pred",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8334,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "AlphaMissense_score",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8334,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "Ensembl_proteinid",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "Ensembl_transcriptid",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "GENCODE_basic",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8755,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "HGVSc_VEP",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "HGVSp_VEP",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8791,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "MutPred_AAchange",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "MutPred_protID",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4088598,
+        "observedValueCounts": [
+          {
+            "count": 5648,
+            "value": "B"
+          },
+          {
+            "count": 762,
+            "value": "D"
+          },
+          {
+            "count": 603,
+            "value": "P"
+          }
+        ],
+        "observedValues": [],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "Polyphen2_HDIV_pred",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7013,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "Polyphen2_HDIV_score",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7013,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4087721,
+        "observedValueCounts": [
+          {
+            "count": 213,
+            "value": "D"
+          },
+          {
+            "count": 7677,
+            "value": "T"
+          }
+        ],
+        "observedValues": [],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "PrimateAI_pred",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7890,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "PrimateAI_score",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7890,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "REVEL_score",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7497,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "categorical": {
+        "countBasis": "variantAlleles",
+        "matchMode": "scalar",
+        "missingCount": 4088184,
+        "observedValueCounts": [
+          {
+            "count": 1248,
+            "value": "D"
+          },
+          {
+            "count": 6179,
+            "value": "T"
+          }
+        ],
+        "observedValues": [],
+        "observedValuesComplete": true
+      },
+      "fieldPath": "SIFT_pred",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7427,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "SIFT_score",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7427,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "TSL",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 7658,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "Uniprot_acc",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8523,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "Uniprot_entry",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8523,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "VEP_canonical",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 6996,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "aaalt",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8791,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "aapos",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8805,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "transcript",
+      "fieldPath": "aaref",
+      "observedTypes": [
+        "string"
+      ],
+      "occurrences": 8791,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "dbnsfp",
+      "storageEncoding": "scalar",
+      "valueType": "string"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dpAg",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dpAl",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dpDg",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dpDl",
+      "observedTypes": [
+        "integer"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "integer"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dsAg",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dsAl",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dsDg",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    },
+    {
+      "biologicalScope": "gene",
+      "fieldPath": "dsDl",
+      "observedTypes": [
+        "number"
+      ],
+      "occurrences": 1205048,
+      "physicalScope": "selected",
+      "rawStorageEncoding": "recordList",
+      "resolutionPolicy": "materializedSelected",
+      "scope": "selected",
+      "selectionOrigin": "report",
+      "sourceId": "spliceai",
+      "storageEncoding": "scalar",
+      "valueType": "number"
+    }
+  ],
+  "recordResolutionContracts": {
+    "dbnsfp": "dbnsfp-4.9a-record-resolution-v1",
+    "revel": "revel-transcript-record-resolution-v1",
+    "spliceai": "spliceai-gene-record-resolution-v1"
+  },
+  "schemaVersion": 2
+}

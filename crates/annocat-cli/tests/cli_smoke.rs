@@ -190,21 +190,21 @@ fn global_home_and_source_contract_outputs_are_discoverable() {
         assert!(!first[key].is_null(), "field catalog omitted {key}");
     }
 
-    let online = run(&[
+    let core = run(&[
         "--home",
         &home,
         "sources",
         "install",
         "--profile",
-        "online",
+        "core",
         "--dry-run",
         "--json",
     ]);
-    assert!(online.status.success());
-    let online =
-        serde_json::from_slice::<serde_json::Value>(&online.stdout).expect("install preview JSON");
-    assert_eq!(online["onlineServices"][0], "favor-variant-annotation");
-    assert!(online["availableDiskBytes"].as_u64().is_some());
+    assert!(core.status.success());
+    let core =
+        serde_json::from_slice::<serde_json::Value>(&core.stdout).expect("install preview JSON");
+    assert_eq!(core["onlineServices"][0], "favor-variant-annotation");
+    assert!(core["availableDiskBytes"].as_u64().is_some());
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn public_options_have_help_text() {
     let annotate = run(&["annotate", "--help"]);
     let annotate = String::from_utf8_lossy(&annotate.stdout);
     assert!(annotate.contains("Print one machine-readable JSON document"));
-    assert!(annotate.contains("possible values: standard, comprehensive, online"));
+    assert!(annotate.contains("possible values: standard, comprehensive, core"));
     assert!(annotate.contains("does not convert the assembly"));
     assert!(annotate.contains("Example:"));
 

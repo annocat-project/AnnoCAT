@@ -26,7 +26,7 @@ transcript changes evidence only when the source provides transcript-specific
 values. Allele-level evidence remains unchanged.
 
 Prediction colors and labels follow the
-[computational evidence display policy](computational-evidence-display-policy.md).
+[prediction evidence display rules](evidence-display.md).
 They organize evidence and do not classify a variant.
 
 ## Genes
@@ -43,8 +43,10 @@ visible so they can be corrected instead of being silently discarded.
 
 FAVOR annotations are requested only after you select **Get annotations**.
 AnnoCAT sends the requested GRCh38 allele identifiers to FAVOR and stores the
-returned fields with the result. Local evidence remains preferred when the same
-logical field is already available from an installed source.
+returned fields in a separate packaged Parquet file. The viewer queries that
+file with the local evidence without copying or linking either file. Local
+evidence remains preferred when the same logical field is already available
+from an installed source.
 
 ## Candidates, notes, and export
 

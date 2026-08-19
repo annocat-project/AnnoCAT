@@ -1535,9 +1535,6 @@ fn execute_recovery(
         && (expected_input != input_content_sha256
             || expected_execution != current_execution_contract)
     {
-        if let Some(directory) = prepared_provider.0.as_ref() {
-            let _ = fs::remove_dir_all(directory);
-        }
         return Err(
             "the input or annotation contract changed after this run was interrupted; restart the annotation from the original VCF"
                 .into(),
@@ -1588,10 +1585,7 @@ fn execute_recovery(
         }
         bindings
     } else {
-        let (provider_directory, bindings) = prepared_provider;
-        if let Some(directory) = provider_directory {
-            let _ = fs::remove_dir_all(directory);
-        }
+        let (_, bindings) = prepared_provider;
         bindings
     };
 
@@ -1725,7 +1719,7 @@ fn run_fastvep(
     baseline_records: u64,
     baseline_bytes: u64,
     total_records: u64,
-    prepared_provider: Option<(Option<PathBuf>, Vec<SourceBinding>)>,
+    prepared_provider: Option<(Vec<PathBuf>, Vec<SourceBinding>)>,
     diagnostic_profiling: bool,
 ) -> Result<
     (
@@ -1742,7 +1736,7 @@ fn run_fastvep(
         File::create(staging.join("fastvep.stdout.log")).map_err(|error| error.to_string())?;
     let stderr =
         File::create(staging.join("fastvep.stderr.log")).map_err(|error| error.to_string())?;
-    let (provider_directory, source_bindings) = match prepared_provider {
+    let (provider_directories, source_bindings) = match prepared_provider {
         Some(provider) => provider,
         None => compose_provider_set(resources, run_id, &request.source_ids)?,
     };
@@ -1779,7 +1773,7 @@ fn run_fastvep(
         let _ = fs::remove_file(&profile);
         command.arg("--profile-output").arg(profile);
     }
-    if let Some(directory) = provider_directory.as_ref() {
+    for directory in &provider_directories {
         command.arg("--sa-dir").arg(directory);
     }
     let child = command
@@ -1790,12 +1784,7 @@ fn run_fastvep(
     drop(command);
     let mut child = match child {
         Ok(child) => child,
-        Err(error) => {
-            if let Some(directory) = provider_directory.as_ref() {
-                let _ = fs::remove_dir_all(directory);
-            }
-            return Err(format!("cannot start fastVEP annotation: {error}"));
-        }
+        Err(error) => return Err(format!("cannot start fastVEP annotation: {error}")),
     };
     let fastvep_measurement =
         StageMeasurement::child(fastvep_started_at, diagnostic_profiling, &child);
@@ -1835,9 +1824,6 @@ fn run_fastvep(
         if CANCEL.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            if let Some(directory) = provider_directory.as_ref() {
-                let _ = fs::remove_dir_all(directory);
-            }
             discard_cancelled_staging(staging);
             let _ = feeder.join();
             return Err("cancelled".into());
@@ -1888,9 +1874,6 @@ fn run_fastvep(
     };
     if status.success() {
         set_phase("verifying", "Preparing fastVEP output checks");
-    }
-    if let Some(directory) = provider_directory.as_ref() {
-        let _ = fs::remove_dir_all(directory);
     }
     let input_summary = feeder
         .join()
@@ -2923,53 +2906,28 @@ fn source_root_matches_verified_release(
 
 fn compose_provider_set(
     resources: &Path,
-    run_id: &str,
+    _run_id: &str,
     source_ids: &[String],
-) -> Result<(Option<PathBuf>, Vec<SourceBinding>), String> {
+) -> Result<(Vec<PathBuf>, Vec<SourceBinding>), String> {
     if source_ids.is_empty() {
-        return Ok((None, Vec::new()));
+        return Ok((Vec::new(), Vec::new()));
     }
-    let root = resources.join(".run-providers").join(run_id);
-    if root.exists() {
-        fs::remove_dir_all(&root)
-            .map_err(|error| format!("cannot clear stale provider set: {error}"))?;
-    }
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("cannot create annotation provider set: {error}"))?;
-    let result = source_ids
+    let providers = source_ids
         .iter()
-        .map(|source_id| compose_source_provider(resources, &root, source_id))
-        .collect::<Result<Vec<_>, _>>();
-    match result {
-        Ok(bindings) => {
-            fs::write(
-                root.join("annocat-provider-set.json"),
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "schemaVersion": 1,
-                    "runId": run_id,
-                    "sources": bindings,
-                }))
-                .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| format!("cannot write provider-set manifest: {error}"))?;
-            Ok((Some(root), bindings))
-        }
-        Err(error) => {
-            let _ = fs::remove_dir_all(&root);
-            Err(error)
-        }
-    }
+        .map(|source_id| resolve_source_provider(resources, source_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (directories, bindings) = providers.into_iter().unzip();
+    Ok((directories, bindings))
 }
 
-fn compose_source_provider(
+fn resolve_source_provider(
     resources: &Path,
-    destination: &Path,
     source_id: &str,
-) -> Result<SourceBinding, String> {
+) -> Result<(PathBuf, SourceBinding), String> {
     let source_root = resolve_source_root(resources, source_id)?;
     let shard_manifest = source_root.join(format!("{source_id}.osa-shards.json"));
     if !shard_manifest.is_file() {
-        return compose_single_provider(&source_root, destination, source_id);
+        return resolve_single_provider(&source_root, source_id);
     }
     let manifest: ShardManifest = serde_json::from_slice(
         &fs::read(&shard_manifest)
@@ -2981,7 +2939,6 @@ fn compose_source_provider(
     }
     let entries = manifest.shards;
     let mut binding: Option<SourceBinding> = None;
-    let mut provider_shards = Vec::with_capacity(entries.len());
     for entry in entries {
         let relative = Path::new(&entry.file);
         if relative.is_absolute()
@@ -3024,24 +2981,15 @@ fn compose_source_provider(
                 entry.chromosome
             ));
         }
-        let destination_relative = PathBuf::from(source_id)
-            .join("shards")
-            .join(format!("chr{}", entry.chromosome))
-            .join(format.data_file_name());
-        let destination_osa = destination.join(&destination_relative);
-        fs::create_dir_all(destination_osa.parent().expect("provider shard has parent"))
-            .map_err(|error| format!("cannot create {source_id} provider directory: {error}"))?;
-        fs::hard_link(&osa, &destination_osa)
-            .map_err(|error| format!("cannot link verified {source_id} shard: {error}"))?;
         if let Some(index_name) = format.index_file_name() {
             let index = shard_directory.join(index_name);
-            fs::hard_link(&index, destination_osa.parent().unwrap().join(index_name))
-                .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+            if !index.is_file() {
+                return Err(format!(
+                    "{source_id} chromosome {} verified index is missing",
+                    entry.chromosome
+                ));
+            }
         }
-        provider_shards.push(serde_json::json!({
-            "chromosome": entry.chromosome,
-            "file": destination_relative.to_string_lossy().replace('\\', "/"),
-        }));
         match binding.as_mut() {
             Some(binding)
                 if binding.release != checkpoint.identity.release
@@ -3068,23 +3016,16 @@ fn compose_source_provider(
             }
         }
     }
-    fs::write(
-        destination.join(format!("{source_id}.osa-shards.json")),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schemaVersion": 1,
-            "shards": provider_shards,
-        }))
-        .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| format!("cannot write {source_id} provider manifest: {error}"))?;
-    binding.ok_or_else(|| format!("{source_id} provider has no verified shards"))
+    Ok((
+        source_root,
+        binding.ok_or_else(|| format!("{source_id} provider has no verified shards"))?,
+    ))
 }
 
-fn compose_single_provider(
+fn resolve_single_provider(
     source_root: &Path,
-    destination: &Path,
     source_id: &str,
-) -> Result<SourceBinding, String> {
+) -> Result<(PathBuf, SourceBinding), String> {
     let shard = source_root.join("shards").join("chrall");
     let checkpoint: super::preparation::PreparationCheckpoint = serde_json::from_slice(
         &fs::read(shard.join("verified.json"))
@@ -3100,24 +3041,28 @@ fn compose_single_provider(
     }
     let (format, builder_contract) = provider_cache_contract(&shard, &checkpoint, source_id)?;
     let osa = shard.join(format.data_file_name());
-    let destination_osa = destination.join(format!("{source_id}.{}", format.builder_argument()));
-    fs::hard_link(&osa, &destination_osa)
-        .map_err(|error| format!("cannot link verified {source_id} provider: {error}"))?;
+    if !osa.is_file() {
+        return Err(format!("{source_id} verified provider is missing"));
+    }
     if let Some(index_name) = format.index_file_name() {
         let index = shard.join(index_name);
-        fs::hard_link(&index, destination.join(format!("{source_id}.osa.idx")))
-            .map_err(|error| format!("cannot link verified {source_id} index: {error}"))?;
+        if !index.is_file() {
+            return Err(format!("{source_id} verified index is missing"));
+        }
     }
-    Ok(SourceBinding {
-        resource_id: source_id.into(),
-        release: checkpoint.identity.release,
-        assembly: checkpoint.identity.assembly,
-        selected_schema: checkpoint.identity.selected_schema,
-        cache_format: format.builder_argument().into(),
-        osa_schema_version: format.schema_version(),
-        cache_builder_contract: builder_contract,
-        chromosomes: vec!["all".into()],
-    })
+    Ok((
+        shard,
+        SourceBinding {
+            resource_id: source_id.into(),
+            release: checkpoint.identity.release,
+            assembly: checkpoint.identity.assembly,
+            selected_schema: checkpoint.identity.selected_schema,
+            cache_format: format.builder_argument().into(),
+            osa_schema_version: format.schema_version(),
+            cache_builder_contract: builder_contract,
+            chromosomes: vec!["all".into()],
+        },
+    ))
 }
 
 fn provider_cache_contract(
@@ -3501,7 +3446,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_set_hard_links_verified_source_without_copying_it() {
+    fn provider_set_uses_verified_source_without_copying_it() {
         let root = std::env::temp_dir().join(format!(
             "annocat-provider-set-{}-{}",
             std::process::id(),
@@ -3622,23 +3567,20 @@ mod tests {
             root.join("clinvar").join("20260715")
         );
 
-        let (directory, bindings) =
+        let (directories, bindings) =
             compose_provider_set(&root, "run-fixture", &["clinvar".into()]).unwrap();
-        let directory = directory.unwrap();
+        let directory = &directories[0];
         assert_eq!(bindings[0].release, "20260715");
         assert_eq!(bindings[0].chromosomes, ["all"]);
-        let provider = directory
-            .join("clinvar")
-            .join("shards")
-            .join("chrall")
-            .join("source.osa");
+        let provider = directory.join("shards").join("chrall").join("source.osa");
         assert!(provider.is_file());
         assert_eq!(fs::read(provider).unwrap(), b"osa fixture");
+        assert!(!root.join(".run-providers").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn provider_set_links_verified_osa2_without_an_index() {
+    fn provider_set_uses_verified_osa2_without_an_index() {
         let root = std::env::temp_dir().join(format!(
             "annocat-provider-set-osa2-{}-{}",
             std::process::id(),
@@ -3715,15 +3657,14 @@ mod tests {
         )
         .unwrap();
 
-        let (directory, bindings) =
+        let (directories, bindings) =
             compose_provider_set(&root, "run-osa2-fixture", &["phylop".into()]).unwrap();
-        let directory = directory.unwrap();
+        let directory = &directories[0];
         assert_eq!(bindings[0].cache_format, "osa2");
         assert_eq!(bindings[0].osa_schema_version, 2);
         assert_eq!(bindings[0].chromosomes.len(), chromosomes.len());
         assert!(
             directory
-                .join("phylop")
                 .join("shards")
                 .join("chr1")
                 .join("source.osa2")
@@ -3731,12 +3672,12 @@ mod tests {
         );
         assert!(
             !directory
-                .join("phylop")
                 .join("shards")
                 .join("chr1")
                 .join("source.osa.idx")
                 .exists()
         );
+        assert!(!root.join(".run-providers").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

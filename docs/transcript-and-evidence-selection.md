@@ -1,4 +1,4 @@
-# Evidence scope and selected values
+# How AnnoCAT selects transcripts and evidence
 
 AnnoCAT preserves source evidence at the narrowest scope supported by that
 source. A table value is selected for convenience; it does not change the raw

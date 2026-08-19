@@ -68,10 +68,10 @@ pub(crate) struct AnnotateArgs {
     /// Input VCF or VCF.GZ. Repeat for a sequential batch.
     #[arg(short = 'i', long = "input", required = true, action = ArgAction::Append)]
     input: Vec<PathBuf>,
-    /// Use the standard, comprehensive, or online profile.
+    /// Use the standard, comprehensive, or core profile.
     #[arg(
         long,
-        value_parser = ["standard", "comprehensive", "online"]
+        value_parser = ["standard", "comprehensive", "core"]
     )]
     profile: Option<String>,
     /// Use this installed annotation source. Repeat to select more than one.
@@ -109,10 +109,10 @@ pub(crate) struct LaunchArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct StatusArgs {
-    /// Show readiness for the standard, comprehensive, or online profile.
+    /// Show readiness for the standard, comprehensive, or core profile.
     #[arg(
         long,
-        value_parser = ["standard", "comprehensive", "online"]
+        value_parser = ["standard", "comprehensive", "core"]
     )]
     profile: Option<String>,
     /// Print the complete readiness state as JSON.
@@ -176,7 +176,7 @@ pub(crate) enum SourcesCommand {
         /// Show only sources in this profile.
         #[arg(
             long,
-            value_parser = ["standard", "comprehensive", "online"]
+            value_parser = ["standard", "comprehensive", "core"]
         )]
         profile: Option<String>,
         /// Show only installed sources.
@@ -222,10 +222,10 @@ pub(crate) enum SourcesCommand {
         /// One or more annotation source IDs.
         #[arg(value_name = "SOURCE_ID", action = ArgAction::Append)]
         source_ids: Vec<String>,
-        /// Install all data in the standard, comprehensive, or online profile.
+        /// Install all data in the standard, comprehensive, or core profile.
         #[arg(
             long,
-            value_parser = ["standard", "comprehensive", "online"]
+            value_parser = ["standard", "comprehensive", "core"]
         )]
         profile: Option<String>,
         /// Keep the recommended fields or all available fields.
@@ -451,9 +451,9 @@ fn public_profile(value: &str) -> Result<&'static str, String> {
     match value {
         "standard" => Ok("standard"),
         "comprehensive" => Ok("wgs"),
-        "online" => Ok("online"),
+        "core" => Ok("online"),
         _ => Err(format!(
-            "profile '{value}' does not exist; use standard, comprehensive, or online"
+            "profile '{value}' does not exist; use standard, comprehensive, or core"
         )),
     }
 }
@@ -533,7 +533,7 @@ fn annotate(args: AnnotateArgs) -> Result<i32, String> {
         for path in created {
             println!("Created AnnoCAT result: {}", path.display());
         }
-        if profile == Some("online") {
+        if profile == Some("core") {
             println!("Online annotations can be added later in the result viewer.");
         }
     }
@@ -1485,7 +1485,7 @@ fn resolve_install_request(
             return Err("--field and --field-set cannot be used with --profile".into());
         }
         let sources = profile_source_ids(profile)?;
-        let services = if profile == "online" {
+        let services = if profile == "core" {
             vec![favor::SERVICE_ID.into()]
         } else {
             Vec::new()
@@ -2072,7 +2072,7 @@ mod tests {
     fn public_profiles_map_to_catalog_profiles() {
         assert_eq!(public_profile("standard").unwrap(), "standard");
         assert_eq!(public_profile("comprehensive").unwrap(), "wgs");
-        assert_eq!(public_profile("online").unwrap(), "online");
+        assert_eq!(public_profile("core").unwrap(), "online");
         assert!(public_profile("custom").is_err());
     }
 }

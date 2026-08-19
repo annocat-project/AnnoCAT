@@ -18,9 +18,7 @@ pub const STATUS_FILE: &str = "favor-status.parquet";
 pub const FIELD_CATALOG_FILE: &str = "favor-field-catalog.json";
 pub const PROVENANCE_FILE: &str = "favor-provenance.json";
 
-const QUERY_DIRECTORY: &str = "query-evidence";
 const QUERY_CATALOG_FILE: &str = "query-field-catalog.json";
-pub const QUERY_GENE_EVIDENCE_FILE: &str = "query-gene-evidence.parquet";
 const REQUEST_CHUNK: usize = 1_000;
 const MAX_RESPONSE_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -443,15 +441,7 @@ pub fn status(run_directory: &Path, enabled: bool) -> Result<Value, String> {
 }
 
 pub fn effective_evidence(canonical: &Path) -> PathBuf {
-    let Some(run_directory) = canonical.parent() else {
-        return canonical.to_path_buf();
-    };
-    let query = run_directory.join(QUERY_DIRECTORY);
-    if query.join("canonical.parquet").is_file() {
-        query.join("*.parquet")
-    } else {
-        canonical.to_path_buf()
-    }
+    canonical.to_path_buf()
 }
 
 pub fn effective_catalog(canonical: &Path) -> PathBuf {
@@ -487,52 +477,12 @@ pub fn prepare_query_assets_with_gene(
     let favor_evidence = run_directory.join(EVIDENCE_FILE);
     let favor_catalog = run_directory.join(FIELD_CATALOG_FILE);
     let has_favor = favor_evidence.is_file() && favor_catalog.is_file();
-    let query_directory = run_directory.join(QUERY_DIRECTORY);
-    if has_favor {
-        fs::create_dir_all(&query_directory)
-            .map_err(|error| format!("cannot create FAVOR query directory: {error}"))?;
-        publish_hard_link(
-            canonical_evidence,
-            &query_directory.join("canonical.parquet"),
-        )?;
-        publish_hard_link(&favor_evidence, &query_directory.join("favor.parquet"))?;
-    } else {
-        for stale in [
-            query_directory.join("canonical.parquet"),
-            query_directory.join("favor.parquet"),
-        ] {
-            if stale.is_file() {
-                fs::remove_file(stale)
-                    .map_err(|error| format!("cannot remove stale query evidence: {error}"))?;
-            }
-        }
-    }
-    let legacy_candidates = query_directory.join("phenotype-candidates.parquet");
-    if legacy_candidates.is_file() {
-        fs::remove_file(legacy_candidates).map_err(|error| {
-            format!("cannot remove legacy phenotype candidate evidence: {error}")
-        })?;
-    }
-    let gene_catalog = if let Some((gene_evidence, gene_catalog)) = gene_assets {
-        publish_hard_link(gene_evidence, &run_directory.join(QUERY_GENE_EVIDENCE_FILE))?;
-        Some(gene_catalog)
-    } else {
-        let stale = run_directory.join(QUERY_GENE_EVIDENCE_FILE);
-        if stale.is_file() {
-            fs::remove_file(stale)
-                .map_err(|error| format!("cannot remove stale phenotype evidence: {error}"))?;
-        }
-        None
-    };
+    let gene_catalog = gene_assets.map(|(_, gene_catalog)| gene_catalog);
     if !has_favor && gene_catalog.is_none() {
         let stale = run_directory.join(QUERY_CATALOG_FILE);
         if stale.is_file() {
             fs::remove_file(stale)
                 .map_err(|error| format!("cannot remove stale query catalog: {error}"))?;
-        }
-        if query_directory.is_dir() {
-            fs::remove_dir(&query_directory)
-                .map_err(|error| format!("cannot remove empty query directory: {error}"))?;
         }
         return Ok(());
     }
@@ -1497,34 +1447,6 @@ fn publish_table(connection: &Connection, table: &str, destination: &Path) -> Re
     Ok(())
 }
 
-fn publish_hard_link(source: &Path, destination: &Path) -> Result<(), String> {
-    if same_file_version(source, destination) {
-        return Ok(());
-    }
-    let temporary = destination.with_extension("parquet.partial");
-    let _ = fs::remove_file(&temporary);
-    fs::hard_link(source, &temporary).map_err(|error| {
-        format!(
-            "cannot link FAVOR query evidence {}: {error}",
-            source.display()
-        )
-    })?;
-    if let Err(error) = super::library_metadata::publish_atomic_file(&temporary, destination) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn same_file_version(source: &Path, destination: &Path) -> bool {
-    let (Ok(source), Ok(destination)) = (fs::metadata(source), fs::metadata(destination)) else {
-        return false;
-    };
-    source.len() == destination.len()
-        && source.modified().ok().is_some()
-        && source.modified().ok() == destination.modified().ok()
-}
-
 fn merge_query_catalogs(
     canonical: &Path,
     favor: Option<&Path>,
@@ -1569,7 +1491,11 @@ fn merge_query_catalogs(
                 .iter()
                 .cloned(),
         );
-        canonical_value["geneEvidenceFile"] = Value::String(QUERY_GENE_EVIDENCE_FILE.into());
+        let evidence_file = gene_value["geneEvidenceFile"]
+            .as_str()
+            .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
+            .ok_or("phenotype field catalog has an invalid gene evidence file")?;
+        canonical_value["geneEvidenceFile"] = Value::String(evidence_file.into());
     } else if let Some(object) = canonical_value.as_object_mut() {
         object.remove("geneEvidenceFile");
     }
@@ -1957,6 +1883,7 @@ mod tests {
         fs::write(
             &phenotype,
             serde_json::to_vec(&json!({
+                "geneEvidenceFile": "phenotype-gene-evidence.parquet",
                 "fields": [
                     {"sourceId": "hpo", "fieldPath": "phenotypeRelevance", "storageRelation": "geneEvidence"},
                     {"sourceId": "hpo", "fieldPath": "selectedConditionMatches", "storageRelation": "geneEvidence"}
@@ -1982,7 +1909,10 @@ mod tests {
                 .iter()
                 .all(|field| field["fieldPath"] != "legacyConditionMatches")
         );
-        assert_eq!(catalog["geneEvidenceFile"], QUERY_GENE_EVIDENCE_FILE);
+        assert_eq!(
+            catalog["geneEvidenceFile"],
+            "phenotype-gene-evidence.parquet"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2015,6 +1945,7 @@ mod tests {
         fs::write(
             &gene_catalog,
             serde_json::to_vec(&json!({
+                "geneEvidenceFile": "gene-evidence.parquet",
                 "fields": [{
                     "sourceId": "hpo",
                     "fieldPath": "geneMatch",
@@ -2033,19 +1964,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(effective_evidence(&canonical_evidence), canonical_evidence);
-        assert!(
-            !root
-                .join(QUERY_DIRECTORY)
-                .join("canonical.parquet")
-                .exists()
-        );
-        assert!(root.join(QUERY_GENE_EVIDENCE_FILE).is_file());
+        assert_eq!(fs::read(&gene_evidence).unwrap(), b"genes");
         assert!(root.join(QUERY_CATALOG_FILE).is_file());
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(root.join(QUERY_CATALOG_FILE)).unwrap()).unwrap();
+        assert_eq!(catalog["geneEvidenceFile"], "gene-evidence.parquet");
 
         prepare_query_assets_with_gene(&canonical_evidence, &canonical_catalog, None).unwrap();
-        assert!(!root.join(QUERY_GENE_EVIDENCE_FILE).exists());
         assert!(!root.join(QUERY_CATALOG_FILE).exists());
-        assert!(!root.join(QUERY_DIRECTORY).exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

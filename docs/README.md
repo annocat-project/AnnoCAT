@@ -11,8 +11,8 @@
 
 ## Technical contracts
 
-- [Evidence scope and selected values](evidence-resolution.md)
-- [Computational evidence display policy](computational-evidence-display-policy.md)
-- [Annotation result correctness validation](annotation-result-correctness-validation.md)
+- [How AnnoCAT selects transcripts and evidence](transcript-and-evidence-selection.md)
+- [How AnnoCAT displays prediction evidence](evidence-display.md)
+- [Validate annotation results](annotation-validation.md)
 - [Result import security](result-import-security.md)
-- [fastVEP fork maintenance](FASTVEP_FORK.md)
+- [Maintain AnnoCAT's fastVEP build](fastvep-maintenance.md)

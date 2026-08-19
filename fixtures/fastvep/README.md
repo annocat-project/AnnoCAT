@@ -18,8 +18,10 @@ header.
 `ensembl-115-xy-mt.vcf` contains synthetic, reference-valid GRCh38 records on
 X, Y, MT, and chromosome 22. X includes PAR1 and non-PAR records. The MT
 records cover control, RNA, and coding regions. The chromosome 22 records cover
-MNVs, insertions, deletions, and mixed multiallelic records. Alleles used for
-HGVS concordance are on independently normalized lines, as recommended by
-Ensembl for multiallelic HGVS. Reference alleles come from the pinned Ensembl
-115 chromosome FASTA files. The archived Ensembl 115 VEP REST service is the
-consequence oracle; the records contain no sample data.
+MNVs, insertions, deletions, mixed multiallelic records, and the SELENOO
+selenocysteine substitution `ENST00000380903.7:c.2001A>C`
+(`ENSP00000370288.2:p.Sec667Cys`). Alleles used for HGVS concordance are on
+independently normalized lines, as recommended by Ensembl for multiallelic
+HGVS. Reference alleles come from the pinned Ensembl 115 chromosome FASTA
+files. The archived Ensembl 115 VEP REST service is the consequence oracle;
+the records contain no sample data.

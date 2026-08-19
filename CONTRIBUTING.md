@@ -32,7 +32,7 @@ node --test web/tests/*.test.mjs
 AnnoCAT builds the exact fastVEP revision in
 [`config/fastvep-pin.json`](config/fastvep-pin.json). Do not update the bundled
 engine by changing a binary alone. Follow
-[`docs/FASTVEP_FORK.md`](docs/FASTVEP_FORK.md) and update the pin, tests, and
+[`docs/fastvep-maintenance.md`](docs/fastvep-maintenance.md) and update the pin, tests, and
 artifact identity together.
 
 ## Pull requests

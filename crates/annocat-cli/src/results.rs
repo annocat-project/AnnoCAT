@@ -7249,6 +7249,10 @@ pub(crate) fn categorical_filter_values_json(
             return Err("this field has fixed choices and does not need value discovery".into());
         }
         let evidence = canonical_evidence_path(evidence);
+        let evidence_files = visible_evidence_files(&evidence)?;
+        let evidence_files = (evidence_files.len() > 1).then_some(evidence_files);
+        let (evidence_read, mut parameters) =
+            evidence_read_for_fields(&evidence, evidence_files.as_deref(), [field.index]);
         let kind = if field.value_type == "json" {
             FilterValueKind::Json
         } else {
@@ -7263,17 +7267,16 @@ pub(crate) fn categorical_filter_values_json(
         let values = if kind == FilterValueKind::Json {
             format!(
                 "SELECT category.value
-                 FROM read_parquet(?) ev,
+                 FROM {evidence_read} ev,
                  unnest(json_extract_string(coalesce({expression}, '[]'), '$[*]')) AS category(value)
                  WHERE {field_condition}"
             )
         } else {
             format!(
-                "SELECT {expression} AS value FROM read_parquet(?) ev
+                "SELECT {expression} AS value FROM {evidence_read} ev
                  WHERE {field_condition}"
             )
         };
-        let mut parameters = vec![evidence.to_string_lossy().into_owned().into()];
         append_evidence_field_parameters(&mut parameters, &field, &evidence)?;
         (
             format!(
@@ -7504,6 +7507,15 @@ fn query_projection_source(
         return gene_evidence_path(catalog)?
             .ok_or_else(|| "gene match evidence is not ready".into());
     }
+    if field.source_id == crate::favor::SOURCE_ID {
+        let favor = canonical_evidence_path(evidence)
+            .parent()
+            .ok_or("result evidence has no directory")?
+            .join(crate::favor::EVIDENCE_FILE);
+        if favor.is_file() {
+            return Ok(favor);
+        }
+    }
     Ok(evidence.to_path_buf())
 }
 
@@ -7527,7 +7539,17 @@ fn visible_evidence_files(evidence: &Path) -> Result<Vec<PathBuf>, String> {
             })
             .collect::<Vec<_>>()
     } else {
-        vec![evidence.to_path_buf()]
+        let mut files = vec![evidence.to_path_buf()];
+        if name == "evidence.parquet"
+            && let Some(directory) = evidence.parent()
+        {
+            let favor_evidence = directory.join(crate::favor::EVIDENCE_FILE);
+            let favor_catalog = directory.join(crate::favor::FIELD_CATALOG_FILE);
+            if favor_evidence.is_file() && favor_catalog.is_file() {
+                files.push(favor_evidence);
+            }
+        }
+        files
     };
     files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
     if files.is_empty() || files.iter().any(|path| !path.is_file()) {
@@ -7830,10 +7852,7 @@ fn request_query_projection_fields(
     Ok((!fields.is_empty()).then_some(fields))
 }
 
-fn request_requires_query_projection(
-    catalog: &Path,
-    request: &PageRequest,
-) -> Result<bool, String> {
+fn required_query_projection_indices(request: &PageRequest) -> Vec<usize> {
     let mut indices = request
         .evidence_filters
         .iter()
@@ -7852,12 +7871,28 @@ fn request_requires_query_projection(
     }));
     indices.sort_unstable();
     indices.dedup();
+    indices
+}
+
+fn required_query_projection_fields(
+    catalog: &Path,
+    request: &PageRequest,
+) -> Result<Vec<SelectedEvidenceColumn>, String> {
+    let indices = required_query_projection_indices(request);
     if indices.is_empty() {
-        return Ok(false);
+        return Ok(Vec::new());
     }
     Ok(selected_evidence_columns(catalog, &indices)?
-        .iter()
-        .any(query_projection_field_is_eligible))
+        .into_iter()
+        .filter(query_projection_field_is_eligible)
+        .collect())
+}
+
+fn request_requires_query_projection(
+    catalog: &Path,
+    request: &PageRequest,
+) -> Result<bool, String> {
+    Ok(!required_query_projection_fields(catalog, request)?.is_empty())
 }
 
 pub fn query_projection_ready(
@@ -7868,12 +7903,10 @@ pub fn query_projection_ready(
     let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
         return Ok(true);
     };
-    if !request_requires_query_projection(catalog, request)? {
+    let fields = required_query_projection_fields(catalog, request)?;
+    if fields.is_empty() {
         return Ok(true);
     }
-    let Some(fields) = request_query_projection_fields(catalog, request)? else {
-        return Ok(true);
-    };
     Ok(available_query_projection(evidence, catalog, &fields).is_some())
 }
 
@@ -7886,6 +7919,7 @@ fn with_query_evidence<T>(
     let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
         return operation(evidence, None);
     };
+    let direct_files = visible_evidence_files(evidence)?;
     let projection = request_query_projection_fields(catalog, request)
         .ok()
         .flatten()
@@ -7902,13 +7936,17 @@ fn with_query_evidence<T>(
             })
         });
     let Some(projection) = projection else {
-        return operation(Some(evidence), None);
+        return operation(
+            Some(evidence),
+            (direct_files.len() > 1).then_some(direct_files.as_slice()),
+        );
     };
-    with_projection_fallback(evidence, &projection, operation)
+    with_projection_fallback(evidence, &direct_files, &projection, operation)
 }
 
 fn with_projection_fallback<T>(
     evidence: &Path,
+    direct_files: &[PathBuf],
     projection: &[PathBuf],
     mut operation: impl FnMut(Option<&Path>, Option<&[PathBuf]>) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -7917,7 +7955,10 @@ fn with_projection_fallback<T>(
         .ok_or("query projection has no field files")?;
     match operation(Some(marker), Some(projection)) {
         Ok(value) => Ok(value),
-        Err(_) => match operation(Some(evidence), None) {
+        Err(_) => match operation(
+            Some(evidence),
+            (direct_files.len() > 1).then_some(direct_files),
+        ) {
             Ok(value) => {
                 remove_query_projection(projection);
                 Ok(value)
@@ -7942,10 +7983,24 @@ fn gene_evidence_path(catalog: &Path) -> Result<Option<PathBuf>, String> {
         .parent()
         .ok_or("field catalog has no directory")?
         .join(name);
-    if !path.is_file() {
-        return Err("phenotype gene evidence file is missing".into());
+    if path.is_file() {
+        return Ok(Some(path));
     }
-    Ok(Some(path))
+    let run_directory = catalog.parent().ok_or("field catalog has no directory")?;
+    let run_id = run_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("result directory has an invalid name")?;
+    let library_path = run_directory
+        .parent()
+        .ok_or("result directory has no parent")?
+        .join(".annocat-library")
+        .join(run_id)
+        .join(name);
+    if library_path.is_file() {
+        return Ok(Some(library_path));
+    }
+    Err("phenotype gene evidence file is missing".into())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -8804,23 +8859,14 @@ fn read_evidence_rows(
 }
 
 fn supplemental_evidence_rows(evidence: &Path, allele_id: &str) -> Result<Vec<Value>, String> {
-    let directory = evidence
-        .parent()
-        .ok_or("composite evidence has no directory")?;
-    let mut paths = fs::read_dir(directory)
-        .map_err(|error| format!("cannot inspect supplemental evidence: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+    let canonical = canonical_evidence_path(evidence);
+    let paths = visible_evidence_files(evidence)?
+        .into_iter()
         .filter(|path| {
-            path.extension().and_then(|extension| extension.to_str()) == Some("parquet")
+            path != &canonical
                 && path.file_name().and_then(|name| name.to_str()) != Some("canonical.parquet")
-                && !path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(".annocat-"))
         })
         .collect::<Vec<_>>();
-    paths.sort();
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let mut rows = Vec::new();
     for path in paths {
@@ -8936,8 +8982,15 @@ pub fn detail_json(
         .map_err(|error| format!("cannot read consequence details: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let evidence_rows =
-        read_evidence_rows(&connection, evidence_parquet, allele_id, &consequence_rows)?;
+    let mut evidence_rows = Vec::new();
+    for evidence in visible_evidence_files(evidence_parquet)? {
+        evidence_rows.extend(read_evidence_rows(
+            &connection,
+            &evidence,
+            allele_id,
+            &consequence_rows,
+        )?);
+    }
     serde_json::to_string(&detail_value(allele_id, consequence_rows, evidence_rows))
         .map_err(|error| error.to_string())
 }
@@ -8997,11 +9050,7 @@ pub fn complete_detail_json_at(
             record_number,
             alt_index,
         ) {
-            let supplemental = if is_composite_evidence(evidence) {
-                supplemental_evidence_rows(evidence, allele_id).ok()
-            } else {
-                Some(Vec::new())
-            };
+            let supplemental = supplemental_evidence_rows(evidence, allele_id).ok();
             if let Some(supplemental) = supplemental {
                 indexed.evidence.extend(supplemental);
                 apply_representative_override_to_variant(
@@ -13891,15 +13940,13 @@ mod tests {
         assert_eq!(indexed_detail["variant"]["alternateCount"], 1);
         assert_eq!(indexed_detail["consequences"].as_array().unwrap().len(), 1);
         assert_eq!(indexed_detail["evidence"].as_array().unwrap().len(), 8);
-        let query_evidence = root.join("query-evidence");
-        fs::create_dir(&query_evidence).unwrap();
-        fs::copy(&evidence, query_evidence.join("canonical.parquet")).unwrap();
-        fs::copy(&evidence, query_evidence.join("favor.parquet")).unwrap();
+        fs::copy(&evidence, root.join(crate::favor::EVIDENCE_FILE)).unwrap();
+        fs::write(root.join(crate::favor::FIELD_CATALOG_FILE), b"{}").unwrap();
         let composite_detail: Value = serde_json::from_str(
             &complete_detail_json_at(
                 &variants,
                 Some(&consequences),
-                Some(&query_evidence.join("*.parquet")),
+                Some(&evidence),
                 None,
                 &id,
                 Some(record_number),
@@ -13968,7 +14015,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fallback_detail["consequences"].as_array().unwrap().len(), 1);
-        assert_eq!(fallback_detail["evidence"].as_array().unwrap().len(), 8);
+        assert_eq!(fallback_detail["evidence"].as_array().unwrap().len(), 16);
         fs::write(&detail_index, b"not a valid index").unwrap();
         assert!(
             complete_detail_json_at(
@@ -16583,6 +16630,12 @@ mod tests {
         .unwrap();
         assert!(available_query_projection(&evidence, &catalog, &projection_fields).is_some());
         assert!(query_projection_ready(Some(&evidence), Some(&catalog), &search_request).unwrap());
+        let sorted_request = PageRequest {
+            evidence_columns: vec![0, 2],
+            sort_evidence: Some(0),
+            ..PageRequest::default()
+        };
+        assert!(query_projection_ready(Some(&evidence), Some(&catalog), &sorted_request).unwrap());
         let projection_files = || {
             fs::read_dir(&root)
                 .unwrap()
@@ -16993,19 +17046,92 @@ mod tests {
         fs::write(&evidence, b"canonical").unwrap();
         fs::write(&first_projection, b"broken").unwrap();
         fs::write(&second_projection, b"broken").unwrap();
-        let result = with_projection_fallback(&evidence, &projection, |path, files| {
-            if files.is_some() {
-                assert_eq!(path, Some(first_projection.as_path()));
-                Err("projection read failed".into())
-            } else {
-                assert_eq!(path, Some(evidence.as_path()));
-                Ok("canonical")
-            }
-        })
-        .unwrap();
+        let direct_files = vec![evidence.clone()];
+        let result =
+            with_projection_fallback(&evidence, &direct_files, &projection, |path, files| {
+                if files.is_some() {
+                    assert_eq!(path, Some(first_projection.as_path()));
+                    Err("projection read failed".into())
+                } else {
+                    assert_eq!(path, Some(evidence.as_path()));
+                    Ok("canonical")
+                }
+            })
+            .unwrap();
         assert_eq!(result, "canonical");
         assert!(!first_projection.exists());
         assert!(!second_projection.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_reads_published_favor_evidence_without_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-direct-favor-query-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let evidence = root.join("evidence.parquet");
+        let catalog = root.join("field-catalog.json");
+        fs::write(&evidence, b"canonical").unwrap();
+        fs::write(
+            &catalog,
+            br#"{"fields":[{"scope":"allele","sourceId":"favor-online","fieldPath":"gnomadAf","valueType":"number","resolutionPolicy":"providerSelected"}]}"#,
+        )
+        .unwrap();
+        fs::write(root.join(crate::favor::EVIDENCE_FILE), b"favor").unwrap();
+        fs::write(root.join(crate::favor::FIELD_CATALOG_FILE), b"{}").unwrap();
+
+        let field = selected_evidence_columns(&catalog, &[0]).unwrap().remove(0);
+        assert_eq!(
+            query_projection_source(&evidence, &catalog, &field).unwrap(),
+            root.join(crate::favor::EVIDENCE_FILE)
+        );
+
+        let count = with_query_evidence(
+            Some(&evidence),
+            Some(&catalog),
+            &PageRequest::default(),
+            |path, files| {
+                assert_eq!(path, Some(evidence.as_path()));
+                Ok(files.map_or(1, |files| files.len()))
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert!(!root.join("query-evidence").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gene_evidence_resolves_from_the_local_result_library() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-direct-gene-query-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run = root.join("run-1");
+        let library = root.join(".annocat-library").join("run-1");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&library).unwrap();
+        let catalog = run.join("query-field-catalog.json");
+        let evidence = library.join("phenotype-gene-evidence.test.parquet");
+        fs::write(
+            &catalog,
+            br#"{"geneEvidenceFile":"phenotype-gene-evidence.test.parquet"}"#,
+        )
+        .unwrap();
+        fs::write(&evidence, b"genes").unwrap();
+
+        assert_eq!(gene_evidence_path(&catalog).unwrap(), Some(evidence));
+        assert!(!run.join("query-gene-evidence.parquet").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -72,59 +72,6 @@ pub fn practical_resource_plan_json() -> String {
     .to_string()
 }
 
-#[derive(Debug, Clone)]
-pub struct DemoVariant {
-    pub chromosome: &'static str,
-    pub position: u64,
-    pub reference: &'static str,
-    pub alternate: &'static str,
-    pub gene: &'static str,
-    pub consequence: &'static str,
-    pub impact: &'static str,
-    pub clinvar: &'static str,
-    pub inheritance: &'static str,
-    pub score: f32,
-}
-
-pub const DEMO_VARIANTS: &[DemoVariant] = &[
-    DemoVariant {
-        chromosome: "1",
-        position: 101_001,
-        reference: "G",
-        alternate: "A",
-        gene: "DEMO1",
-        consequence: "missense_variant",
-        impact: "MODERATE",
-        clinvar: "Uncertain significance",
-        inheritance: "Autosomal dominant",
-        score: 0.82,
-    },
-    DemoVariant {
-        chromosome: "2",
-        position: 202_002,
-        reference: "C",
-        alternate: "T",
-        gene: "DEMO2",
-        consequence: "stop_gained",
-        impact: "HIGH",
-        clinvar: "Pathogenic",
-        inheritance: "Autosomal recessive",
-        score: 0.98,
-    },
-    DemoVariant {
-        chromosome: "X",
-        position: 303_003,
-        reference: "A",
-        alternate: "AT",
-        gene: "DEMO3",
-        consequence: "frameshift_variant",
-        impact: "HIGH",
-        clinvar: "Likely pathogenic",
-        inheritance: "X-linked",
-        score: 0.94,
-    },
-];
-
 pub fn sources_json() -> String {
     source_catalog::sources_json()
 }
@@ -135,14 +82,6 @@ pub fn profiles_json() -> String {
 
 pub fn evidence_calibrations_json() -> &'static str {
     source_catalog::evidence_calibrations_json()
-}
-
-pub fn demo_variants_json() -> String {
-    let rows = DEMO_VARIANTS.iter().map(|v| format!(
-        "{{\"chromosome\":\"{}\",\"position\":{},\"reference\":\"{}\",\"alternate\":\"{}\",\"gene\":\"{}\",\"consequence\":\"{}\",\"impact\":\"{}\",\"clinvar\":\"{}\",\"inheritance\":\"{}\",\"score\":{:.2}}}",
-        v.chromosome, v.position, v.reference, v.alternate, v.gene, v.consequence, v.impact, v.clinvar, v.inheritance, v.score
-    )).collect::<Vec<_>>().join(",");
-    format!("[{}]", rows)
 }
 
 #[cfg(test)]
@@ -221,15 +160,6 @@ mod tests {
             ["clinvar", "dbsnp", "gnomad", "phylop", "revel"]
         );
         assert!(!minimal.source_ids.iter().any(|id| id == "dbnsfp"));
-    }
-
-    #[test]
-    fn demo_data_is_explicitly_synthetic() {
-        assert!(
-            DEMO_VARIANTS
-                .iter()
-                .all(|variant| variant.gene.starts_with("DEMO"))
-        );
     }
 
     #[test]

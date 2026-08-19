@@ -62,7 +62,7 @@ jobs:
           fastvep="$RUNNER_TEMP/fastVEP/target/release/fastvep"
           cp "$RUNNER_TEMP/fastVEP/validation/human/vep_example_GRCh38.vcf" "$work/input.vcf"
           grep -v '^#' fixtures/fastvep/ensembl-115-xy-mt.vcf >> "$work/input.vcf"
-          test "$(grep -vc '^#' "$work/input.vcf")" -eq 196
+          test "$(grep -vc '^#' "$work/input.vcf")" -eq 197
           "$fastvep" annotate -i "$work/input.vcf" \
             --gff3 "Ensembl=$work/annotations.gff3" \
             --fasta "$work/reference.fa" --hgvs --symbol --canonical \

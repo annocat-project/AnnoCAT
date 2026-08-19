@@ -6,8 +6,8 @@
 
 AnnoCAT is a portable application for annotating and reviewing genomic variants.
 It accepts GRCh38 panel, exome, and whole-genome VCF files, adds gene and
-transcript consequences from fastVEP, and presents annotation evidence in a
-searchable local viewer.
+transcript consequences with its bundled annotation engine, and presents
+annotation evidence in a searchable local viewer.
 
 AnnoCAT can add clinical records, population frequencies, identifiers,
 prediction scores, splicing scores, and conservation measurements from installed
@@ -25,8 +25,9 @@ online annotations, and open external links.
 3. Double-click `launch-annocat.cmd`.
 4. Keep the terminal window open while AnnoCAT is running.
 
-The release contains AnnoCAT, fastVEP, and the required software libraries. It
-does not require Rust, Python, Node.js, Docker, or a separate database server.
+The release contains AnnoCAT, its internal annotation engine, and the required
+software libraries. It does not require Rust, Python, Node.js, Docker, or a
+separate database server.
 
 On first launch, select **Open results** to view an existing AnnoCAT result, or
 select **Set up annotation** to install the GRCh38 reference, transcript data,
@@ -50,7 +51,7 @@ creates a separate AnnoCAT result. AnnoCAT does not combine VCF files or samples
 |---|---|
 | **Standard** | Core annotation, ClinVar, dbSNP, gnomAD exomes, PhyloP, and REVEL |
 | **Comprehensive** | Core annotation, dbNSFP, ClinVar, dbSNP, gnomAD genomes, CADD, PhyloP, and SpliceAI |
-| **Core + online annotations** | Core annotation with requested FAVOR annotations |
+| **Core annotation** | Core annotation with requested FAVOR annotations |
 | **Custom** | A user-selected combination of installed sources |
 
 Use **Data sources** to install, configure, verify, update, or remove annotation

@@ -1,6 +1,5 @@
 use annocat_core::{
-    demo_variants_json, evidence_calibrations_json, practical_resource_plan_json, profiles_json,
-    sources_json,
+    evidence_calibrations_json, practical_resource_plan_json, profiles_json, sources_json,
 };
 use serde::Serialize;
 use std::env;
@@ -374,6 +373,7 @@ mod annotation_recovery;
 mod cache_contract;
 mod cli;
 mod csq;
+mod demo;
 mod detail_lookup;
 mod downloader;
 mod evidence_resolution;
@@ -408,6 +408,7 @@ pub(crate) fn terminal_log(component: &str, message: impl AsRef<str>) {
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/src/app.js");
+const COLUMN_SELECTION_JS: &str = include_str!("../../../web/src/app/column-selection.js");
 const FAVOR_ONLINE_JS: &str = include_str!("../../../web/src/app/favor-online.js");
 const PHENOTYPES_JS: &str = include_str!("../../../web/src/app/phenotypes.js");
 const RESULT_FILTERS_JS: &str = include_str!("../../../web/src/app/result-filters.js");
@@ -1867,6 +1868,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             "text/javascript; charset=utf-8",
             web_asset("src/app.js", APP_JS),
         ),
+        "/app/column-selection.js" => (
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            web_asset("src/app/column-selection.js", COLUMN_SELECTION_JS),
+        ),
         "/app/phenotypes.js" => (
             "200 OK",
             "text/javascript; charset=utf-8",
@@ -2017,7 +2023,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 format!("{{\"error\":\"{}\"}}", json_escape(&error)),
             ),
         },
-        "/api/demo/variants" => ("200 OK", "application/json", demo_variants_json()),
+        "/api/demo" => match portable_paths().and_then(|paths| demo::ensure(&paths.runs)) {
+            Ok(status) => ("200 OK", "application/json", serialize_json(&status)),
+            Err(error) => (
+                "500 Internal Server Error",
+                "application/json",
+                format!("{{\"error\":\"{}\"}}", json_escape(&error)),
+            ),
+        },
         "/api/annotations/status" => (
             "200 OK",
             "application/json",
@@ -3570,6 +3583,9 @@ fn completed_run_result(
     {
         return Err("invalid run identifier".into());
     }
+    if requested_id == demo::RUN_ID {
+        demo::ensure(runs_directory)?;
+    }
     let entries = std::fs::read_dir(runs_directory)
         .map_err(|error| format!("cannot inspect AnnoCAT results: {error}"))?;
     for entry in entries.flatten() {
@@ -4408,6 +4424,7 @@ mod profile_status_tests {
     fn web_app_source() -> String {
         [
             APP_JS,
+            COLUMN_SELECTION_JS,
             FAVOR_ONLINE_JS,
             PHENOTYPES_JS,
             RESULT_FILTERS_JS,
@@ -4423,6 +4440,11 @@ mod profile_status_tests {
         let server = include_str!("main.rs");
         assert!(INDEX_HTML.contains(r#"<script type="module" src="/app.js">"#));
         for (import, route, source) in [
+            (
+                "./app/column-selection.js",
+                r#""/app/column-selection.js""#,
+                COLUMN_SELECTION_JS,
+            ),
             (
                 "./app/favor-online.js",
                 r#""/app/favor-online.js""#,
@@ -5275,6 +5297,26 @@ mod profile_status_tests {
         assert!(!complete.exists());
         assert!(library_metadata::display_name(&root, "run-2").is_none());
         assert!(completed_runs_status(&root).unwrap().runs.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn demo_uses_normal_result_files_but_stays_out_of_result_library() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-hidden-demo-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        demo::ensure(&root).unwrap();
+        assert!(completed_runs(&root).unwrap().is_empty());
+        let result = completed_run_result(&root, demo::RUN_ID).unwrap();
+        assert_eq!(result.file_name().unwrap(), "variants.parquet");
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

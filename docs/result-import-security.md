@@ -34,4 +34,4 @@ loading and enforce bounded resources and returned rows.
 
 Format validation does not prove that annotations are correct. Scientific
 fidelity is covered by the
-[annotation result correctness contract](annotation-result-correctness-validation.md).
+[annotation validation checks](annotation-validation.md).

@@ -1,4 +1,4 @@
-# Annotation result correctness validation
+# Validate annotation results
 
 Status: Implemented for consequence concordance, supplementary-source cache
 parity, genotype preservation, selected evidence, and result projection
@@ -46,13 +46,17 @@ by AnnoCAT. It also builds a transcript cache from the pinned Ensembl 115 GFF3
 and GRCh38 FASTA, then requires cache-backed output to be byte-identical to
 direct-GFF output.
 
-The same 196-record corpus is submitted to the archived September 2025 Ensembl
+The same 197-record corpus is submitted to the archived September 2025 Ensembl
 REST endpoint, which reports release 115. It covers chromosomes 21, 22, X, Y,
 and MT; SNVs, MNVs, insertions, deletions, and mixed multiallelic records;
 coding, non-coding, UTR, intronic, splice, and intergenic effects; both strands;
-and mitochondrial start uncertainty.
+mitochondrial start uncertainty; and a public SELENOO selenocysteine
+substitution. For `ENST00000380903.7:c.2001A>C`, the oracle requires
+`missense_variant`, `MODERATE`, `U/C`, and
+`ENSP00000370288.2:p.Sec667Cys`.
 
-The current corpus contains 3,402 comparable allele-transcript identities. It
+The current corpus contains more than 3,400 comparable allele-transcript
+identities. It
 has no missing identities, extra identities, or mapped-field differences after
 two narrow input-contract rules are applied:
 
