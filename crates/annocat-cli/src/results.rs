@@ -7987,20 +7987,39 @@ fn gene_evidence_path(catalog: &Path) -> Result<Option<PathBuf>, String> {
         return Ok(Some(path));
     }
     let run_directory = catalog.parent().ok_or("field catalog has no directory")?;
-    let run_id = run_directory
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or("result directory has an invalid name")?;
+    let run_id = result_library_run_id(run_directory)?;
     let library_path = run_directory
         .parent()
         .ok_or("result directory has no parent")?
         .join(".annocat-library")
-        .join(run_id)
+        .join(&run_id)
         .join(name);
     if library_path.is_file() {
         return Ok(Some(library_path));
     }
     Err("phenotype gene evidence file is missing".into())
+}
+
+fn result_library_run_id(run_directory: &Path) -> Result<String, String> {
+    let manifest = run_directory.join("manifest.json");
+    if manifest.is_file() {
+        let value: Value = serde_json::from_slice(
+            &fs::read(&manifest)
+                .map_err(|error| format!("cannot read result manifest: {error}"))?,
+        )
+        .map_err(|error| format!("invalid result manifest: {error}"))?;
+        let run_id = value["runId"]
+            .as_str()
+            .ok_or("result manifest has no run ID")?;
+        super::library_metadata::validate_run_id(run_id)?;
+        return Ok(run_id.to_owned());
+    }
+    let run_id = run_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("result directory has an invalid name")?;
+    super::library_metadata::validate_run_id(run_id)?;
+    Ok(run_id.to_owned())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -17549,6 +17568,38 @@ mod tests {
 
         assert_eq!(gene_evidence_path(&catalog).unwrap(), Some(evidence));
         assert!(!run.join("query-gene-evidence.parquet").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gene_evidence_uses_manifest_run_id_for_a_named_result_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-named-gene-query-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let run = root.join("display-name--0123456789ab");
+        let library = root.join(".annocat-library").join("run-0123456789ab");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&library).unwrap();
+        fs::write(
+            run.join("manifest.json"),
+            br#"{"runId":"run-0123456789ab"}"#,
+        )
+        .unwrap();
+        let catalog = run.join("query-field-catalog.json");
+        let evidence = library.join("phenotype-gene-evidence.test.parquet");
+        fs::write(
+            &catalog,
+            br#"{"geneEvidenceFile":"phenotype-gene-evidence.test.parquet"}"#,
+        )
+        .unwrap();
+        fs::write(&evidence, b"genes").unwrap();
+
+        assert_eq!(gene_evidence_path(&catalog).unwrap(), Some(evidence));
         fs::remove_dir_all(root).unwrap();
     }
 }
