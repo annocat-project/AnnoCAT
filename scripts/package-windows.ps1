@@ -35,8 +35,11 @@ if (-not [string]::IsNullOrWhiteSpace($previousEncodedRustFlags)) {
     $releaseRustFlags += $previousEncodedRustFlags -split $rustFlagSeparator
 }
 $releaseRustFlags += @(
-    "--remap-path-prefix=$env:USERPROFILE=/build/source",
-    "--remap-path-prefix=$projectRoot=/build/source"
+    "--remap-path-prefix=B:\=/build/fastvep",
+    "--remap-path-prefix=C:\=/build/drive-c",
+    "--remap-path-prefix=D:\=/build/drive-d",
+    "-C",
+    "link-arg=/Brepro"
 )
 $env:CARGO_ENCODED_RUSTFLAGS = $releaseRustFlags -join $rustFlagSeparator
 
@@ -61,10 +64,21 @@ if ($lockHash -ne $pin.cargoLockSha256) {
 
 & (Join-Path $PSScriptRoot "test-fastvep-pin.ps1") -FastVepSource $fastVepRoot
 
-& cargo test --manifest-path (Join-Path $fastVepRoot "Cargo.toml") --workspace --locked
-if ($LASTEXITCODE -ne 0) { throw "fastVEP tests failed" }
-& cargo build --manifest-path (Join-Path $fastVepRoot "Cargo.toml") --release --locked -p fastvep-cli
-if ($LASTEXITCODE -ne 0) { throw "fastVEP release build failed" }
+$fastVepBuildDrive = "B:"
+$fastVepBuildRoot = "$fastVepBuildDrive\"
+if (Test-Path -LiteralPath $fastVepBuildRoot) {
+    throw "The deterministic fastVEP build drive is already in use: $fastVepBuildDrive"
+}
+& subst.exe $fastVepBuildDrive $fastVepRoot
+if ($LASTEXITCODE -ne 0) { throw "Could not mount the deterministic fastVEP build drive" }
+try {
+    & cargo test --manifest-path (Join-Path $fastVepBuildRoot "Cargo.toml") --workspace --locked
+    if ($LASTEXITCODE -ne 0) { throw "fastVEP tests failed" }
+    & cargo build --manifest-path (Join-Path $fastVepBuildRoot "Cargo.toml") --release --locked -p fastvep-cli
+    if ($LASTEXITCODE -ne 0) { throw "fastVEP release build failed" }
+} finally {
+    & subst.exe $fastVepBuildDrive /d
+}
 $builtFastVep = Join-Path $fastVepRoot "target\release\fastvep.exe"
 Assert-NoPrivateBuildPaths -Executable $builtFastVep
 $builtFastVepHash = (Get-FileHash -LiteralPath $builtFastVep -Algorithm SHA256).Hash.ToLowerInvariant()

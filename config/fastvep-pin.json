@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "repository": "https://github.com/annocat-project/fastVEP",
   "commit": "8b4a8114c71270872edc6fc04665f1e1b09a5fa2",
-  "branch": "codex/annotation-performance-instrumentation",
+  "branch": "master",
   "upstreamRepository": "https://github.com/Huang-lab/fastVEP",
   "upstreamCommit": "0e13c5bdb92f22a5f780cf314699f8402fb8383e",
   "upstreamVersion": "0.3.0",
@@ -198,8 +198,8 @@
   ],
   "windowsX86_64": {
     "filename": "fastvep.exe",
-    "sizeBytes": 7349760,
-    "sha256": "c0fbb789cbcdcd9f417cb8760de7801ee094bdbd4659db252d81701747f0d645",
+    "sizeBytes": 7352832,
+    "sha256": "af106cb5d2a251d1b9f6a370a9d5f6bdb3112839214376c118ac5e9fd69ef56e",
     "buildCommand": "cargo build --release --locked -p fastvep-cli",
     "smokeTestStatus": "passed"
   },
