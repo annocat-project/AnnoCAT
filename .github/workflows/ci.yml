@@ -23,4 +23,4 @@ jobs:
           rustup toolchain install 1.94.1 --profile minimal
           rustup default 1.94.1
       - name: Test AnnoCAT
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
