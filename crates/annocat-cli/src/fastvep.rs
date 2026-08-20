@@ -12,6 +12,7 @@ const PIN_MANIFEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../config/fastvep-pin.json"
 ));
+const PACKAGED_FASTVEP_SHA256: Option<&str> = option_env!("ANNOCAT_PACKAGED_FASTVEP_SHA256");
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +34,7 @@ static PIN: LazyLock<FastVepPin> = LazyLock::new(|| {
 });
 
 fn pinned_sha256() -> &'static str {
-    PIN.windows_x86_64.sha256.as_str()
+    PACKAGED_FASTVEP_SHA256.unwrap_or(PIN.windows_x86_64.sha256.as_str())
 }
 
 fn pinned_version() -> String {

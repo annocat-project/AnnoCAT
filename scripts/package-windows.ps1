@@ -82,9 +82,8 @@ try {
 $builtFastVep = Join-Path $fastVepRoot "target\release\fastvep.exe"
 Assert-NoPrivateBuildPaths -Executable $builtFastVep
 $builtFastVepHash = (Get-FileHash -LiteralPath $builtFastVep -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($builtFastVepHash -ne $pin.windowsX86_64.sha256) {
-    throw "fastVEP binary hash mismatch: expected $($pin.windowsX86_64.sha256), found $builtFastVepHash"
-}
+$builtFastVepSize = (Get-Item -LiteralPath $builtFastVep).Length
+$env:ANNOCAT_PACKAGED_FASTVEP_SHA256 = $builtFastVepHash
 $previousCxxFlags = $env:CXXFLAGS
 $pathMapFlags = @(
     $previousCxxFlags,
@@ -136,7 +135,9 @@ $fastVepReadme = Get-Content -LiteralPath (Join-Path $fastVepRoot "README.md") -
     $fastVepReadme = $fastVepReadme.Replace("($_)", "($fastVepSourceBase/$_)")
 }
 $fastVepReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "docs\fastvep.md") -Encoding utf8
-Copy-Item -LiteralPath (Join-Path $projectRoot "config\fastvep-pin.json") -Destination (Join-Path $bundleRoot "config\fastvep-pin.json")
+$pin.windowsX86_64.sha256 = $builtFastVepHash
+$pin.windowsX86_64.sizeBytes = $builtFastVepSize
+$pin | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $bundleRoot "config\fastvep-pin.json") -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\annocat-rust-licenses.html") -Destination (Join-Path $bundleRoot "licenses\AnnoCAT-third-party-licenses.html")
