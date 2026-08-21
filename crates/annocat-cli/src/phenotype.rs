@@ -1059,15 +1059,20 @@ pub fn resolve_terms(
     let mut recognized = Vec::new();
     let mut ambiguous = Vec::new();
     let mut not_recognized = Vec::new();
+    let report = parquet
+        .map(super::results::report_gene_identities)
+        .transpose()?
+        .unwrap_or_default();
+    let gene_resolver = super::gene_identity::Resolver::new(resources, &report);
     for entry in request.entries {
         let entry = entry.trim().to_owned();
         if entry.is_empty() {
             continue;
         }
-        let mut matches = search_terms(resources, &entry, 100).unwrap_or_default();
-        matches.extend(crate::reactome::search(resources, &entry, 100).unwrap_or_default());
-        if let Some(parquet) = parquet {
-            matches.extend(search_gene_terms(resources, parquet, &entry, 100)?);
+        let mut matches = exact_gene_matches(&gene_resolver, &entry);
+        if matches.is_empty() {
+            matches = search_terms(resources, &entry, 100).unwrap_or_default();
+            matches.extend(crate::reactome::search(resources, &entry, 100).unwrap_or_default());
         }
         let mut matches = matches
             .into_iter()
@@ -1097,6 +1102,43 @@ fn exact_term_match(item: &TermSearchResult, entry: &str) -> bool {
         item.match_kind.as_str(),
         "identifier" | "externalIdentifier" | "label" | "synonym" | "geneIdentifier" | "geneSymbol"
     ) && (item.id.eq_ignore_ascii_case(entry) || item.matched_text.eq_ignore_ascii_case(entry))
+}
+
+fn exact_gene_matches(
+    resolver: &super::gene_identity::Resolver,
+    entry: &str,
+) -> Vec<TermSearchResult> {
+    let to_result = |matched: super::gene_identity::SearchMatch| TermSearchResult {
+        id: matched.gene.gene_id,
+        label: matched.gene.symbol,
+        term_type: "gene".into(),
+        matched_text: matched.matched_text,
+        match_kind: matched.match_kind.into(),
+        synonym_scope: None,
+        subtype_count: None,
+        gene_count: None,
+        synonyms: Vec::new(),
+    };
+    match resolver.resolve(entry) {
+        super::gene_identity::Resolution::Resolved(gene) => vec![TermSearchResult {
+            id: gene.gene_id,
+            label: gene.symbol,
+            term_type: "gene".into(),
+            matched_text: entry.to_owned(),
+            match_kind: "geneSymbol".into(),
+            synonym_scope: None,
+            subtype_count: None,
+            gene_count: None,
+            synonyms: Vec::new(),
+        }],
+        super::gene_identity::Resolution::Ambiguous => resolver
+            .search(entry, 100)
+            .into_iter()
+            .map(to_result)
+            .filter(|item| exact_term_match(item, entry))
+            .collect(),
+        super::gene_identity::Resolution::Unknown => Vec::new(),
+    }
 }
 
 pub fn search_gene_terms(
@@ -4682,6 +4724,20 @@ fn round(value: f64, places: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_pasted_gene_lists_use_one_exact_resolver() {
+        let report = (0..400)
+            .map(|index| (format!("GENE{index}"), format!("ENSG{index:011}")))
+            .collect::<Vec<_>>();
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        for (symbol, gene_id) in report {
+            let matches = exact_gene_matches(&resolver, &symbol);
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].label, symbol);
+            assert_eq!(matches[0].id, gene_id);
+        }
+    }
 
     #[test]
     fn pasted_gene_symbols_and_identifiers_are_exact_matches() {
