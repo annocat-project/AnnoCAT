@@ -7831,12 +7831,6 @@ fn available_query_projection(
         .then_some(paths)
 }
 
-fn remove_query_projection(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
-    }
-}
-
 fn request_query_projection_fields(
     catalog: &Path,
     request: &PageRequest,
@@ -7955,15 +7949,14 @@ fn with_projection_fallback<T>(
         .ok_or("query projection has no field files")?;
     match operation(Some(marker), Some(projection)) {
         Ok(value) => Ok(value),
-        Err(_) => match operation(
+        Err(projection_error) => match operation(
             Some(evidence),
             (direct_files.len() > 1).then_some(direct_files),
         ) {
-            Ok(value) => {
-                remove_query_projection(projection);
-                Ok(value)
-            }
-            Err(error) => Err(error),
+            Ok(value) => Ok(value),
+            Err(canonical_error) => Err(format!(
+                "projected query failed: {projection_error}; canonical query failed: {canonical_error}"
+            )),
         },
     }
 }
@@ -17465,7 +17458,7 @@ mod tests {
     }
 
     #[test]
-    fn query_projection_failure_retries_canonical_evidence() {
+    fn query_projection_failure_retries_canonical_without_deleting_projections() {
         let root = std::env::temp_dir().join(format!(
             "annocat-query-projection-fallback-{}-{}",
             std::process::id(),
@@ -17495,8 +17488,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result, "canonical");
-        assert!(!first_projection.exists());
-        assert!(!second_projection.exists());
+        assert!(first_projection.exists());
+        assert!(second_projection.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

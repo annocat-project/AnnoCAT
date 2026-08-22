@@ -1051,11 +1051,12 @@ pub fn resolve_terms(
     parquet: Option<&Path>,
     request: TermResolutionRequest,
 ) -> Result<TermResolutionResponse, String> {
-    if request.entries.len() > MAX_PROFILE_TERMS {
+    if request.entries.len() > MAX_PROFILE_GENES {
         return Err(format!(
-            "A pasted list can contain at most {MAX_PROFILE_TERMS} entries"
+            "A pasted gene list can contain at most {MAX_PROFILE_GENES} entries"
         ));
     }
+    let resolve_non_genes = request.entries.len() <= MAX_PROFILE_TERMS;
     let mut recognized = Vec::new();
     let mut ambiguous = Vec::new();
     let mut not_recognized = Vec::new();
@@ -1070,7 +1071,7 @@ pub fn resolve_terms(
             continue;
         }
         let mut matches = exact_gene_matches(&gene_resolver, &entry);
-        if matches.is_empty() {
+        if matches.is_empty() && resolve_non_genes {
             matches = search_terms(resources, &entry, 100).unwrap_or_default();
             matches.extend(crate::reactome::search(resources, &entry, 100).unwrap_or_default());
         }
@@ -4727,7 +4728,7 @@ mod tests {
 
     #[test]
     fn large_pasted_gene_lists_use_one_exact_resolver() {
-        let report = (0..400)
+        let report = (0..=MAX_PROFILE_TERMS)
             .map(|index| (format!("GENE{index}"), format!("ENSG{index:011}")))
             .collect::<Vec<_>>();
         let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
@@ -4737,6 +4738,23 @@ mod tests {
             assert_eq!(matches[0].label, symbol);
             assert_eq!(matches[0].id, gene_id);
         }
+    }
+
+    #[test]
+    fn pasted_gene_lists_can_exceed_the_ontology_term_limit() {
+        let entries = (0..=MAX_PROFILE_TERMS)
+            .map(|index| format!("UNKNOWN{index}"))
+            .collect::<Vec<_>>();
+        let response = resolve_terms(
+            Path::new("missing"),
+            None,
+            TermResolutionRequest {
+                entries,
+                run_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(response.not_recognized.len(), MAX_PROFILE_TERMS + 1);
     }
 
     #[test]
