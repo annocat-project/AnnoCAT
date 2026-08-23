@@ -2426,6 +2426,7 @@ fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
         evidence_filters,
         filter_rules,
         excluded_allele_ids: Vec::new(),
+        included_allele_ids: None,
     })
 }
 
@@ -4057,6 +4058,8 @@ struct FilteredExportRequest {
     format: String,
     filters: results::PageRequest,
     #[serde(default)]
+    candidate_only: bool,
+    #[serde(default)]
     columns: Vec<String>,
     #[serde(default)]
     column_labels: Vec<String>,
@@ -4077,6 +4080,15 @@ fn export_filtered_results_interactive(
     let paths = portable_paths()?;
     let result = completed_run_result(&paths.runs, run_id)?;
     let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
+    let mut filters = request.filters.clone();
+    if request.candidate_only {
+        filters.included_allele_ids = Some(
+            library_metadata::candidates(&paths.runs, run_id)?
+                .into_iter()
+                .map(|candidate| candidate.allele_id)
+                .collect(),
+        );
+    }
     let name = library_metadata::display_name(&paths.runs, run_id)
         .unwrap_or_else(|| "AnnoCAT-result".to_owned());
     let (title, extension, suffix) = match request.format.as_str() {
@@ -4105,7 +4117,7 @@ fn export_filtered_results_interactive(
                 evidence.as_deref(),
                 catalog.as_deref(),
                 &destination,
-                &request.filters,
+                &filters,
                 &request.columns,
                 &request.column_labels,
             )?;
@@ -4121,17 +4133,20 @@ fn export_filtered_results_interactive(
                 evidence.as_deref(),
                 catalog.as_deref(),
                 &destination,
-                &request.filters,
+                &filters,
             )?;
-            let page: serde_json::Value = serde_json::from_str(&results::page_json_with_evidence(
+            let mut count_filters = filters.clone();
+            count_filters.exact_total = true;
+            let page_json = results::page_json_with_evidence(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 0,
                 1,
-                &request.filters,
-            )?)
-            .map_err(|error| error.to_string())?;
+                &count_filters,
+            )?;
+            let page: serde_json::Value =
+                serde_json::from_str(&page_json).map_err(|error| error.to_string())?;
             Ok(Some(FilteredExportSummary {
                 path: destination,
                 rows: page["total"].as_u64().unwrap_or(0),

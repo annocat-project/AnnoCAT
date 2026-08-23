@@ -1386,6 +1386,8 @@ pub struct PageRequest {
     pub filter_rules: Vec<CoreFilterRuleRequest>,
     #[serde(default)]
     pub excluded_allele_ids: Vec<String>,
+    #[serde(skip)]
+    pub included_allele_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -4126,7 +4128,9 @@ fn page_result_internal(
     let offset = query.offset;
     let limit = query.limit;
     let request = query.request;
-    let candidate_ids = query.candidate_ids;
+    let candidate_ids = query
+        .candidate_ids
+        .or(request.included_allele_ids.as_deref());
     let limit = limit.clamp(1, 500);
     let core_filters = validated_core_page_filters(request)?;
     let match_cache_key = matched_row_cache_key(query, &core_filters)?;
@@ -4180,33 +4184,10 @@ fn page_result_internal(
     let sort_key = primary_sort.key.clone();
     let direction = primary_sort.direction.as_str();
     let can_use_parquet_input_order = report_uses_current_selection_contract(parquet)?;
-    let candidate_sql = candidate_ids
-        .map(|_| " AND v.allele_id IN (SELECT allele_id FROM candidate_alleles)")
-        .unwrap_or_default();
+    let candidate_sql = install_candidate_alleles(connection, candidate_ids)?;
     let filtered_where_sql = format!(
         "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{excluded_sql}{candidate_sql}"
     );
-    if let Some(candidate_ids) = candidate_ids {
-        connection
-            .execute_batch("CREATE TEMP TABLE candidate_alleles(allele_id VARCHAR PRIMARY KEY)")
-            .map_err(|error| format!("cannot create candidate query table: {error}"))?;
-        if !candidate_ids.is_empty() {
-            let placeholders = std::iter::repeat_n("(?)", candidate_ids.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let values = candidate_ids
-                .iter()
-                .cloned()
-                .map(Into::into)
-                .collect::<Vec<SqlValue>>();
-            connection
-                .execute(
-                    &format!("INSERT OR IGNORE INTO candidate_alleles VALUES {placeholders}"),
-                    params_from_iter(values.iter()),
-                )
-                .map_err(|error| format!("cannot populate candidate query: {error}"))?;
-        }
-    }
     let path = parquet.to_string_lossy();
     if cached_rows.is_none()
         && request
@@ -4472,6 +4453,35 @@ fn page_result_internal(
     })
 }
 
+fn install_candidate_alleles(
+    connection: &Connection,
+    candidate_ids: Option<&[String]>,
+) -> Result<&'static str, String> {
+    let Some(candidate_ids) = candidate_ids else {
+        return Ok("");
+    };
+    connection
+        .execute_batch("CREATE TEMP TABLE candidate_alleles(allele_id VARCHAR PRIMARY KEY)")
+        .map_err(|error| format!("cannot create candidate query table: {error}"))?;
+    if !candidate_ids.is_empty() {
+        let placeholders = std::iter::repeat_n("(?)", candidate_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let values = candidate_ids
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<SqlValue>>();
+        connection
+            .execute(
+                &format!("INSERT OR IGNORE INTO candidate_alleles VALUES {placeholders}"),
+                params_from_iter(values.iter()),
+            )
+            .map_err(|error| format!("cannot populate candidate query: {error}"))?;
+    }
+    Ok(" AND v.allele_id IN (SELECT allele_id FROM candidate_alleles)")
+}
+
 const RESULT_PAGE_COLUMNS: &str =
     "v.allele_id, v.chromosome, v.position, v.reference, v.alternate, v.variant_id,
      v.quality, v.filter, v.gene_symbol, v.gene_id, v.transcript_id, v.consequence,
@@ -4570,7 +4580,10 @@ fn matched_row_cache_key(
     query: &PageQuery<'_>,
     filters: &CorePageFilters,
 ) -> Result<Option<String>, String> {
-    if query.candidate_ids.is_some() || page_request_is_unfiltered(query.request, filters) {
+    if query.candidate_ids.is_some()
+        || query.request.included_allele_ids.is_some()
+        || page_request_is_unfiltered(query.request, filters)
+    {
         return Ok(None);
     }
     let mut request = query.request.clone();
@@ -8159,6 +8172,8 @@ fn export_filtered_rows_with_details_once_with_labels(
         .flatten();
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
+    let included_sql =
+        install_candidate_alleles(&connection, request.included_allele_ids.as_deref())?;
     let (search_sql, mut search_params) = displayed_field_search_sql(
         &connection,
         evidence,
@@ -8168,7 +8183,7 @@ fn export_filtered_rows_with_details_once_with_labels(
         &filters.search,
     )?;
     let where_sql = format!(
-        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}{included_sql}"
     );
     search_params.extend(excluded_params);
     let path = parquet.to_string_lossy();
@@ -8592,6 +8607,8 @@ fn export_filtered_genes_with_details_once(
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
+    let included_sql =
+        install_candidate_alleles(&connection, request.included_allele_ids.as_deref())?;
     let (search_sql, mut search_params) = displayed_field_search_sql(
         &connection,
         evidence,
@@ -8601,7 +8618,7 @@ fn export_filtered_genes_with_details_once(
         &filters.search,
     )?;
     let where_sql = format!(
-        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}"
+        "{CORE_PAGE_WHERE_SQL}{core_rule_sql}{evidence_rule_sql}{search_sql}{excluded_sql}{included_sql}"
     );
     search_params.extend(excluded_params);
     let path = parquet.to_string_lossy();
@@ -12494,6 +12511,41 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(genes).unwrap(), "GENE_G\n");
         let allele = page["rows"][1]["alleleId"].as_str().unwrap();
+        let candidate_request = PageRequest {
+            included_allele_ids: Some(vec![allele.to_owned()]),
+            ..PageRequest::default()
+        };
+        let candidate_csv = root.join("candidates.csv");
+        assert_eq!(
+            export_filtered_rows(
+                &parquet,
+                &candidate_csv,
+                &candidate_request,
+                &["chromosome".into(), "alternate".into(), "gene".into()],
+            )
+            .unwrap(),
+            1
+        );
+        let candidate_genes = root.join("candidate-genes.txt");
+        assert_eq!(
+            export_filtered_genes(&parquet, &candidate_genes, &candidate_request).unwrap(),
+            1
+        );
+        assert_eq!(fs::read_to_string(candidate_genes).unwrap(), "GENE_G\n");
+        let candidate_page: Value = serde_json::from_str(
+            &page_json(
+                &parquet,
+                0,
+                10,
+                &PageRequest {
+                    exact_total: true,
+                    ..candidate_request.clone()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(candidate_page["total"], 1);
         let excluded_request = PageRequest {
             impact: "HIGH".into(),
             excluded_allele_ids: vec![allele.into()],
