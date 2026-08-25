@@ -72,7 +72,7 @@ const FILTER_PRESET_STORAGE_KEY='annocat.savedResultFilters.v1';
 const DISMISSED_COMPLETED_TASKS_STORAGE_KEY='annocat.dismissedCompletedTasks.v1';
 const CALIBRATED_EVIDENCE_COLORS_STORAGE_KEY='annocat.useCalibratedEvidenceColors';
 const resultQuerySession=typeof globalThis.crypto?.randomUUID==='function'?globalThis.crypto.randomUUID():`${Date.now()}-${Math.random()}`;
-const RESULT_PAGE_MEMORY_LIMIT=12,resultPageMemory=new Map(),RESULT_COUNT_MEMORY_LIMIT=24,resultCountMemory=new Map(),RESULT_VIEW_MEMORY_LIMIT=4,resultViewMemory=new Map(),VARIANT_DETAIL_MEMORY_LIMIT=64,variantDetailMemory=new Map();
+const RESULT_PAGE_MEMORY_LIMIT=12,resultPageMemory=new Map(),RESULT_COUNT_MEMORY_LIMIT=24,resultCountMemory=new Map(),RESULT_VIEW_MEMORY_LIMIT=4,resultViewMemory=new Map(),VARIANT_DETAIL_MEMORY_LIMIT=64,variantDetailMemory=new Map(),detailIndexReadyRuns=new Set(),detailIndexRequests=new Map(),detailIndexPreparingRuns=new Set();
 const RESULT_PREFETCH_MARGIN_PX=2000;
 const pageNames={annotate:'New annotation',browse:'Results',results:'Results',logs:'Tasks',resources:'Data sources',settings:'Settings'};
 let variants=[],sources=[],profiles=[],resourcePlan={resources:[]},evidenceCalibrations={interpretationPolicy:{},predictors:[],calibrations:[],displayPolicies:{}},portablePaths={},visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key)),visibleEvidence=new Set(),resultColumnOrder=[],currentStep=1,selectedPaths=[],selectedVcfSummaries=[],selectedVcfBuildConfirmed=false,recoveryFiles=null;
@@ -365,7 +365,6 @@ async function openCompletedRun(run,offset=0){
     const phenotypeProfilePromise=run.readOnly?Promise.resolve(null):phenotypeFeature.sync(run,resourceStates).catch(error=>{console.error(error);return null});
     favorOnline.updateForRun(run.readOnly?null:run).catch(console.error);
     updateResultPageStatus();
-    const detailIndexPromise=fetch(`/api/runs/${encodeURIComponent(run.id)}/detail-index`).then(response=>response.ok).catch(()=>false);
     if(run.readOnly){candidateAlleles.clear();renderResultViewTabs()}else await loadCandidates(run.id);
     visibleEvidence.clear();
     const fieldResponse=await fetch(`/api/runs/${encodeURIComponent(run.id)}/fields`),fieldBody=await fieldResponse.json();
@@ -384,7 +383,6 @@ async function openCompletedRun(run,offset=0){
     variants=[];
     resultTotal=0;
     renderTable();
-    await detailIndexPromise;
     resultOperation='Loading…';
   }
   showPage('results');
@@ -483,8 +481,8 @@ async function loadCaseNotes(){if(!currentResultRun)return;const runId=currentRe
 async function saveCaseNotes(){const runId=caseNotesRunId;if(!runId)return;clearTimeout(caseNotesTimer);const notes=$('#case-notes-editor').value;$('#case-notes-status').textContent='Saving…';const response=await fetch(`/api/runs/${encodeURIComponent(runId)}/notes`,{method:'POST',headers:{'Content-Type':'application/json','X-AnnoCat-CSRF':'1'},body:JSON.stringify({notes})}),body=await response.json();if(caseNotesRunId!==runId)return;if(!response.ok){$('#case-notes-status').textContent=body.error||'Could not save notes';return}loadedCaseNotes=notes;$('#case-notes-status').textContent='Saved locally'}
 async function toggleCaseNotes(){if(!currentResultRun)return;const panel=$('#case-notes-panel'),opening=panel.classList.contains('hidden');panel.classList.toggle('hidden',!opening);if(opening)await loadCaseNotes()}
 function configureGeneQuery(profile){
-  const fieldIndex=path=>resultFieldCatalog.findIndex(field=>(fieldSourceIs(field,'gene-profile')||fieldSourceIs(field,'hpo'))&&field.fieldPath===path),includedGene=fieldIndex('includedGene');
-  resultFilters.setProfileLinkedFilter(resultFieldCatalog[includedGene],Boolean(profile?.showMatchesOnly));
+  const fieldIndex=path=>resultFieldCatalog.findIndex(field=>(fieldSourceIs(field,'gene-profile')||fieldSourceIs(field,'hpo'))&&field.fieldPath===path),geneMatch=fieldIndex('geneMatch');
+  resultFilters.setProfileLinkedFilter(resultFieldCatalog[geneMatch],Boolean(profile?.showMatchesOnly));
 }
 async function phenotypeProfileApplied(profile,action){
   await refreshCurrentResultSchema({
@@ -563,7 +561,7 @@ function setFavorResultStatus(message,{busy=false,tone=''}={}){
   updateResultPageStatus();
   if(message&&!busy)favorResultStatusTimer=setTimeout(()=>{favorResultStatus=null;updateResultPageStatus()},tone==='error'?8000:5000)
 }
-function updateResultPageStatus(){const status=$('#result-page-status');if(!status)return;if(favorResultStatus){status.classList.toggle('error',favorResultStatus.tone==='error');status.innerHTML=`${favorResultStatus.busy?'<i class="result-query-spinner" aria-hidden="true"></i>':''}${escapeHtml(favorResultStatus.message)}`;return}if(resultQueryError){status.textContent=resultQueryError;status.classList.add('error');return}status.classList.remove('error');if(resultLoading){const loaded=variants.length?`${variants.length.toLocaleString()} loaded · `:'';status.innerHTML=`${escapeHtml(loaded)}<i class="result-query-spinner" aria-hidden="true"></i>${escapeHtml(resultOperation||'Loading…')}`;return}if(resultCountLoading){status.innerHTML=`${escapeHtml(`${variants.length.toLocaleString()}+ matching variants · `)}<i class="result-query-spinner" aria-hidden="true"></i>Counting…`;return}status.textContent=resultTotal===0&&hasActiveResultQuery()?'No matching variants':Number.isFinite(resultTotal)?`${variants.length.toLocaleString()} of ${resultTotal.toLocaleString()}`:`${variants.length.toLocaleString()}+ matching variants`}
+function updateResultPageStatus(){const status=$('#result-page-status');if(!status)return;if(favorResultStatus){status.classList.toggle('error',favorResultStatus.tone==='error');status.innerHTML=`${favorResultStatus.busy?'<i class="result-query-spinner" aria-hidden="true"></i>':''}${escapeHtml(favorResultStatus.message)}`;return}if(resultQueryError){status.textContent=resultQueryError;status.classList.add('error');return}status.classList.remove('error');if(resultLoading){const loaded=variants.length?`${variants.length.toLocaleString()} loaded · `:'';status.innerHTML=`${escapeHtml(loaded)}<i class="result-query-spinner" aria-hidden="true"></i>${escapeHtml(resultOperation||'Loading…')}`;return}if(currentResultRun&&detailIndexPreparingRuns.has(currentResultRun.id)){status.innerHTML='<i class="result-query-spinner" aria-hidden="true"></i>Preparing variant detail index…';return}if(resultCountLoading){status.innerHTML=`${escapeHtml(`${variants.length.toLocaleString()}+ matching variants · `)}<i class="result-query-spinner" aria-hidden="true"></i>Counting…`;return}status.textContent=resultTotal===0&&hasActiveResultQuery()?'No matching variants':Number.isFinite(resultTotal)?`${variants.length.toLocaleString()} of ${resultTotal.toLocaleString()}`:`${variants.length.toLocaleString()}+ matching variants`}
 function scheduleResultSearch(immediate=false){clearTimeout(resultSearchTimer);resultRequestController?.abort();resultCountRequest?.controller.abort();resultRequestGeneration++;resultQueryError='';resultOperation='Searching…';resultLoading=true;updateResultPageStatus();updateResultScrollState();const run=()=>{if(currentResultRun)openCompletedRun(currentResultRun,0);else{resultLoading=false;resultOperation='';updateResultPageStatus()}};if(immediate)run();else resultSearchTimer=setTimeout(run,250)}
 function updateSelectionControls(){const count=selectionCount(),allFiltered=selectionMode==='filtered',selectionTerm=allFiltered?'matching variants':'selected variants',candidateButton=$('#candidate-selected'),candidateLabel=$('#candidate-selected-label'),removeCandidates=resultView==='candidates'||!allFiltered&&count>0&&[...selectedAlleles].every(id=>candidateAlleles.has(id));$('#selection-actions').classList.toggle('hidden',count===0);candidateButton?.classList.toggle('hidden',count===0||Boolean(currentResultRun?.readOnly));if(candidateButton){const action=`${removeCandidates?'Remove':'Add'} ${count.toLocaleString()} ${selectionTerm} ${removeCandidates?'from':'to'} candidates`;candidateLabel.textContent=`${removeCandidates?'Remove from':'Add to'} candidates (${count.toLocaleString()})`;candidateButton.title=action;candidateButton.setAttribute('aria-label',action)}$('#selection-actions-toggle').setAttribute('aria-label',`Export ${selectionTerm}`);$('#selection-actions-toggle').title=`Export ${selectionTerm}`;$('#export-selected-genes-label').textContent=`Genes from ${selectionTerm}${count?` (${count.toLocaleString()})`:''}`;$('#export-selected-rows-label').textContent=`${allFiltered?'Matching':'Selected'} variants${count?` (${count.toLocaleString()})`:''}`;if(!count){$('#selection-actions-menu').classList.add('hidden');$('#selection-actions-toggle').setAttribute('aria-expanded','false')}favorOnline.updateControls()}
 async function selectAllFilteredVariants(){if(!await ensureExactResultTotal())return;selectionMode='filtered';selectionFilterSignature=currentResultFilterSignature();selectedAlleles.clear();excludedFilteredAlleles.clear();selectedVariantGenes.clear();selectedVariantRows.clear();renderTable()}
@@ -743,6 +741,16 @@ function usefulVariantLinks(row,gene,primary={},variant={}){
 function displayDetailValue(value){if(value===null||value===undefined||value===''||value==='-')return'—';if(Array.isArray(value))return value.join(', ');if(typeof value==='object')return JSON.stringify(value);return String(value)}
 function dbnsfpPredictionValue(field,value){if(value==='.'||value==='')return'Not reported';const labels={VEP_canonical:{YES:'Yes'},GENCODE_basic:{Y:'Yes'}};return labels[field]?.[value]||value}
 function renderCandidateDetailControl(alleleId){const button=$('#detail-candidate-toggle');if(!button||!currentResultRun||currentResultRun.readOnly){button?.classList.add('hidden');return}const candidate=candidateAlleles.has(alleleId),label=candidate?'Remove from candidates':'Add to candidates';button.dataset.candidateAllele=alleleId;button.classList.remove('hidden');button.classList.toggle('active',candidate);button.setAttribute('aria-pressed',String(candidate));button.setAttribute('aria-label',label);button.title=label;button.innerHTML=`${prototypeIcon('star')}<span class="legacy-icon">${candidate?'★':'☆'}</span>`}
+function prepareVariantDetailIndex(runId){
+  if(detailIndexReadyRuns.has(runId))return Promise.resolve(true);
+  const pending=detailIndexRequests.get(runId);
+  if(pending)return pending;
+  detailIndexPreparingRuns.add(runId);
+  updateResultPageStatus();
+  const request=fetch(`/api/runs/${encodeURIComponent(runId)}/detail-index`).then(response=>{if(response.ok)detailIndexReadyRuns.add(runId);return response.ok}).catch(()=>false).finally(()=>{detailIndexRequests.delete(runId);detailIndexPreparingRuns.delete(runId);updateResultPageStatus()});
+  detailIndexRequests.set(runId,request);
+  return request
+}
 async function openVariantDetail(alleleId){
   if(!currentResultRun||!alleleId)return;
   const runId=currentResultRun.id,row=variants.find(item=>item.alleleId===alleleId);
@@ -759,6 +767,8 @@ async function openVariantDetail(alleleId){
   body.setAttribute('aria-busy','true');
   if(opening){body.replaceChildren();revealVariantDetail()}
   try{
+    await prepareVariantDetailIndex(runId);
+    if(controller.signal.aborted)return;
     const locator=new URLSearchParams();
     if(Number.isSafeInteger(row.recordNumber))locator.set('recordNumber',row.recordNumber);
     if(Number.isSafeInteger(row.altIndex))locator.set('altIndex',row.altIndex);
@@ -882,7 +892,7 @@ async function handleAnnotationTaskAction(runId,action,button){
     button.textContent=original
   }
 }
-function resetAnnotationWizard(){selectedPaths=[];selectedVcfSummaries=[];selectedVcfBuildConfirmed=false;recoveryFiles=null;$('#vcf-files').value='';renderSelectedPaths()}
+function resetAnnotationWizard(){selectedPaths=[];selectedVcfSummaries=[];selectedVcfBuildConfirmed=false;recoveryFiles=null;$('#vcf-files').value='';$('#keep-annotated-vcf').checked=false;renderSelectedPaths()}
 async function startAnnotation(){const button=$('#continue'),recovering=Boolean(recoveryFiles),sourceIds=enabledSourceIds(),includeAnnotatedVcf=$('#keep-annotated-vcf').checked,blocked=selectedVcfBlockingProblem(),unknownBuild=selectedVcfBuildUnknown();if(blocked){setStep(1);return}let confirmGrch38=selectedVcfBuildConfirmed;if(unknownBuild&&!confirmGrch38){confirmGrch38=await confirmSelectedVcfBuild();if(!confirmGrch38)return;selectedVcfBuildConfirmed=true}const endpoint=recovering?'/api/annotations/recover':'/api/annotations/start',payload=recovering?{input:recoveryFiles.input,partialVcf:recoveryFiles.partialVcf,structuredOutput:recoveryFiles.structuredOutput,outputDirectory:$('#output-folder').value.trim(),sourceIds,includeAnnotatedVcf,confirmGrch38}:{inputs:selectedPaths,outputDirectory:$('#output-folder').value.trim(),sourceIds,includeAnnotatedVcf,confirmGrch38};button.disabled=true;button.textContent=recovering?'Starting verification…':'Starting…';try{const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-AnnoCat-CSRF':'1'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.error||(recovering?'Recovery could not start':'Annotation could not start'));clearGlobalStatusNotice();resetAnnotationWizard();await refreshAnnotationStatus();showPage('logs')}catch(error){setAnnotationStartError(error.message)}finally{await refreshAppStatus()}}
 async function chooseFolder(){const button=$('#browse-output'),message=$('#folder-message');button.disabled=true;button.textContent='Opening…';message.classList.remove('error');try{const response=await fetch('/api/pick-folder',{method:'POST',headers:{'X-AnnoCat-CSRF':'1'}}),result=await response.json();if(!response.ok)throw new Error(result.error||'Native folder picker failed');if(result.path){$('#output-folder').value=result.path;message.textContent=`Selected ${result.path}`;setStep(3)}}catch(error){message.textContent=`Could not open the folder picker: ${error.message}. Start AnnoCAT with “annocat launch” from your PowerShell window.`;message.classList.add('error')}finally{button.disabled=false;button.textContent='Browse…'}}
 async function refreshPaths(){
@@ -1288,6 +1298,7 @@ favorOnline=createFavorOnline({
   onServiceChange:()=>updateWizardReadiness()
 });
 async function start(){
+  resetAnnotationWizard();
   [sources,profiles,resourcePlan,evidenceCalibrations,portablePaths]=await Promise.all([fetch('/api/sources').then(r=>r.json()),fetch('/api/profiles').then(r=>r.json()),fetch('/api/resources/plan').then(r=>r.json()),fetch('/api/evidence-calibrations').then(r=>r.json()),fetch('/api/paths').then(r=>r.json())]);
   if(portablePaths.runs){$('#output-folder').value=portablePaths.runs;$('#folder-message').textContent='Default results folder. Select Browse to change this annotation.'}
   $('#settings-resource-path').value=portablePaths.resourceDirectory||'Not available';

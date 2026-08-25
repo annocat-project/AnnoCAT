@@ -30,8 +30,12 @@ Validation has three lanes:
    and Variant Details.
 2. **Annotation concordance** compares the pinned fastVEP build with the archived
    Ensembl 115 VEP REST service for a public consequence corpus.
-3. **Release validation** samples the installed source releases, runs packaged
-   end-to-end annotation, and checks aggregate whole-genome behavior.
+3. **Release validation** samples pinned raw source releases, projects their
+   expected records through AnnoCAT, and checks packaged and aggregate
+   whole-genome behavior.
+
+[Source validation in GitHub Actions](github-actions-source-validation.md)
+defines the proposed hosted release gate for the third lane.
 
 `annocat results validate` remains an integrity check. It validates files,
 schemas, and hashes without modifying the result. It is not a source-value or
@@ -96,7 +100,7 @@ vectors, Number=A and Number=R fields, signed SpliceAI positions,
 ambiguous-reference keys, and neighboring alleles with no evidence.
 
 Tiny synthetic caches exercise the production builders and readers. They do
-not replace release sampling against complete installed source files.
+not replace release sampling against pinned upstream source subsets.
 
 ### Result projection
 
@@ -148,7 +152,7 @@ rates can summarize a run, but they do not replace field-level gates.
 
 ### Pull requests
 
-- Run the committed source-parity and result-projection tests.
+- Run the committed source-contract result-projection tests.
 - Run result integrity, evidence resolver, sample-call, and presentation tests.
 - Do not require large installed sources, live APIs, or whole-genome fixtures.
 
@@ -157,7 +161,8 @@ rates can summarize a run, but they do not replace field-level gates.
 - Build the exact fastVEP revision in `config/fastvep-pin.json`.
 - Run the Ensembl 115 consequence concordance workflow.
 - Build and verify the small OSA1 and OSA2 source-contract caches.
-- Sample the actual installed source releases against pinned raw inputs.
+- Sample pinned raw source releases against independently authored expected
+  records.
 - Run the packaged end-to-end corpus.
 - Freeze and replay online-source responses instead of using a live response as
   a release gate.

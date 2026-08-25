@@ -1274,6 +1274,15 @@ fn execute_vcf_review(
             return fail_staging(staging, format!("VCF review conversion failed: {error}"));
         }
     };
+    if canonical.excluded_uncarried_alleles > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} alternate alleles not carried by any sample",
+                canonical.excluded_uncarried_alleles
+            ),
+        );
+    }
 
     if let Ok(mut current) = state().lock() {
         current.records = Some(canonical.rows);
@@ -1387,6 +1396,10 @@ fn execute_vcf_review(
         super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
     );
     object.insert("inputContentSha256".into(), input_content_sha256.into());
+    object.insert(
+        "excludedUncarriedAlleleCount".into(),
+        canonical.excluded_uncarried_alleles.into(),
+    );
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
@@ -2151,6 +2164,15 @@ fn finalize_outputs(
             ),
         );
     }
+    if canonical.excluded_uncarried_alleles > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} alternate alleles not carried by any sample",
+                canonical.excluded_uncarried_alleles
+            ),
+        );
+    }
     check_cancel(staging)?;
     update_indexing_progress(
         "publishing",
@@ -2244,7 +2266,7 @@ fn finalize_outputs(
         "variantCount": canonical.rows,
         "vcfRecordCount": output_summary.records,
         "excludedAuxiliaryRecordCount": canonical.excluded_auxiliary_records,
-        "alleleCount": output_summary.alternate_alleles,
+        "alleleCount": canonical.rows,
         "csqEntryCount": output_summary.csq_entries,
         "structuredRecordCount": structured.records,
         "consequenceCount": structured.consequences,
@@ -2284,6 +2306,10 @@ fn finalize_outputs(
     object.insert("inputName".into(), input_name.into());
     object.insert("inputBytes".into(), file_bytes(&request.input)?.into());
     object.insert("inputContentSha256".into(), input_content_sha256.into());
+    object.insert(
+        "excludedUncarriedAlleleCount".into(),
+        canonical.excluded_uncarried_alleles.into(),
+    );
     if let Some(profile) = request.requested_profile.as_deref() {
         object.insert("requestedProfile".into(), profile.into());
     }

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const INDEX_SCHEMA_VERSION: u32 = 2;
 const INDEX_FILE: &str = "detail-row-groups.json";
-const MAX_INDEX_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_INDEX_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_ROW_GROUPS: usize = 100_000;
 const MAX_GROUPS_PER_LOOKUP: usize = 8;
 const MAX_CACHED_DETAIL_FILES: usize = 3;
@@ -562,7 +562,10 @@ fn index_is_valid(
 fn read_index(path: &Path) -> Result<DetailIndex, String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     if metadata.len() == 0 || metadata.len() > MAX_INDEX_BYTES {
-        return Err("detail index has an invalid size".into());
+        return Err(format!(
+            "detail index has an invalid size: {} bytes (maximum {MAX_INDEX_BYTES})",
+            metadata.len()
+        ));
     }
     serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
         .map_err(|error| format!("cannot decode detail index: {error}"))
@@ -600,7 +603,10 @@ fn ensure_index(
     let index = build_index(variants, consequences, evidence)?;
     let encoded = serde_json::to_vec(&index).map_err(|error| error.to_string())?;
     if encoded.len() as u64 > MAX_INDEX_BYTES {
-        return Err("detail index is unexpectedly large".into());
+        return Err(format!(
+            "detail index is unexpectedly large: {} bytes (maximum {MAX_INDEX_BYTES})",
+            encoded.len()
+        ));
     }
     let partial = path.with_extension("json.partial");
     fs::write(&partial, encoded).map_err(|error| format!("cannot write detail index: {error}"))?;

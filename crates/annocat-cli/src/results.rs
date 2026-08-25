@@ -216,6 +216,7 @@ pub struct CanonicalSummary {
     pub rows: u64,
     pub records: u64,
     pub excluded_auxiliary_records: u64,
+    pub excluded_uncarried_alleles: u64,
     pub samples: Vec<String>,
     pub input_content_sha256: Option<String>,
     pub(crate) core_categorical: BTreeMap<String, BoundedCategoricalCounts>,
@@ -1026,6 +1027,12 @@ fn zygosity_label_and_sort(
         alt_index,
         alternate_count,
     );
+    zygosity_for_call(&call)
+}
+
+fn zygosity_for_call(
+    call: &annocat_core::sample_call::SampleCall,
+) -> (Option<String>, Option<i32>) {
     use annocat_core::sample_call::GenotypeRelation;
     match call.genotype_relation {
         GenotypeRelation::Reference => (Some("Reference".into()), Some(0)),
@@ -1039,6 +1046,55 @@ fn zygosity_label_and_sort(
         GenotypeRelation::Invalid => (Some("Invalid genotype".into()), None),
         GenotypeRelation::Unavailable => (None, None),
     }
+}
+
+fn retained_zygosity(
+    sample_names: &[String],
+    filter: &str,
+    format: Option<&str>,
+    sample_values: &[&str],
+    alt_index: usize,
+    alternate_count: usize,
+) -> Option<(Option<String>, Option<i32>)> {
+    use annocat_core::sample_call::AllelePresence;
+
+    let reference_call = filter
+        .split(';')
+        .any(|value| value.eq_ignore_ascii_case("RefCall"));
+    if sample_names.is_empty() {
+        return (!reference_call).then_some((None, None));
+    }
+    if sample_names.len() == 1 {
+        let call = annocat_core::sample_call::parse_sample_call(
+            &sample_names[0],
+            format,
+            sample_values.first().copied().unwrap_or("."),
+            alt_index,
+            alternate_count,
+        );
+        return match call.allele_presence {
+            AllelePresence::Carried => Some(zygosity_for_call(&call)),
+            AllelePresence::NotCarried => None,
+            AllelePresence::Unknown if reference_call => None,
+            AllelePresence::Unknown => Some(zygosity_for_call(&call)),
+        };
+    }
+    let mut carried = false;
+    let mut absent_from_all_samples = true;
+    for (index, name) in sample_names.iter().enumerate() {
+        let presence = annocat_core::sample_call::parse_sample_call(
+            name,
+            format,
+            sample_values.get(index).copied().unwrap_or("."),
+            alt_index,
+            alternate_count,
+        )
+        .allele_presence;
+        carried |= presence == AllelePresence::Carried;
+        absent_from_all_samples &= presence == AllelePresence::NotCarried;
+    }
+    (carried || !reference_call && !absent_from_all_samples)
+        .then(|| (Some("Multiple sample calls".into()), None))
 }
 
 fn parse_variant_record(
@@ -1087,6 +1143,17 @@ fn parse_variant_record(
         if !annocat_core::vcf::is_variant_alternate(alternate) {
             continue;
         }
+        let format = columns.get(8).and_then(|value| optional_vcf(value));
+        let Some((zygosity, zygosity_sort)) = retained_zygosity(
+            sample_names,
+            columns[6],
+            format.as_deref(),
+            columns.get(9..).unwrap_or_default(),
+            alt_offset + 1,
+            alternate_count,
+        ) else {
+            continue;
+        };
         let canonical = &input.canonical_alleles[alt_offset];
         let matching = matching_consequences(&consequences, columns[3], alternate, columns[4]);
         let best = best_consequence(&matching);
@@ -1140,15 +1207,6 @@ fn parse_variant_record(
             .mane_select
             .push(best_value(&["MANE_SELECT", "mane_select", "MANE", "mane"]));
         batch.sample_names_json.push(sample_names_json.to_owned());
-        let format = columns.get(8).and_then(|value| optional_vcf(value));
-        let (zygosity, zygosity_sort) = zygosity_label_and_sort(
-            sample_names.first().map(String::as_str),
-            format.as_deref(),
-            columns.get(9).copied(),
-            sample_names.len(),
-            alt_offset + 1,
-            alternate_count,
-        );
         batch.format.push(format);
         batch.samples_json.push(samples_json.clone());
         batch.zygosity.push(zygosity);
@@ -1633,6 +1691,7 @@ struct StructuredRecord {
     line_number: usize,
     line: String,
     canonical_alleles: BTreeMap<String, CanonicalAllele>,
+    retained_alt_indices: Option<BTreeSet<usize>>,
 }
 
 #[derive(Deserialize)]
@@ -1704,7 +1763,7 @@ impl ParsedStructuredRecord {
 fn canonical_structured_alleles(
     line_number: usize,
     identity: &StructuredIdentity,
-    canonical_record: Option<&[CanonicalAllele]>,
+    canonical_record: Option<&CanonicalVcfRecord>,
     reference_source: Option<&mut IndexedReference>,
 ) -> Result<BTreeMap<String, CanonicalAllele>, String> {
     let alleles = identity.allele_string.split('/').collect::<Vec<_>>();
@@ -1712,12 +1771,12 @@ fn canonical_structured_alleles(
         return Ok(BTreeMap::new());
     }
     if let Some(record) = canonical_record
-        && record.len() != alleles.len() - 1
+        && record.canonical_alleles.len() != alleles.len() - 1
     {
         return Err(format!(
             "structured record {line_number} has {} alternate alleles but the canonical VCF record has {}",
             alleles.len() - 1,
-            record.len()
+            record.canonical_alleles.len()
         ));
     }
     let mut reference_source = reference_source;
@@ -1727,7 +1786,7 @@ fn canonical_structured_alleles(
             continue;
         }
         let allele = if let Some(record) = canonical_record {
-            record[alternate_index].clone()
+            record.canonical_alleles[alternate_index].clone()
         } else if let Some(source) = reference_source.as_deref_mut() {
             let start = u64::try_from(identity.start)
                 .map_err(|_| format!("structured record {line_number} has an invalid start"))?;
@@ -1798,10 +1857,16 @@ fn canonical_structured_alleles(
     Ok(canonical)
 }
 
+struct CanonicalVcfRecord {
+    canonical_alleles: Vec<CanonicalAllele>,
+    retained_alt_indices: BTreeSet<usize>,
+}
+
 struct CanonicalVcfRecords {
     lines: std::io::Lines<Box<dyn BufRead>>,
     line_number: usize,
     reference: IndexedReference,
+    sample_names: Vec<String>,
 }
 
 impl CanonicalVcfRecords {
@@ -1812,21 +1877,49 @@ impl CanonicalVcfRecords {
             reference: IndexedReference::open(fasta).map_err(|error| {
                 format!("cannot initialize canonical VCF allele normalization: {error}")
             })?,
+            sample_names: Vec::new(),
         })
     }
 
-    fn next(&mut self) -> Result<Option<Vec<CanonicalAllele>>, String> {
+    fn next(&mut self) -> Result<Option<CanonicalVcfRecord>, String> {
         for line in self.lines.by_ref() {
             self.line_number += 1;
             let line =
                 line.map_err(|error| format!("cannot read canonical annotated VCF: {error}"))?;
+            if line.starts_with("#CHROM\t") {
+                self.sample_names = line.split('\t').skip(9).map(str::to_owned).collect();
+                continue;
+            }
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
             let canonical_alleles =
                 canonical_alleles_for_vcf_line(self.line_number, &line, Some(&mut self.reference))?;
-            if canonical_alleles.is_some() {
-                return Ok(canonical_alleles);
+            if let Some(canonical_alleles) = canonical_alleles {
+                let columns = line.split('\t').collect::<Vec<_>>();
+                let alternate_count = columns[4].split(',').count();
+                let format = columns.get(8).and_then(|value| optional_vcf(value));
+                let retained_alt_indices = columns[4]
+                    .split(',')
+                    .enumerate()
+                    .filter_map(|(index, alternate)| {
+                        (annocat_core::vcf::is_variant_alternate(alternate)
+                            && retained_zygosity(
+                                &self.sample_names,
+                                columns[6],
+                                format.as_deref(),
+                                columns.get(9..).unwrap_or_default(),
+                                index + 1,
+                                alternate_count,
+                            )
+                            .is_some())
+                        .then_some(index)
+                    })
+                    .collect();
+                return Ok(Some(CanonicalVcfRecord {
+                    canonical_alleles,
+                    retained_alt_indices,
+                }));
             }
         }
         Ok(None)
@@ -1875,6 +1968,18 @@ fn parse_structured_record_mode(
         .copied()
         .filter(|alternate| annocat_core::vcf::is_variant_alternate(alternate))
         .collect::<Vec<_>>();
+    let retained_alternates = alleles[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, alternate)| {
+            (annocat_core::vcf::is_variant_alternate(alternate)
+                && record
+                    .retained_alt_indices
+                    .as_ref()
+                    .is_none_or(|retained| retained.contains(&index)))
+            .then_some(*alternate)
+        })
+        .collect::<Vec<_>>();
     let is_variant = alleles.len() > 1 && !real_alternates.is_empty();
     if !is_variant {
         return Ok(ParsedStructuredRecord {
@@ -1897,7 +2002,7 @@ fn parse_structured_record_mode(
     for (key, value) in &extra_fields {
         if !TOP_LEVEL_FIELDS.contains(&key.as_str()) {
             let source_id = structured_source_alias(source_aliases, key).unwrap_or(key);
-            for alternate in &real_alternates {
+            for alternate in &retained_alternates {
                 let id = record
                     .canonical_alleles
                     .get(*alternate)
@@ -2004,6 +2109,9 @@ fn parse_structured_record_mode(
                 )
             })?;
         if !annocat_core::vcf::is_variant_alternate(alternate) {
+            continue;
+        }
+        if !retained_alternates.contains(&alternate) {
             continue;
         }
         let id = record
@@ -2187,6 +2295,9 @@ fn parse_structured_record_mode(
                 record.line_number
             ));
         }
+        if !retained_alternates.contains(&alternate.as_str()) {
+            continue;
+        }
         if !seen_supplementary_alleles.insert(alternate.clone()) {
             return Err(format!(
                 "structured record {} has duplicate supplementary allele {alternate}",
@@ -2333,7 +2444,7 @@ fn parse_structured_record_mode(
 
     Ok(ParsedStructuredRecord {
         is_variant: true,
-        alleles: record.canonical_alleles.len() as u64,
+        alleles: retained_alternates.len() as u64,
         consequences,
         evidence,
         catalog,
@@ -2622,13 +2733,17 @@ fn convert_structured_with_workers(
         let canonical_alleles = canonical_structured_alleles(
             record_index + 1,
             &identity,
-            canonical_record.as_deref(),
+            canonical_record.as_ref(),
             reference_source.as_mut(),
         )?;
+        let retained_alt_indices = canonical_record
+            .as_ref()
+            .map(|record| record.retained_alt_indices.clone());
         records.push(StructuredRecord {
             line_number: record_index + 1,
             line,
             canonical_alleles,
+            retained_alt_indices,
         });
         if records.len() < STRUCTURED_CHUNK_RECORDS {
             continue;
@@ -2969,6 +3084,7 @@ fn convert_vcf_inner(
     let mut record_number = 0_i64;
     let mut processed_records = 0_u64;
     let mut excluded_auxiliary_records = 0_u64;
+    let mut candidate_alleles = 0_u64;
     let mut rows = 0_u64;
     let mut core_categorical = ["filter", "zygosity", "consequence", "impact"]
         .into_iter()
@@ -3010,6 +3126,14 @@ fn convert_vcf_inner(
                 excluded_auxiliary_records += 1;
                 continue;
             };
+            candidate_alleles = candidate_alleles.saturating_add(
+                line.split('\t')
+                    .nth(4)
+                    .into_iter()
+                    .flat_map(|value| value.split(','))
+                    .filter(|alternate| annocat_core::vcf::is_variant_alternate(alternate))
+                    .count() as u64,
+            );
             record_number += 1;
             records.push(VariantRecord {
                 line_number: line_index + 1,
@@ -3103,6 +3227,7 @@ fn convert_vcf_inner(
         rows,
         records: record_number as u64,
         excluded_auxiliary_records,
+        excluded_uncarried_alleles: candidate_alleles.saturating_sub(rows),
         samples: sample_names,
         input_content_sha256,
         core_categorical,
@@ -4580,9 +4705,8 @@ fn matched_row_cache_key(
     query: &PageQuery<'_>,
     filters: &CorePageFilters,
 ) -> Result<Option<String>, String> {
-    if query.candidate_ids.is_some()
-        || query.request.included_allele_ids.is_some()
-        || page_request_is_unfiltered(query.request, filters)
+    if query.request.included_allele_ids.is_some()
+        || (query.candidate_ids.is_none() && page_request_is_unfiltered(query.request, filters))
     {
         return Ok(None);
     }
@@ -4602,6 +4726,15 @@ fn matched_row_cache_key(
         serde_json::to_vec(&request)
             .map_err(|error| format!("cannot identify result query: {error}"))?,
     );
+    if let Some(candidate_ids) = query.candidate_ids {
+        let mut candidate_ids = candidate_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        candidate_ids.sort_unstable();
+        candidate_ids.dedup();
+        digest.update(
+            serde_json::to_vec(&candidate_ids)
+                .map_err(|error| format!("cannot identify candidate query: {error}"))?,
+        );
+    }
     let mut paths = vec![query.variants.to_path_buf()];
     if let Some(files) = query.evidence_files {
         paths.extend(files.iter().cloned());
@@ -8502,12 +8635,14 @@ pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, Stri
     let path = parquet
         .canonicalize()
         .unwrap_or_else(|_| parquet.to_path_buf());
-    let mut cache = CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "result gene cache is unavailable")?;
-    if let Some(genes) = cache.get(&path).cloned() {
-        return Ok((*genes).clone());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let cache = cache
+            .lock()
+            .map_err(|_| "result gene cache is unavailable")?;
+        if let Some(genes) = cache.get(&path).cloned() {
+            return Ok((*genes).clone());
+        }
     }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let consequences = parquet.with_file_name("consequences.parquet");
@@ -8558,7 +8693,12 @@ pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, Stri
         })
         .collect();
     let genes = Arc::new(identities);
-    cache.insert(path, genes.clone());
+    let genes = {
+        let mut cache = cache
+            .lock()
+            .map_err(|_| "result gene cache is unavailable")?;
+        cache.entry(path).or_insert_with(|| genes.clone()).clone()
+    };
     Ok((*genes).clone())
 }
 
@@ -11874,6 +12014,56 @@ mod tests {
         .unwrap();
         assert_ne!(second, changed);
 
+        request.search = "stop".into();
+        let filters = validated_core_page_filters(&request).unwrap();
+        let candidate_ids = vec!["2:20:A:G".to_owned(), "1:10:C:T".to_owned()];
+        let candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&candidate_ids),
+            },
+            &filters,
+        )
+        .unwrap();
+        let reversed_candidate_ids = candidate_ids.iter().rev().cloned().collect::<Vec<_>>();
+        let reversed_candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&reversed_candidate_ids),
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_eq!(candidate_key, reversed_candidate_key);
+        let different_candidate_ids = vec!["3:30:G:A".to_owned()];
+        let different_candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&different_candidate_ids),
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_ne!(candidate_key, different_candidate_key);
+
         let evidence_dir = root.join("query-evidence");
         fs::create_dir_all(&evidence_dir).unwrap();
         fs::write(evidence_dir.join("core.parquet"), b"test").unwrap();
@@ -12647,6 +12837,67 @@ mod tests {
     }
 
     #[test]
+    fn result_conversion_omits_reference_calls_without_dropping_unknown_variants() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-carried-alleles-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.vcf");
+        fs::write(
+            &input,
+            concat!(
+                "##fileformat=VCFv4.2\n",
+                "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature\">\n",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tCASE\n",
+                "1\t100\t.\tA\tG\t50\tRefCall\tCSQ=G|missense_variant|MODERATE|REF|ENSG0|ENST0\tGT\t0/0\n",
+                "1\t101\t.\tA\tC,G\t50\tPASS\tCSQ=C|missense_variant|MODERATE|CARRIED|ENSG1|ENST1,G|missense_variant|MODERATE|OTHER|ENSG2|ENST2\tGT\t0/1\n",
+                "1\t102\t.\tA\tT\t50\tPASS\tCSQ=T|missense_variant|MODERATE|UNKNOWN|ENSG3|ENST3\tGT\t./.\n",
+                "1\t103\t.\tA\tG\t0\tRefCall\tCSQ=G|missense_variant|MODERATE|REF_UNKNOWN|ENSG4|ENST4\tGT\t./.\n",
+                "1\t104\t.\tA\tC\t50\tRefCall\tCSQ=C|missense_variant|MODERATE|CONFLICT|ENSG5|ENST5\tGT\t0/1\n"
+            ),
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        let summary = convert_vcf(&input, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        assert_eq!(summary.records, 5);
+        assert_eq!(summary.rows, 3);
+        assert_eq!(summary.excluded_uncarried_alleles, 3);
+
+        let connection = Connection::open_in_memory().unwrap();
+        let path = variants.to_string_lossy();
+        let retained = connection
+            .prepare(
+                "SELECT original_position, original_alternate, zygosity
+                 FROM read_parquet(?) ORDER BY original_position",
+            )
+            .unwrap()
+            .query_map(params![path.as_ref()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            retained,
+            vec![
+                (101, "C".into(), Some("Heterozygous".into())),
+                (102, "T".into(), Some("Not called".into())),
+                (104, "C".into(), Some("Heterozygous".into())),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn validation_accepts_full_vcf_terms_and_missing_placeholders() {
         let root = std::env::temp_dir().join(format!(
             "annocat-consequence-validation-{}-{}",
@@ -12803,6 +13054,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.consequences.len(), 2);
@@ -12820,6 +13072,50 @@ mod tests {
         );
         assert!(
             parsed.consequences.consequence_json[1].contains("\"feature_type\":\"regulatory\"")
+        );
+    }
+
+    #[test]
+    fn structured_conversion_uses_the_same_retained_alternates_as_the_variant_table() {
+        let record = StructuredRecord {
+            line_number: 1,
+            line: json!({
+                "allele_string": "A/G/T",
+                "start": 100,
+                "seq_region_name": "1",
+                "alleles": [{
+                    "allele": "G",
+                    "gnomad": {"allAf": 0.001}
+                }, {
+                    "allele": "T",
+                    "gnomad": {"allAf": 0.002}
+                }],
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "transcript_id": "ENST1",
+                    "consequence_terms": ["missense_variant"]
+                }, {
+                    "variant_allele": "T",
+                    "transcript_id": "ENST2",
+                    "consequence_terms": ["missense_variant"]
+                }]
+            })
+            .to_string(),
+            canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: Some([0].into_iter().collect()),
+        };
+
+        let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
+        assert_eq!(parsed.alleles, 1);
+        assert_eq!(parsed.consequences.len(), 1);
+        assert_eq!(parsed.consequences.transcript_id, [Some("ENST1".into())]);
+        let expected_allele = allele_id("1", 100, "A", "G");
+        assert!(
+            parsed
+                .evidence
+                .allele_id
+                .iter()
+                .all(|allele| allele == &expected_allele)
         );
     }
 
@@ -12867,6 +13163,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -12987,6 +13284,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -13071,6 +13369,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let aliases = structured_source_aliases(&["spliceai".into()]).unwrap();
         let parsed = parse_structured_record(&record, &aliases).unwrap();
@@ -13300,6 +13599,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -13333,6 +13633,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         assert_eq!(
             parse_structured_record(&multiallelic, &BTreeMap::new())
@@ -13352,6 +13653,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let parsed = parse_structured_record(&biallelic, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.consequences.len(), 1);
@@ -13382,7 +13684,12 @@ mod tests {
         })
         .to_string();
         let identity: StructuredIdentity = serde_json::from_str(&line).unwrap();
-        let mapped = canonical_structured_alleles(1, &identity, Some(&canonical), None).unwrap();
+        let canonical_record = CanonicalVcfRecord {
+            canonical_alleles: canonical.clone(),
+            retained_alt_indices: [0, 1].into_iter().collect(),
+        };
+        let mapped =
+            canonical_structured_alleles(1, &identity, Some(&canonical_record), None).unwrap();
 
         assert_eq!(mapped["G"], canonical[0]);
         assert_eq!(mapped["T"], canonical[1]);

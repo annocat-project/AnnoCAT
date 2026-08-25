@@ -14,5 +14,6 @@
 - [How AnnoCAT selects transcripts and evidence](transcript-and-evidence-selection.md)
 - [How AnnoCAT displays prediction evidence](evidence-display.md)
 - [Validate annotation results](annotation-validation.md)
+- [Validate annotation sources in GitHub Actions](github-actions-source-validation.md)
 - [Result import security](result-import-security.md)
 - [Maintain AnnoCAT's fastVEP build](fastvep-maintenance.md)

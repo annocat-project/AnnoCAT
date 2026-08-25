@@ -28,6 +28,20 @@ function Assert-NoPrivateBuildPaths {
     }
 }
 
+Push-Location $projectRoot
+try {
+    & cargo fmt --all -- --check
+    if ($LASTEXITCODE -ne 0) { throw "AnnoCAT formatting check failed" }
+    & cargo test --workspace --locked -- --test-threads=1
+    if ($LASTEXITCODE -ne 0) { throw "AnnoCAT tests failed" }
+    $frontendTests = (Get-ChildItem -LiteralPath (Join-Path $projectRoot "web\tests") -Filter "*.test.mjs").FullName
+    if (-not $frontendTests) { throw "AnnoCAT browser tests are missing" }
+    & node --test $frontendTests
+    if ($LASTEXITCODE -ne 0) { throw "AnnoCAT browser tests failed" }
+} finally {
+    Pop-Location
+}
+
 $previousEncodedRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
 $rustFlagSeparator = [char]0x1f
 $releaseRustFlags = @()

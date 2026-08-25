@@ -17,8 +17,11 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: pwsh
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
+          rustup toolchain install 1.94.1 --profile minimal --component rustfmt
           rustup default 1.94.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Fetch pinned AnnoCAT fastVEP fork
         shell: pwsh
         run: |
