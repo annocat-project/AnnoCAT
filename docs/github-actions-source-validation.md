@@ -1,8 +1,9 @@
 # Source validation in GitHub Actions
 
-Status: Synthetic contract matrix implemented; pinned release subsets pending
+Status: Synthetic contract matrix implemented and passing; pinned release
+subsets designed but not implemented
 
-Last updated: 2026-08-24
+Last updated: 2026-08-25
 
 This document defines how AnnoCAT can validate its supported annotation sources
 entirely on GitHub-hosted Actions runners. It supplements
@@ -49,7 +50,10 @@ contracts. `source-contract-validation.yml` runs each contract, the separate
 gnomAD genomes identity, and the combined contract in parallel. Every matrix
 entry builds and verifies OSA1 and OSA2, then passes the verified structured
 output through AnnoCAT's production result conversion and query functions from
-a test-only harness. Normal CI also runs the combined result-projection test.
+a test-only harness. The workflow builds that harness once, takes each enabled
+source list from the verifier report, and requires exactly one matching
+projection test before execution. Normal CI also runs the combined
+result-projection test.
 
 This implemented matrix uses synthetic source rows. The release matrix still
 needs independently pinned raw subsets for the managed, cache-backed sources
@@ -103,7 +107,7 @@ Every expected value is extracted independently from the pinned raw subset. The
 AnnoCAT parser, fastVEP output, or an existing AnnoCAT cache must not generate
 the expected record.
 
-Each subset has a manifest containing:
+The validation pack has one manifest containing:
 
 - source name and release;
 - upstream location and retrieval date;
@@ -115,10 +119,11 @@ Each subset has a manifest containing:
 - applicable source license or redistribution restriction; and
 - the AnnoCAT fields exercised by the subset.
 
-Every field from a matrix source that AnnoCAT exposes by default, permits
-through field selection, uses in a summary, or includes in export must appear
-in at least one subset expectation. A field inventory check fails when such a
-field has no fixture coverage.
+Every field that AnnoCAT parses specially, renames, selects, calibrates,
+summarizes, filters specially, or exports by default must appear in at least one
+real-source expectation. Generic optional passthrough fields do not each need a
+hand-reviewed real record: the field inventory checks their declared schema,
+and the synthetic fixtures check the shared passthrough behavior.
 
 Redistributable subsets can be committed under `fixtures/`. Restricted data
 must be fetched during a protected workflow or read from a private GitHub
@@ -131,6 +136,102 @@ queries, the workflow can fetch the pinned intervals directly. Otherwise it can
 stream the upstream file through an extractor without retaining the full file,
 or use a private pre-extracted pack when the source terms permit it. Regenerate
 and review the pack whenever the pinned source release changes.
+
+## Validation-data delivery
+
+Use one immutable validation pack assembled from the official pinned releases.
+Routine GitHub runs must not download complete dbSNP, gnomAD, dbNSFP, CADD, or
+SpliceAI releases.
+
+Store each redistributable source-native subset in this repository under
+`fixtures/source-release-subsets/`. For data that cannot be redistributed,
+fetch only the pinned subset from the official source during a protected
+release workflow. Use a private data repository only when indexed or streamed
+subset retrieval is not practical and the publisher terms permit private
+validation storage. Do not create that repository until a source demonstrates
+this need. None of the currently managed variant sources requires one.
+
+Use this layout for committed subsets and for temporary subsets fetched by the
+workflow:
+
+```text
+fixtures/source-release-subsets/
+  manifest.json
+  query.vcf
+  consequences.ndjson
+  projection-expectations.json
+  SOURCE/
+    raw.vcf, raw.tsv, or another source-native input
+    expected.ndjson
+```
+
+The raw file must come from the official release, not from fastVEP output, an
+OSA cache, or an AnnoCAT result. Preserve the source records and required
+headers. Record every deterministic extraction or formatting step in the
+manifest. Derive and review `expected.json` independently from those raw
+records.
+
+Create the pack once when a pinned source changes:
+
+1. Fetch selected intervals from indexed upstream files with `tabix` or
+   `bcftools`, or download and stream the relevant archive once when indexed
+   retrieval is unavailable.
+2. Retain the smallest records that cover the source contract and known
+   regressions.
+3. Record the upstream identity, extraction command and tool version, source
+   license, selection rule, and all hashes in `manifest.json`.
+4. Review the raw records and expected values before publishing the new pack
+   commit.
+
+dbNSFP 4.9a does not require the complete archive. Its outer ZIP stores each
+already-compressed chromosome file as an uncompressed ZIP member. Use the
+pinned offsets, lengths, and CRC values in `config/dbnsfp-4.9a-members.json` to
+fetch one or more chromosome members with HTTP Range requests, as AnnoCAT's
+`stream_pinned_dbnsfp_member()` already does. Verify `206 Partial Content`,
+`Content-Range`, byte count, and CRC before extracting the selected real rows.
+The inner chromosome file is gzip rather than BGZF, so the retrieval unit is a
+chromosome member, not an arbitrary genomic interval. This still avoids the
+complete 39 GB archive and does not require a separate data repository.
+
+All currently managed variant sources have a bounded official acquisition
+path:
+
+| Source | Validation input acquisition |
+| --- | --- |
+| ClinVar | Fetch selected intervals from the archived BGZF VCF, or use the complete pinned file because it is small enough for one runner. |
+| dbSNP | Fetch selected intervals from the pinned tabix-indexed BGZF VCF. |
+| gnomAD exomes and genomes | Fetch selected intervals from one pinned chromosome BGZF shard and its index. |
+| dbNSFP | Fetch selected stored chromosome members from the pinned outer ZIP with HTTP Range requests. |
+| CADD | Fetch selected intervals from the pinned SNV and indel tabix-indexed BGZF files. |
+| PhyloP | Fetch one or more pinned chromosome gzip shards and retain selected source lines. |
+| REVEL | Fetch one or more pinned chromosome ZIP archives and retain selected CSV records. |
+| SpliceAI | Fetch selected intervals from the pinned tabix-indexed BGZF VCF. |
+
+The validation workflow should reuse the release identities and range or shard
+metadata already present in `config/source-catalog.json`,
+`config/indexed-sources.json`, `config/wgs-streams.json`,
+`config/dbnsfp-4.9a-members.json`, and `config/revel-1.3-archives.json`. Do not
+create a second source catalog for validation.
+
+Keep the expected pack root hash and every remote subset identity in
+`fixtures/source-release-subsets/manifest.json`. The workflow verifies the pack
+before building any cache. It must fail if a required subset, release identity,
+or hash differs.
+
+Direct upstream retrieval during a release run is a fallback for data that
+cannot be retained with the source code or in approved private storage. It is
+permitted only when the workflow
+uses an immutable source identity, verifies the downloaded subset, and the
+publisher terms permit automated retrieval. Do not use a rolling `latest` URL
+as an oracle.
+
+Any restricted-source credential is available only to protected manual and
+release workflows. Do not run the real-source workflow on
+`pull_request_target`, and do not expose credentials to fork pull requests.
+Synthetic contract tests remain the pull-request gate. Restricted raw records,
+cache files, structured output, and result tables must not be uploaded as
+artifacts or written to logs; upload only hashes, versions, counts, and redacted
+mismatch reports.
 
 ## Workflow design
 
@@ -146,7 +247,9 @@ Keep the workflow structure small:
    matrix, then builds one candidate ZIP and exposes it as a workflow artifact
    without publishing it.
 5. `source-release-validation.yml` will run pinned raw-subset and
-   result-projection checks as a parallel matrix after those subsets exist.
+   result-projection checks as a parallel matrix after those subsets exist. It
+   obtains each subset from the committed pack or an approved immutable
+   upstream fetch. Private storage is an optional per-source fallback.
 6. A combined-source job tests source coexistence and both supported gnomAD
    profile choices.
 7. A candidate smoke job checks the packaged executable, core annotation,
@@ -178,10 +281,11 @@ Running entries together therefore does not combine their disk use. Each subset
 only needs to fit its own runner. Separate runners also prevent one source's
 files or environment from affecting another source.
 
-The candidate AnnoCAT and pinned fastVEP binaries are built once and uploaded as
-a small workflow artifact. Rebuilding them in every source job would add time
-without increasing coverage. Publishing the same candidate that passed the
-packaged-application smoke check avoids a build-after-validation gap.
+The pinned Linux fastVEP binary and AnnoCAT projection-test executable are built
+once and uploaded as short-lived workflow artifacts. Rebuilding them in every
+source job would add time without increasing coverage. The Windows candidate is
+built once after these checks; publishing that same candidate after its smoke
+check avoids a build-after-validation gap.
 
 Set `max-parallel` only if an upstream host, credential, or account imposes a
 measured concurrency limit. Apply that limit to the affected acquisition job;
@@ -200,8 +304,8 @@ Use `if: always()` only for the small diagnostic-report upload step.
 Each matrix entry performs the same operations:
 
 1. Check out the exact AnnoCAT commit.
-2. Download the candidate containing the fastVEP revision in
-   `config/fastvep-pin.json`.
+2. Download the pinned Linux fastVEP binary and AnnoCAT projection-test
+   executable built for this workflow run.
 3. Obtain and verify the pinned source subset.
 4. Build every supported cache format for that source.
 5. Verify cache structure before annotation.
@@ -321,7 +425,8 @@ Build the candidate once, smoke-test that exact ZIP, and publish it without a
 second build. Protected release jobs may use source credentials. Untrusted pull
 requests must not receive those credentials. Put restricted-source credentials
 in a protected GitHub environment and grant the workflow only the permissions
-it needs. Pin release-gating actions by commit SHA.
+it needs. Pin release-gating actions and every external source identity by
+commit, release, digest, or equivalent immutable identifier.
 
 ### Scheduled checks
 
@@ -344,28 +449,163 @@ The required release gate does not need:
 Complete-source validation can remain an optional maintenance check. Add it
 only if a future source change cannot be represented by a deterministic subset.
 
-## Implementation map
+## Required code changes
 
-- `.github/workflows/ci.yml`: current pull-request tests
-- `.github/workflows/annotation-concordance.yml`: current manual OSA parity and
-  Ensembl consequence checks; proposed reusable release gate
-- `.github/workflows/source-contract-validation.yml`: implemented synthetic
-  parallel source matrix
-- `.github/workflows/source-release-validation.yml`: proposed pinned raw-subset
-  matrix
-- `.github/workflows/windows-release.yml`: current bundle build; proposed
-  candidate build and gated publication
-- `fixtures/source-cache-parity/`: current synthetic source contracts
-- `fixtures/source-release-subsets/`: proposed pinned source subsets
-- `scripts/verify-supplementary-cache-parity.py`: current OSA parity checks
-- `scripts/verify-source-release-subset.py`: proposed end-to-end source check
-- `config/fastvep-pin.json`: fastVEP identity
-- `config/source-catalog.json`: source release contracts
+Keep the real-source lane separate from the existing synthetic matrix. A passing
+synthetic run must not be reported as pinned-release validation.
+
+### 1. Define one validation-pack manifest
+
+Add `fixtures/source-release-subsets/manifest.json`. Each source entry contains:
+
+- the source ID and existing catalog or manifest reference;
+- the bounded acquisition method and selected chromosome, member, or intervals;
+- the source-native output path used by `sa-build`;
+- immutable upstream identity and any index identity not already pinned;
+- expected byte count and SHA-256 of the extracted raw subset;
+- paths and SHA-256 values for the common query VCF, expected structured output,
+  and projection expectations; and
+- redistribution status.
+
+Do not repeat URLs or release names already present in
+`source-catalog.json`, `indexed-sources.json`, `wgs-streams.json`,
+`dbnsfp-4.9a-members.json`, or `revel-1.3-archives.json`. The validation manifest
+references those contracts and adds only the selection and subset hashes.
+
+### 2. Add the source-native validation pack
+
+Add `fixtures/source-release-subsets/` with:
+
+```text
+manifest.json
+query.vcf
+consequences.ndjson
+projection-expectations.json
+SOURCE/raw.vcf, raw.tsv, raw.csv, or raw.wigFix
+SOURCE/expected.ndjson
+```
+
+Commit only records whose terms permit redistribution. For a restricted source,
+commit its manifest entry and expectations but materialize `SOURCE/raw.*` under
+the runner's temporary directory. The common query is the union of the tested
+alleles. Expected values are reviewed from the raw records and are never
+generated by fastVEP or AnnoCAT.
+
+Transcript-scoped REVEL and dbNSFP checks also need reviewed consequence records
+for the same alleles. Store those records in the pack and merge them into the
+supplementary structured output in the test harness. Core consequence
+correctness remains the responsibility of `annotation-concordance.yml`; this
+merge only supplies the selected-transcript identity needed to test evidence
+resolution.
+
+### 3. Add one validation-only retriever
+
+Add `scripts/prepare-source-release-subset.py`. It reads the validation manifest
+and existing source manifests, accepts `--source` and `--output`, and supports
+only the acquisition methods currently needed:
+
+- remote tabix intervals for dbSNP, gnomAD, CADD, and SpliceAI;
+- an HTTP Range ZIP member for dbNSFP;
+- a chromosome gzip shard for PhyloP;
+- a chromosome ZIP archive for REVEL; and
+- the pinned ClinVar file or its indexed intervals.
+
+Use Python's standard library for HTTP Range, gzip, ZIP, CRC, and hashing. Invoke
+the runner-provided `tabix` for indexed BGZF queries. The script verifies remote
+identity, response ranges, extracted byte count, and final SHA-256 before making
+the subset available. It must not derive expected annotations.
+
+### 4. Reuse and extend the current parity verifier
+
+Extend `scripts/verify-supplementary-cache-parity.py`; do not add a second cache
+verification implementation. Add a manifest mode that:
+
+1. resolves source file paths from
+   `fixtures/source-release-subsets/manifest.json`;
+2. verifies every raw and expected-file hash;
+3. builds and structurally verifies OSA1 and OSA2 with the pinned fastVEP;
+4. annotates the common query VCF;
+5. requires OSA1, OSA2, and `expected.ndjson` to be logically equal; and
+6. writes the verified OSA2 structured output for AnnoCAT projection tests.
+
+Keep the current synthetic defaults unchanged. Add a field-inventory check
+against `supplementary-source-fields.json` and
+`dbnsfp-4.9a-curated-fields.json`. Require a real expectation for every field
+with AnnoCAT-specific semantics and schema coverage for generic optional
+passthrough fields.
+
+### 5. Add a data-driven AnnoCAT projection test
+
+Add `crates/annocat-cli/src/results/source_release_validation.rs` as a
+test-only child module of `results.rs`. The test reads paths from environment
+variables, runs the existing production conversion functions, and consumes
+`projection-expectations.json` instead of hard-coded positions.
+
+For each declared expectation it checks:
+
+- canonical evidence type, scope, allele, gene, and transcript identity;
+- table display and missing-versus-zero behavior;
+- exact categorical and numeric filters;
+- ascending and descending sorts;
+- Variant Details evidence; and
+- CSV export values.
+
+Mark this test ignored for ordinary `cargo test`; the release-subset workflow
+invokes it explicitly with the required files. Do not add a production CLI
+command or an incomplete-source mode.
+
+### 6. Add the real-source workflow and release gate
+
+Add `.github/workflows/source-release-validation.yml` with
+`workflow_call` and `workflow_dispatch`. It:
+
+1. builds the fastVEP revision from `fastvep-pin.json` and the ignored AnnoCAT
+   projection-test executable once, then uploads both as short-lived artifacts;
+2. runs the nine source entries and the combined entry as a parallel matrix;
+3. prepares and verifies the applicable subset;
+4. runs the parity verifier in manifest mode;
+5. runs the ignored AnnoCAT projection test; and
+6. uploads only hashes, counts, versions, and mismatch summaries.
+
+Use `fail-fast: false`, explicit timeouts, `contents: read`, and no shared
+`actions/cache` for source records or generated caches. Keep
+`.github/workflows/source-contract-validation.yml` as the fast synthetic
+pull-request gate.
+
+Make `.github/workflows/annotation-concordance.yml` callable with
+`workflow_call`. Initially run the real-source workflow manually. After its
+retriever reproducibility checks and first complete pass succeed, update
+`.github/workflows/windows-release.yml` so bundle creation depends on synthetic
+contracts, pinned consequence concordance, and the real-source matrix.
+Publishing remains blocked until the exact bundle has also passed its packaged
+smoke test.
+
+### 7. Required checks before enabling the release gate
+
+- Run the retriever twice and require byte-identical subsets.
+- Deliberately change each pinned hash and require fail-closed behavior.
+- Run every source entry and the combined entry on GitHub-hosted runners.
+- Confirm no restricted row appears in logs or uploaded artifacts.
+- Confirm the existing synthetic workflow and normal CI remain unchanged.
+- Record the first passing real-source workflow run before describing the
+  release as source-concordant.
+
+### Files that do not change
+
+The implementation must not change:
+
+- production source installers in `preparation.rs`;
+- source readiness or complete-shard checks;
+- fastVEP cache formats or source parsers;
+- annotation and result schemas;
+- result viewer behavior; or
+- local release packaging behavior outside the added release dependencies.
 
 ## GitHub references
 
 - [GitHub-hosted runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 - [Reusable workflows](https://docs.github.com/en/actions/concepts/workflows-and-actions/reusing-workflow-configurations)
+- [Using secrets in GitHub Actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
 - [Artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations)
 - [Secure use of GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use)

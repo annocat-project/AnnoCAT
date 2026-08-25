@@ -15185,11 +15185,6 @@ mod tests {
         for line in fs::read_to_string(&structured_input).unwrap().lines() {
             let mut record: Value = serde_json::from_str(line).unwrap();
             let position = record["start"].as_i64().unwrap();
-            if position == 20000 && enabled("dbsnp") {
-                for allele in record["alleles"].as_array_mut().unwrap() {
-                    allele["dbsnp"]["id"] = json!("rs900001");
-                }
-            }
             let consequences = consequence_specs[&position]
                 .iter()
                 .map(|(alternate, gene, transcript, amino_acids)| {

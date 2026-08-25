@@ -29,11 +29,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.94.1 --profile minimal
           rustup default 1.94.1
-      - name: Build pinned fastVEP
+      - name: Build validation binaries
         run: |
           commit=$(jq -r .commit config/fastvep-pin.json)
           repository=$(jq -r .repository config/fastvep-pin.json)
@@ -43,10 +47,16 @@ jobs:
             --release --locked -p fastvep-cli
           mkdir "$RUNNER_TEMP/binary"
           cp "$RUNNER_TEMP/fastVEP/target/release/fastvep" "$RUNNER_TEMP/binary/"
+          test_binary=$(cargo test -p annocat-cli --bin annocat --locked \
+            --no-run --message-format=json | \
+            jq -r 'select(.reason == "compiler-artifact" and .target.name == "annocat" and .executable != null) | .executable' | \
+            tail -n 1)
+          test -n "$test_binary"
+          cp "$test_binary" "$RUNNER_TEMP/binary/annocat-source-contract-tests"
       - uses: actions/upload-artifact@v4
         with:
-          name: source-contract-fastvep
-          path: ${{ runner.temp }}/binary/fastvep
+          name: source-contract-binaries
+          path: ${{ runner.temp }}/binary/
           if-no-files-found: error
           retention-days: 1
 
@@ -70,17 +80,13 @@ jobs:
           - all
     steps:
       - uses: actions/checkout@v4
-      - name: Install Linux build dependencies
+      - name: Install Linux test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwayland-dev
-      - name: Install pinned Rust toolchain
-        run: |
-          rustup toolchain install 1.94.1 --profile minimal
-          rustup default 1.94.1
       - uses: actions/download-artifact@v4
         with:
-          name: source-contract-fastvep
+          name: source-contract-binaries
           path: ${{ runner.temp }}/binary
       - name: Validate cache and structured-output contract
         shell: bash
@@ -98,16 +104,18 @@ jobs:
             --fastvep "$fastvep" "${arguments[@]}" \
             --structured-output "$structured" --json "$report"
           echo "ANNOCAT_SOURCE_PARITY_STRUCTURED=$structured" >> "$GITHUB_ENV"
-          if [[ "$source_id" == "all" ]]; then
-            echo "ANNOCAT_SOURCE_PARITY_SOURCES=clinvar,gnomad,dbsnp,spliceai,cadd,phylop,revel,dbnsfp" >> "$GITHUB_ENV"
-          else
-            echo "ANNOCAT_SOURCE_PARITY_SOURCES=$source_id" >> "$GITHUB_ENV"
-          fi
+          sources=$(jq -r '.sources | join(",")' "$report")
+          test -n "$sources"
+          echo "ANNOCAT_SOURCE_PARITY_SOURCES=$sources" >> "$GITHUB_ENV"
       - name: Validate AnnoCAT result projections
-        run: >-
-          cargo test -p annocat-cli
-          source_cache_parity_fixture_survives_result_projection
-          --locked -- --test-threads=1
+        run: |
+          test_binary="$RUNNER_TEMP/binary/annocat-source-contract-tests"
+          test_name="results::tests::source_cache_parity_fixture_survives_result_projection"
+          chmod +x "$test_binary"
+          matches=$("$test_binary" --list --format terse | \
+            awk -v expected="$test_name: test" '$0 == expected { count++ } END { print count + 0 }')
+          test "$matches" -eq 1
+          "$test_binary" --exact "$test_name" --test-threads=1
       - name: Upload validation report
         if: always()
         uses: actions/upload-artifact@v4
