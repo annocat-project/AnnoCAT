@@ -1,0 +1,114 @@
+name: Source contract validation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/source-contract-validation.yml"
+      - "config/fastvep-pin.json"
+      - "crates/annocat-cli/src/results.rs"
+      - "fixtures/source-cache-parity/**"
+      - "scripts/verify-supplementary-cache-parity.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/source-contract-validation.yml"
+      - "config/fastvep-pin.json"
+      - "crates/annocat-cli/src/results.rs"
+      - "fixtures/source-cache-parity/**"
+      - "scripts/verify-supplementary-cache-parity.py"
+
+permissions:
+  contents: read
+
+jobs:
+  fastvep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+      - name: Build pinned fastVEP
+        run: |
+          commit=$(jq -r .commit config/fastvep-pin.json)
+          repository=$(jq -r .repository config/fastvep-pin.json)
+          git clone "$repository" "$RUNNER_TEMP/fastVEP"
+          git -C "$RUNNER_TEMP/fastVEP" checkout --detach "$commit"
+          cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
+            --release --locked -p fastvep-cli
+          mkdir "$RUNNER_TEMP/binary"
+          cp "$RUNNER_TEMP/fastVEP/target/release/fastvep" "$RUNNER_TEMP/binary/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-contract-fastvep
+          path: ${{ runner.temp }}/binary/fastvep
+          if-no-files-found: error
+          retention-days: 1
+
+  source:
+    needs: fastvep
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - clinvar
+          - dbsnp
+          - gnomad
+          - gnomad-genomes
+          - dbnsfp
+          - cadd
+          - phylop
+          - revel
+          - spliceai
+          - all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-contract-fastvep
+          path: ${{ runner.temp }}/binary
+      - name: Validate cache and structured-output contract
+        shell: bash
+        run: |
+          fastvep="$RUNNER_TEMP/binary/fastvep"
+          source_id="${{ matrix.source }}"
+          structured="$RUNNER_TEMP/$source_id.ndjson"
+          report="$RUNNER_TEMP/$source_id.json"
+          chmod +x "$fastvep"
+          arguments=()
+          if [[ "$source_id" != "all" ]]; then
+            arguments+=(--source "$source_id")
+          fi
+          python scripts/verify-supplementary-cache-parity.py \
+            --fastvep "$fastvep" "${arguments[@]}" \
+            --structured-output "$structured" --json "$report"
+          echo "ANNOCAT_SOURCE_PARITY_STRUCTURED=$structured" >> "$GITHUB_ENV"
+          if [[ "$source_id" == "all" ]]; then
+            echo "ANNOCAT_SOURCE_PARITY_SOURCES=clinvar,gnomad,dbsnp,spliceai,cadd,phylop,revel,dbnsfp" >> "$GITHUB_ENV"
+          else
+            echo "ANNOCAT_SOURCE_PARITY_SOURCES=$source_id" >> "$GITHUB_ENV"
+          fi
+      - name: Validate AnnoCAT result projections
+        run: >-
+          cargo test -p annocat-cli
+          source_cache_parity_fixture_survives_result_projection
+          --locked -- --test-threads=1
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-contract-${{ matrix.source }}
+          path: ${{ runner.temp }}/${{ matrix.source }}.json
+          if-no-files-found: warn
+          retention-days: 14

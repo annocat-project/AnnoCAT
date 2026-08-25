@@ -1,6 +1,6 @@
 # Source validation in GitHub Actions
 
-Status: Proposed release gate
+Status: Synthetic contract matrix implemented; pinned release subsets pending
 
 Last updated: 2026-08-24
 
@@ -45,11 +45,15 @@ release is scientifically correct or that a full upstream archive is complete.
 
 The current `fixtures/source-cache-parity/` corpus and
 `verify-supplementary-cache-parity.py` script cover eight logical source
-contracts. The script currently runs in the manually triggered
-`annotation-concordance.yml` workflow; normal CI runs the Rust result-projection
-test over the same expected fixture. The proposed release matrix extends those
-checks to pinned raw subsets for the managed, cache-backed sources that AnnoCAT
-can currently install:
+contracts. `source-contract-validation.yml` runs each contract, the separate
+gnomAD genomes identity, and the combined contract in parallel. Every matrix
+entry builds and verifies OSA1 and OSA2, then passes the verified structured
+output through AnnoCAT's production result conversion and query functions from
+a test-only harness. Normal CI also runs the combined result-projection test.
+
+This implemented matrix uses synthetic source rows. The release matrix still
+needs independently pinned raw subsets for the managed, cache-backed sources
+that AnnoCAT can currently install:
 
 - ClinVar;
 - dbSNP;
@@ -134,17 +138,20 @@ Keep the workflow structure small:
 
 1. `ci.yml` keeps the current Rust and browser tests, including the synthetic
    source-contract result-projection test.
-2. `annotation-concordance.yml` keeps the current synthetic OSA parity check and
+2. `source-contract-validation.yml` runs the synthetic source matrix and the
+   combined-source contract on separate `ubuntu-latest` runners.
+3. `annotation-concordance.yml` keeps the current synthetic OSA parity check and
    pinned Ensembl consequence oracle, and becomes callable with `workflow_call`.
-3. `windows-release.yml` builds one candidate ZIP and exposes it as a workflow
-   artifact without publishing it.
-4. `source-release-validation.yml` runs raw-to-cache and result-projection
-   checks as a parallel matrix on `windows-latest`.
-5. A combined-source job tests source coexistence and both supported gnomAD
+4. `windows-release.yml` requires the implemented synthetic source-contract
+   matrix, then builds one candidate ZIP and exposes it as a workflow artifact
+   without publishing it.
+5. `source-release-validation.yml` will run pinned raw-subset and
+   result-projection checks as a parallel matrix after those subsets exist.
+6. A combined-source job tests source coexistence and both supported gnomAD
    profile choices.
-6. A candidate smoke job checks the packaged executable, core annotation,
+7. A candidate smoke job checks the packaged executable, core annotation,
    result integrity, and export.
-7. A final publish job releases that exact candidate only after CI, consequence
+8. A final publish job releases that exact candidate only after CI, consequence
    concordance, every source entry, combined-source validation, and the smoke
    test pass.
 
@@ -342,7 +349,9 @@ only if a future source change cannot be represented by a deterministic subset.
 - `.github/workflows/ci.yml`: current pull-request tests
 - `.github/workflows/annotation-concordance.yml`: current manual OSA parity and
   Ensembl consequence checks; proposed reusable release gate
-- `.github/workflows/source-release-validation.yml`: proposed parallel source
+- `.github/workflows/source-contract-validation.yml`: implemented synthetic
+  parallel source matrix
+- `.github/workflows/source-release-validation.yml`: proposed pinned raw-subset
   matrix
 - `.github/workflows/windows-release.yml`: current bundle build; proposed
   candidate build and gated publication

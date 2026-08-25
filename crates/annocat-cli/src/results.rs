@@ -15118,6 +15118,28 @@ mod tests {
     fn source_cache_parity_fixture_survives_result_projection() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source-cache-parity");
+        let structured_input = std::env::var_os("ANNOCAT_SOURCE_PARITY_STRUCTURED")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fixture.join("expected.ndjson"));
+        let sources = std::env::var("ANNOCAT_SOURCE_PARITY_SOURCES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                [
+                    "clinvar", "gnomad", "dbsnp", "spliceai", "cadd", "phylop", "revel", "dbnsfp",
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            });
+        assert!(!sources.is_empty(), "source parity test requires a source");
+        let enabled = |source: &str| sources.iter().any(|value| value == source);
         let root = std::env::temp_dir().join(format!(
             "annocat-source-cache-parity-{}-{}",
             std::process::id(),
@@ -15160,13 +15182,10 @@ mod tests {
             (40000, vec![("A", "GENEN", "ENST40000", "X/Y")]),
         ]);
         let mut projected_lines = Vec::new();
-        for line in fs::read_to_string(fixture.join("expected.ndjson"))
-            .unwrap()
-            .lines()
-        {
+        for line in fs::read_to_string(&structured_input).unwrap().lines() {
             let mut record: Value = serde_json::from_str(line).unwrap();
             let position = record["start"].as_i64().unwrap();
-            if position == 20000 {
+            if position == 20000 && enabled("dbsnp") {
                 for allele in record["alleles"].as_array_mut().unwrap() {
                     allele["dbsnp"]["id"] = json!("rs900001");
                 }
@@ -15233,10 +15252,6 @@ mod tests {
         let variant_summary =
             convert_vcf(&annotated_vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
         assert_eq!(variant_summary.rows, 10);
-        let sources = [
-            "clinvar", "gnomad", "dbsnp", "spliceai", "cadd", "phylop", "revel", "dbnsfp",
-        ]
-        .map(str::to_owned);
         let aliases = structured_source_aliases(&sources).unwrap();
         let mut progress = |_, _, _, _, _| {};
         convert_structured_mode(
@@ -15267,30 +15282,43 @@ mod tests {
                 .unwrap_or_else(|error| panic!("missing {scope} {source}.{field} for {allele}: {error}"))
         };
         let first = allele_id("1", 10001, "A", "G");
-        assert_eq!(number(&first, "cadd", "phred", "allele"), 12.4);
-        assert_eq!(number(&first, "phylop", "value", "allele"), 3.14);
-        assert_eq!(number(&first, "dbnsfp", "REVEL_score", "selected"), 0.91);
-        assert_eq!(
-            number(&first, "dbnsfp", "AlphaMissense_score", "selected"),
-            0.81
-        );
-        let dbnsfp_records: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM read_parquet(?)
-                 WHERE allele_id=? AND source_id='dbnsfp'
-                   AND scope='source_records' AND field_path='__recordList'",
-                params![evidence_path.as_ref(), first],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dbnsfp_records, 1);
+        if enabled("cadd") {
+            assert_eq!(number(&first, "cadd", "phred", "allele"), 12.4);
+        }
+        if enabled("phylop") {
+            assert_eq!(number(&first, "phylop", "value", "allele"), 3.14);
+        }
+        if enabled("dbnsfp") {
+            assert_eq!(number(&first, "dbnsfp", "REVEL_score", "selected"), 0.91);
+            assert_eq!(
+                number(&first, "dbnsfp", "AlphaMissense_score", "selected"),
+                0.81
+            );
+            let dbnsfp_records: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM read_parquet(?)
+                     WHERE allele_id=? AND source_id='dbnsfp'
+                       AND scope='source_records' AND field_path='__recordList'",
+                    params![evidence_path.as_ref(), first],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(dbnsfp_records, 1);
+        }
 
         let population_a = allele_id("1", 20000, "C", "A");
         let population_t = allele_id("1", 20000, "C", "T");
-        assert_eq!(number(&population_a, "gnomad", "allAf", "allele"), 0.005);
-        assert_eq!(number(&population_t, "gnomad", "allAf", "allele"), 0.01);
-        assert_eq!(number(&population_a, "dbsnp", "globalMaf", "allele"), 0.005);
-        assert_eq!(number(&population_t, "dbsnp", "globalMaf", "allele"), 0.01);
+        let gnomad_source = enabled("gnomad-genomes")
+            .then_some("gnomad-genomes")
+            .or_else(|| enabled("gnomad").then_some("gnomad"));
+        if let Some(source) = gnomad_source {
+            assert_eq!(number(&population_a, source, "allAf", "allele"), 0.005);
+            assert_eq!(number(&population_t, source, "allAf", "allele"), 0.01);
+        }
+        if enabled("dbsnp") {
+            assert_eq!(number(&population_a, "dbsnp", "globalMaf", "allele"), 0.005);
+            assert_eq!(number(&population_t, "dbsnp", "globalMaf", "allele"), 0.01);
+        }
 
         let neighbor = allele_id("1", 25000, "A", "G");
         let leaked: i64 = connection
@@ -15304,159 +15332,199 @@ mod tests {
 
         let splice_a = allele_id("1", 30000, "C", "A");
         let splice_t = allele_id("1", 30000, "C", "T");
-        assert_eq!(number(&splice_a, "spliceai", "dsAg", "selected"), 0.5);
-        assert_eq!(number(&splice_t, "spliceai", "dsDl", "selected"), 0.92);
-        assert_eq!(number(&splice_t, "spliceai", "dpAl", "selected"), -5.0);
         let ambiguous_splice = allele_id("1", 40000, "N", "A");
-        assert_eq!(
-            number(&ambiguous_splice, "spliceai", "dsDg", "selected"),
-            0.3
-        );
-        assert_eq!(
-            number(&ambiguous_splice, "spliceai", "dpAg", "selected"),
-            -12.0
-        );
+        if enabled("spliceai") {
+            assert_eq!(number(&splice_a, "spliceai", "dsAg", "selected"), 0.5);
+            assert_eq!(number(&splice_t, "spliceai", "dsDl", "selected"), 0.92);
+            assert_eq!(number(&splice_t, "spliceai", "dpAl", "selected"), -5.0);
+            assert_eq!(
+                number(&ambiguous_splice, "spliceai", "dsDg", "selected"),
+                0.3
+            );
+            assert_eq!(
+                number(&ambiguous_splice, "spliceai", "dpAg", "selected"),
+                -12.0
+            );
+        }
 
         let revel_a = allele_id("1", 35142, "G", "A");
         let revel_c = allele_id("1", 35142, "G", "C");
-        assert_eq!(number(&revel_a, "revel", "score", "selected"), 0.027);
-        assert_eq!(number(&revel_c, "revel", "score", "selected"), 0.035);
+        if enabled("revel") {
+            assert_eq!(number(&revel_a, "revel", "score", "selected"), 0.027);
+            assert_eq!(number(&revel_c, "revel", "score", "selected"), 0.035);
+        }
 
         let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
         let fields = catalog_value["fields"].as_array().unwrap();
-        let clinvar_index = fields
-            .iter()
-            .position(|field| {
-                field["sourceId"] == "clinvar" && field["fieldPath"] == "significance"
-            })
-            .unwrap();
-        let cadd_index = fields
-            .iter()
-            .position(|field| field["sourceId"] == "cadd" && field["fieldPath"] == "phred")
-            .unwrap();
-        let phylop_index = fields
-            .iter()
-            .position(|field| field["sourceId"] == "phylop" && field["fieldPath"] == "value")
-            .unwrap();
-        let pathogenic: Value = serde_json::from_str(
-            &page_json_with_evidence(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                0,
-                10,
-                &PageRequest {
-                    exact_total: true,
-                    evidence_filters: vec![EvidenceFilterRequest {
-                        index: clinvar_index,
-                        operator: "in".into(),
-                        value: String::new(),
-                        value2: String::new(),
-                        values: Some(vec!["Pathogenic".into()]),
-                        include_missing: Some(false),
-                    }],
-                    ..PageRequest::default()
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(pathogenic["total"], 1);
-
-        let (rsid_projection, rsid_index) =
-            export_reference_snp_projection(Some(&evidence), Some(&catalog))
-                .unwrap()
+        let field_index = |source: &str, field: &str| {
+            fields
+                .iter()
+                .position(|entry| entry["sourceId"] == source && entry["fieldPath"] == field)
+                .unwrap_or_else(|| panic!("missing {source}.{field} fixture field"))
+        };
+        let verify_projection =
+            |source: &str, field: &str, expected_allele: &str, position: i64, expected: &str| {
+                let index = field_index(source, field);
+                let sorted: Value = serde_json::from_str(
+                    &page_json_with_evidence(
+                        &variants,
+                        Some(&evidence),
+                        Some(&catalog),
+                        0,
+                        10,
+                        &PageRequest {
+                            exact_total: true,
+                            evidence_columns: vec![index],
+                            sort_evidence: Some(index),
+                            direction: "desc".into(),
+                            ..PageRequest::default()
+                        },
+                    )
+                    .unwrap(),
+                )
                 .unwrap();
-        let projected_rsid: String = connection
-            .query_row(
-                "SELECT string_value FROM read_parquet(?) WHERE field_index=? LIMIT 1",
-                params![
-                    rsid_projection.to_string_lossy().as_ref(),
-                    rsid_index as i64
-                ],
-                |row| row.get(0),
+                assert_eq!(sorted["rows"][0]["alleleId"], expected_allele);
+
+                let exported = root.join(format!("{source}-{field}.csv"));
+                let label = format!("{source}.{field}");
+                assert!(
+                    export_filtered_rows_with_details_and_labels(
+                        &variants,
+                        Some(&evidence),
+                        Some(&catalog),
+                        &exported,
+                        &PageRequest {
+                            position_min: Some(position),
+                            position_max: Some(position),
+                            ..PageRequest::default()
+                        },
+                        &[
+                            "chromosome".into(),
+                            "position".into(),
+                            format!("evidence:{index}"),
+                        ],
+                        &["Chr".into(), "Pos".into(), label.clone()],
+                    )
+                    .unwrap()
+                        > 0
+                );
+                let exported = fs::read_to_string(exported).unwrap();
+                assert!(exported.contains(&format!("\"{label}\"")));
+                assert!(exported.contains(expected));
+
+                let detail: Value = serde_json::from_str(
+                    &detail_json(&consequences, &evidence, expected_allele).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    detail["evidence"].as_array().unwrap().iter().any(|entry| {
+                        entry["sourceId"] == source && entry["fieldPath"] == field
+                    })
+                );
+            };
+
+        if enabled("clinvar") {
+            let clinvar_index = field_index("clinvar", "significance");
+            let pathogenic: Value = serde_json::from_str(
+                &page_json_with_evidence(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    0,
+                    10,
+                    &PageRequest {
+                        exact_total: true,
+                        evidence_filters: vec![EvidenceFilterRequest {
+                            index: clinvar_index,
+                            operator: "in".into(),
+                            value: String::new(),
+                            value2: String::new(),
+                            values: Some(vec!["Pathogenic".into()]),
+                            include_missing: Some(false),
+                        }],
+                        ..PageRequest::default()
+                    },
+                )
+                .unwrap(),
             )
             .unwrap();
-        assert_eq!(projected_rsid, "rs900001");
-        let joined_rsid_rows: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM read_parquet(?) v
-                 JOIN read_parquet(?) p USING(record_number, alt_index)
-                 WHERE v.position=20000 AND p.field_index=?",
-                params![
-                    variants.to_string_lossy().as_ref(),
-                    rsid_projection.to_string_lossy().as_ref(),
-                    rsid_index as i64
-                ],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(joined_rsid_rows, 2);
+            assert_eq!(pathogenic["total"], 1);
+            verify_projection("clinvar", "significance", &first, 10001, "Pathogenic");
+        }
 
-        let exported = root.join("dbsnp-rsid.csv");
-        assert_eq!(
-            export_filtered_rows_with_details(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                &exported,
-                &PageRequest {
-                    position_min: Some(20000),
-                    position_max: Some(20000),
-                    ..PageRequest::default()
-                },
-                &["chromosome".into(), "position".into()],
-            )
-            .unwrap(),
-            2
-        );
-        let exported = fs::read_to_string(exported).unwrap();
-        assert_eq!(exported.matches("rs900001").count(), 2);
-        assert!(exported.starts_with("\u{feff}\"Chr\",\"Position\",\"rsID\"\r\n"));
+        if enabled("dbsnp") {
+            let (rsid_projection, rsid_index) =
+                export_reference_snp_projection(Some(&evidence), Some(&catalog))
+                    .unwrap()
+                    .unwrap();
+            let projected_rsid: String = connection
+                .query_row(
+                    "SELECT string_value FROM read_parquet(?) WHERE field_index=? LIMIT 1",
+                    params![
+                        rsid_projection.to_string_lossy().as_ref(),
+                        rsid_index as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(projected_rsid, "rs900001");
+            let joined_rsid_rows: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM read_parquet(?) v
+                     JOIN read_parquet(?) p USING(record_number, alt_index)
+                     WHERE v.position=20000 AND p.field_index=?",
+                    params![
+                        variants.to_string_lossy().as_ref(),
+                        rsid_projection.to_string_lossy().as_ref(),
+                        rsid_index as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(joined_rsid_rows, 2);
 
-        let exported = root.join("filtered-visible-columns.csv");
-        let columns = vec![
-            "chromosome".into(),
-            "position".into(),
-            "rsid".into(),
-            format!("evidence:{cadd_index}"),
-            format!("evidence:{phylop_index}"),
-        ];
-        let labels = vec![
-            "Chr".into(),
-            "Pos".into(),
-            "rsID".into(),
-            "CADD PHRED score".into(),
-            "phyloP 100-way score".into(),
-        ];
-        assert_eq!(
-            export_filtered_rows_with_details_and_labels(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                &exported,
-                &PageRequest {
-                    position_min: Some(10001),
-                    position_max: Some(10001),
-                    ..PageRequest::default()
-                },
-                &columns,
-                &labels,
-            )
-            .unwrap(),
-            1
-        );
-        let exported = fs::read_to_string(exported).unwrap();
-        assert!(exported.starts_with(
-            "\u{feff}\"Chr\",\"Pos\",\"rsID\",\"CADD PHRED score\",\"phyloP 100-way score\"\r\n"
-        ));
-        assert!(exported.contains("\"12.4\",\"3.14\""));
+            let exported = root.join("dbsnp-rsid.csv");
+            assert_eq!(
+                export_filtered_rows_with_details(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    &exported,
+                    &PageRequest {
+                        position_min: Some(20000),
+                        position_max: Some(20000),
+                        ..PageRequest::default()
+                    },
+                    &["chromosome".into(), "position".into()],
+                )
+                .unwrap(),
+                2
+            );
+            let exported = fs::read_to_string(exported).unwrap();
+            assert_eq!(exported.matches("rs900001").count(), 2);
+            assert!(exported.starts_with("\u{feff}\"Chr\",\"Position\",\"rsID\"\r\n"));
+            verify_projection("dbsnp", "globalMaf", &population_t, 20000, "0.01");
+        }
 
-        let detail: Value =
-            serde_json::from_str(&detail_json(&consequences, &evidence, &first).unwrap()).unwrap();
-        assert!(detail["evidence"].as_array().unwrap().iter().any(|entry| {
-            entry["sourceId"] == "cadd" && entry["fieldPath"] == "phred" && entry["value"] == 12.4
-        }));
+        if let Some(source) = gnomad_source {
+            verify_projection(source, "allAf", &population_t, 20000, "0.01");
+        }
+        if enabled("spliceai") {
+            verify_projection("spliceai", "dsDl", &splice_t, 30000, "0.92");
+        }
+        if enabled("cadd") {
+            verify_projection("cadd", "phred", &first, 10001, "12.4");
+        }
+        if enabled("phylop") {
+            verify_projection("phylop", "value", &first, 10001, "3.14");
+        }
+        if enabled("revel") {
+            let revel_high = allele_id("1", 35143, "C", "A");
+            verify_projection("revel", "score", &revel_high, 35143, "0.842");
+        }
+        if enabled("dbnsfp") {
+            verify_projection("dbnsfp", "REVEL_score", &first, 10001, "0.91");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

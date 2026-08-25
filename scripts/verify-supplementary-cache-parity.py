@@ -11,15 +11,19 @@ import tempfile
 from pathlib import Path
 
 
-SOURCES = (
-    ("clinvar", "clinvar.vcf"),
-    ("gnomad", "gnomad.vcf"),
-    ("dbsnp", "dbsnp.vcf"),
-    ("spliceai", "spliceai.vcf"),
-    ("cadd", "cadd.tsv"),
-    ("phylop", "phylop.tsv"),
-    ("revel", "revel.csv"),
-    ("dbnsfp", "dbnsfp.tsv"),
+SOURCE_SPECS = {
+    "clinvar": ("clinvar", "clinvar.vcf", "clinvar"),
+    "gnomad": ("gnomad", "gnomad.vcf", "gnomad"),
+    "gnomad-genomes": ("gnomad", "gnomad.vcf", "gnomad"),
+    "dbsnp": ("dbsnp", "dbsnp.vcf", "dbsnp"),
+    "spliceai": ("spliceai", "spliceai.vcf", "spliceAI"),
+    "cadd": ("cadd", "cadd.tsv", "cadd"),
+    "phylop": ("phylop", "phylop.tsv", "phylop"),
+    "revel": ("revel", "revel.csv", "revel"),
+    "dbnsfp": ("dbnsfp", "dbnsfp.tsv", "dbnsfp"),
+}
+DEFAULT_SOURCES = tuple(
+    source for source in SOURCE_SPECS if source != "gnomad-genomes"
 )
 DBNSFP_FIELDS = json.dumps(
     ["Ensembl_transcriptid", "REVEL_score", "AlphaMissense_score"],
@@ -82,6 +86,34 @@ def require_equal(label, expected, actual):
     raise AssertionError(f"{label} differs from the source contract\n{difference}")
 
 
+def select_sources(records, source_ids):
+    keys = {SOURCE_SPECS[source_id][2] for source_id in source_ids}
+    selected = {}
+    for identity, record in records.items():
+        projected = {key: value for key, value in record.items() if key != "alleles"}
+        alleles = []
+        for allele in record.get("alleles", []):
+            selected_allele = {"allele": allele["allele"]}
+            selected_allele.update(
+                (key, allele[key]) for key in keys if key in allele
+            )
+            if len(selected_allele) > 1:
+                alleles.append(selected_allele)
+        if alleles:
+            projected["alleles"] = alleles
+        selected[identity] = projected
+    return selected
+
+
+def write_ndjson(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = (
+        json.dumps(record, sort_keys=True, separators=(",", ":"))
+        for record in records.values()
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def cache_file(directory, source, cache_format):
     path = directory / f"{source}.{cache_format}"
     if not path.is_file():
@@ -89,20 +121,21 @@ def cache_file(directory, source, cache_format):
     return path
 
 
-def build_and_annotate(fastvep, fixtures, work, cache_format):
+def build_and_annotate(fastvep, fixtures, work, cache_format, source_ids):
     cache_directory = work / cache_format
     cache_directory.mkdir()
     environment = os.environ.copy()
     environment["ANNOCAT_DBNSFP_FIELDS"] = DBNSFP_FIELDS
     cache_hashes = {}
-    for source, filename in SOURCES:
-        output = cache_directory / source
+    for source_id in source_ids:
+        cache_source, filename, _ = SOURCE_SPECS[source_id]
+        output = cache_directory / source_id
         run(
             (
                 fastvep,
                 "sa-build",
                 "--source",
-                source,
+                cache_source,
                 "--input",
                 fixtures / filename,
                 "--output",
@@ -113,7 +146,7 @@ def build_and_annotate(fastvep, fixtures, work, cache_format):
             ),
             environment,
         )
-        cache = cache_file(cache_directory, source, cache_format)
+        cache = cache_file(cache_directory, source_id, cache_format)
         run((fastvep, "sa-verify", "--input", cache), environment)
         cache_hashes[cache.name] = sha256(cache)
         index = cache.with_suffix(cache.suffix + ".idx")
@@ -151,6 +184,17 @@ def main():
         default=Path(__file__).resolve().parents[1] / "fixtures" / "source-cache-parity",
     )
     parser.add_argument("--json", type=Path, help="Write a reproducibility report")
+    parser.add_argument(
+        "--source",
+        action="append",
+        choices=tuple(SOURCE_SPECS),
+        help="Validate one source contract; repeat to select more than one",
+    )
+    parser.add_argument(
+        "--structured-output",
+        type=Path,
+        help="Write the verified OSA2 structured output for AnnoCAT projection tests",
+    )
     arguments = parser.parse_args()
 
     fastvep = arguments.fastvep.resolve()
@@ -158,19 +202,26 @@ def main():
     if not fastvep.is_file():
         parser.error(f"fastVEP binary does not exist: {fastvep}")
     expected_path = fixtures / "expected.ndjson"
-    expected = load_ndjson(expected_path)
+    source_ids = tuple(arguments.source or DEFAULT_SOURCES)
+    if len(set(source_ids)) != len(source_ids):
+        parser.error("each source can be selected only once")
+    if "gnomad" in source_ids and "gnomad-genomes" in source_ids:
+        parser.error("gnomAD exomes and genomes cannot be selected together")
+    expected = select_sources(load_ndjson(expected_path), source_ids)
 
     with tempfile.TemporaryDirectory(prefix="annocat-source-parity-") as temporary:
         work = Path(temporary)
         osa1, osa1_hashes, osa1_output_hash = build_and_annotate(
-            fastvep, fixtures, work, "osa"
+            fastvep, fixtures, work, "osa", source_ids
         )
         osa2, osa2_hashes, osa2_output_hash = build_and_annotate(
-            fastvep, fixtures, work, "osa2"
+            fastvep, fixtures, work, "osa2", source_ids
         )
         require_equal("OSA1 output", expected, osa1)
         require_equal("OSA2 output", expected, osa2)
         require_equal("OSA2 output", osa1, osa2)
+        if arguments.structured_output:
+            write_ndjson(arguments.structured_output.resolve(), osa2)
 
     fixture_hashes = {
         path.name: sha256(path)
@@ -182,7 +233,8 @@ def main():
         "schemaVersion": 1,
         "status": "pass",
         "recordCount": len(expected),
-        "sourceCount": len(SOURCES),
+        "sourceCount": len(source_ids),
+        "sources": list(source_ids),
         "fastvep": {
             "version": version,
             "sha256": sha256(fastvep),
@@ -201,7 +253,7 @@ def main():
         arguments.json.parent.mkdir(parents=True, exist_ok=True)
         arguments.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(
-        f"Supplementary cache parity passed: {len(SOURCES)} sources, "
+        f"Supplementary cache parity passed: {len(source_ids)} sources, "
         f"{len(expected)} structured records, OSA1 = OSA2 = source contract"
     )
 
