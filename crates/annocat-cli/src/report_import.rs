@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -22,6 +23,152 @@ const PHENOTYPE_ROLES: [&str; 3] = [
     "phenotype-gene-evidence",
     "phenotype-field-catalog",
 ];
+
+pub(crate) fn gene_catalog_fields(positive_hpo_feature_count: usize) -> Vec<serde_json::Value> {
+    let mut fields = Vec::new();
+    if positive_hpo_feature_count > 0 {
+        fields.extend([
+            json!({
+                "scope": "gene",
+                "physicalScope": "gene",
+                "biologicalScope": "gene",
+                "sourceId": "gene-profile",
+                "fieldPath": "phenotypeRank",
+                "valueType": "integer",
+                "label": "Phenotype rank",
+                "recommended": positive_hpo_feature_count >= 2,
+                "selectable": true,
+                "storageRelation": "geneEvidence",
+                "resolutionPolicy": "alleleGeneDirect",
+                "columnPresentation": "phenotypeRank",
+                "defaultSortDirection": "asc",
+                "presentationDependencies": ["phenotypeRankDetails"]
+            }),
+            json!({
+                "scope": "gene",
+                "physicalScope": "gene",
+                "biologicalScope": "gene",
+                "sourceId": "gene-profile",
+                "fieldPath": "phenotypeRankDetails",
+                "valueType": "json",
+                "label": "Phenotype rank details",
+                "recommended": false,
+                "selectable": false,
+                "storageRelation": "geneEvidence",
+                "resolutionPolicy": "alleleGeneDirect"
+            }),
+        ]);
+    }
+    fields.extend([
+        json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": "geneMatches",
+            "valueType": "text",
+            "label": "Gene matches",
+            "recommended": true,
+            "selectable": true,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "alleleGeneDirect",
+            "columnPresentation": "geneMatches",
+            "presentationDependencies": [
+                "geneMatch", "matchedSelectedItems", "matchedItemTypes", "geneMatchDetails"
+            ]
+        }),
+        json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": "geneMatch",
+            "valueType": "boolean",
+            "label": "Gene match",
+            "recommended": false,
+            "selectable": false,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "alleleGeneDirect"
+        }),
+        json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": "matchedSelectedItems",
+            "valueType": "text",
+            "label": "Matched selected item",
+            "recommended": false,
+            "selectable": false,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "alleleGeneDirect"
+        }),
+        json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": "matchedItemTypes",
+            "valueType": "text",
+            "label": "Matched item type",
+            "recommended": false,
+            "selectable": false,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "alleleGeneDirect"
+        }),
+        json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": "geneMatchDetails",
+            "valueType": "json",
+            "label": "Gene match details",
+            "recommended": false,
+            "selectable": false,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "alleleGeneDirect"
+        }),
+    ]);
+    for (field_path, value_type, label) in [
+        ("profileLinked", "boolean", "Profile link"),
+        ("includedGene", "boolean", "Included gene"),
+        ("observedFeatureLinked", "boolean", "Observed feature link"),
+        ("bestMatchingCondition", "text", "Best matching condition"),
+        ("directFeatureMatches", "integer", "Direct feature matches"),
+        ("selectedConditionMatches", "integer", "Condition matches"),
+        (
+            "matchedSelectedConditions",
+            "text",
+            "Matched selected conditions",
+        ),
+        (
+            "selectedConditionRelation",
+            "text",
+            "Selected condition relation",
+        ),
+        (
+            "phenotypeEvidenceDetails",
+            "json",
+            "Phenotype evidence details",
+        ),
+    ] {
+        fields.push(json!({
+            "scope": "gene",
+            "physicalScope": "gene",
+            "biologicalScope": "gene",
+            "sourceId": "gene-profile",
+            "fieldPath": field_path,
+            "valueType": value_type,
+            "label": label,
+            "recommended": false,
+            "selectable": false,
+            "storageRelation": "geneEvidence",
+            "resolutionPolicy": "geneDirect"
+        }));
+    }
+    fields
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -721,18 +868,20 @@ fn verify_phenotypes<R: Read + Seek>(
         MAX_PHENOTYPE_CATALOG_BYTES,
         "phenotype field catalog",
     )?;
-    validate_portable_phenotype_metadata(
+    // The archive entry paths, sizes, and hashes were checked above. Invalid nested query
+    // semantics are isolated so they cannot prevent the base result from opening.
+    let _ = validate_portable_phenotype_metadata(
         &profile_bytes,
         &catalog_bytes,
         &manifest.run_id,
         &evidence.path,
         &catalog.path,
         candidate.map(|file| file.path.as_str()),
-    )?;
+    );
     Ok(())
 }
 
-fn validate_portable_phenotype_metadata(
+pub(crate) fn validate_portable_phenotype_metadata(
     profile_bytes: &[u8],
     catalog_bytes: &[u8],
     run_id: &str,
@@ -742,17 +891,188 @@ fn validate_portable_phenotype_metadata(
 ) -> Result<(), String> {
     let profile: serde_json::Value = serde_json::from_slice(profile_bytes)
         .map_err(|error| format!("invalid phenotype profile: {error}"))?;
+    if profile["schemaVersion"].as_u64() != Some(6) {
+        return Ok(());
+    }
+    if candidate_file.is_some() {
+        return Err("phenotype candidate ranking data is no longer supported".into());
+    }
+    let profile_object = profile
+        .as_object()
+        .ok_or("portable phenotype profile is not an object")?;
+    let profile_fields = [
+        "schemaVersion",
+        "runId",
+        "updatedAt",
+        "observed",
+        "conditions",
+        "pathways",
+        "genes",
+        "showMatchesOnly",
+        "activeGeneration",
+    ];
+    let updated_at = profile["updatedAt"].as_str().unwrap_or_default();
+    if profile_object.len() != profile_fields.len()
+        || profile_fields
+            .iter()
+            .any(|field| !profile_object.contains_key(*field))
+        || profile["runId"].as_str() != Some(run_id)
+        || updated_at.is_empty()
+        || updated_at.len() > 100
+        || updated_at.chars().any(char::is_control)
+        || profile["showMatchesOnly"].as_bool() != Some(true)
+    {
+        return Err("phenotype profile identity or fields are invalid".into());
+    }
+    let selected_ids = |field: &str, valid_id: fn(&str) -> bool| -> Result<Vec<String>, String> {
+        profile[field]
+            .as_array()
+            .ok_or_else(|| format!("phenotype profile {field} is invalid"))?
+            .iter()
+            .map(|item| {
+                let object = item
+                    .as_object()
+                    .ok_or_else(|| format!("phenotype profile {field} entry is invalid"))?;
+                let id = item["id"]
+                    .as_str()
+                    .ok_or_else(|| format!("phenotype profile {field} identifier is invalid"))?;
+                let label = item["label"]
+                    .as_str()
+                    .ok_or_else(|| format!("phenotype profile {field} label is invalid"))?;
+                if object.len() != 2
+                    || !object.contains_key("id")
+                    || !object.contains_key("label")
+                    || !valid_id(id)
+                    || label.trim().is_empty()
+                    || label.len() > 300
+                    || label.chars().any(char::is_control)
+                {
+                    return Err(format!("phenotype profile {field} entry is invalid"));
+                }
+                Ok(id.to_owned())
+            })
+            .collect()
+    };
+    let observed = selected_ids("observed", |id| {
+        id.len() == 10 && id.starts_with("HP:") && id[3..].bytes().all(|byte| byte.is_ascii_digit())
+    })?;
+    let conditions = selected_ids("conditions", |id| {
+        id.starts_with("MONDO:")
+            && !id[6..].is_empty()
+            && id[6..].bytes().all(|byte| byte.is_ascii_digit())
+    })?;
+    let pathways = selected_ids("pathways", |id| {
+        id.starts_with("R-HSA-")
+            && !id[6..].is_empty()
+            && id[6..].bytes().all(|byte| byte.is_ascii_digit())
+    })?;
+    let genes = profile["genes"]
+        .as_array()
+        .ok_or("phenotype profile genes are invalid")?;
+    if observed.len() + conditions.len() + pathways.len() > 500
+        || genes.len() > 30_000
+        || observed
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != observed.len()
+        || conditions
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != conditions.len()
+        || pathways
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != pathways.len()
+    {
+        return Err("phenotype profile selections are invalid".into());
+    }
+    let mut gene_keys = std::collections::HashSet::new();
+    for gene in genes {
+        let object = gene
+            .as_object()
+            .ok_or("phenotype profile gene is invalid")?;
+        if object.len() != 4
+            || ![
+                "symbol",
+                "canonicalGeneId",
+                "resultGeneId",
+                "identityStatus",
+            ]
+            .iter()
+            .all(|field| object.contains_key(*field))
+        {
+            return Err("phenotype profile gene fields are invalid".into());
+        }
+        let symbol = gene["symbol"]
+            .as_str()
+            .ok_or("phenotype profile gene symbol is invalid")?;
+        let optional_string = |field: &str| match &gene[field] {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(value) => Ok(Some(value.as_str())),
+            _ => Err(format!("phenotype profile gene {field} is invalid")),
+        };
+        let canonical = optional_string("canonicalGeneId")?;
+        let result = optional_string("resultGeneId")?;
+        let status = gene["identityStatus"]
+            .as_str()
+            .ok_or("phenotype profile gene identity status is invalid")?;
+        let valid_symbol = !symbol.trim().is_empty()
+            && symbol.len() <= 100
+            && symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'));
+        let valid_canonical = canonical.is_some_and(|id| {
+            id.starts_with("HGNC:")
+                && !id[5..].is_empty()
+                && id[5..].bytes().all(|byte| byte.is_ascii_digit())
+        });
+        let valid_result = result.is_none_or(|id| {
+            !id.trim().is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+        });
+        let key = canonical
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("SYMBOL:{symbol}"));
+        if !valid_symbol
+            || !valid_result
+            || !matches!(status, "hgnc" | "symbol-only")
+            || status == "hgnc" && !valid_canonical
+            || status == "symbol-only" && canonical.is_some()
+            || !gene_keys.insert(key)
+        {
+            return Err("phenotype profile gene identity is invalid".into());
+        }
+    }
+    if observed.is_empty() && conditions.is_empty() && pathways.is_empty() && genes.is_empty() {
+        return Err("an active Genes query must contain a selection".into());
+    }
     let active = profile["activeGeneration"]
         .as_object()
         .ok_or("portable phenotype profile has no active evidence")?;
+    if active.len() != 4
+        || active.keys().any(|field| {
+            !matches!(
+                field.as_str(),
+                "fingerprint" | "evidenceFile" | "catalogFile" | "matchedGeneCount"
+            )
+        })
+        || active
+            .get("matchedGeneCount")
+            .and_then(serde_json::Value::as_u64)
+            .is_none_or(|count| count == 0)
+    {
+        return Err("phenotype profile generation fields are invalid".into());
+    }
     let fingerprint = active
         .get("fingerprint")
         .and_then(serde_json::Value::as_str)
         .ok_or("phenotype profile has no generation fingerprint")?;
-    if profile["schemaVersion"] != 4
-        || profile["runId"].as_str() != Some(run_id)
-        || fingerprint.len() != 64
-        || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
         || active
             .get("evidenceFile")
             .and_then(serde_json::Value::as_str)
@@ -761,30 +1081,98 @@ fn validate_portable_phenotype_metadata(
             .get("catalogFile")
             .and_then(serde_json::Value::as_str)
             != Some(catalog_file)
-        || active
-            .get("candidateEvidenceFile")
-            .and_then(serde_json::Value::as_str)
-            != candidate_file
     {
         return Err("phenotype profile identity or generation is invalid".into());
     }
     let short = &fingerprint[..16];
     if evidence_file != format!("phenotype-gene-evidence.{short}.parquet")
         || catalog_file != format!("phenotype-field-catalog.{short}.json")
-        || candidate_file
-            .is_some_and(|file| file != format!("phenotype-candidate-evidence.{short}.parquet"))
     {
         return Err("phenotype generation filenames do not match its fingerprint".into());
     }
     let catalog: serde_json::Value = serde_json::from_slice(catalog_bytes)
         .map_err(|error| format!("invalid phenotype field catalog: {error}"))?;
-    if catalog["schemaVersion"] != 1
+    let source_assets = catalog["sourceAssets"]
+        .as_array()
+        .ok_or("phenotype source assets are invalid")?;
+    let mut previous = None;
+    for asset in source_assets {
+        let object = asset
+            .as_object()
+            .ok_or("phenotype source asset is invalid")?;
+        if object.len() != 3
+            || !["name", "release", "sha256"]
+                .iter()
+                .all(|field| object.contains_key(*field))
+        {
+            return Err("phenotype source asset fields are invalid".into());
+        }
+        let name = asset["name"]
+            .as_str()
+            .ok_or("phenotype source asset name is invalid")?;
+        let release = asset["release"]
+            .as_str()
+            .ok_or("phenotype source asset release is invalid")?;
+        let sha256 = asset["sha256"]
+            .as_str()
+            .ok_or("phenotype source asset checksum is invalid")?;
+        if name.is_empty()
+            || name.len() > 180
+            || name.contains(['/', '\\'])
+            || name.chars().any(char::is_control)
+            || release.trim().is_empty()
+            || release.len() > 180
+            || release.chars().any(char::is_control)
+            || sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || previous.is_some_and(|prior| prior >= name)
+        {
+            return Err("phenotype source assets are invalid".into());
+        }
+        previous = Some(name);
+    }
+    let needs_source = !observed.is_empty()
+        || !conditions.is_empty()
+        || !pathways.is_empty()
+        || genes
+            .iter()
+            .any(|gene| gene["identityStatus"].as_str() == Some("hgnc"));
+    if needs_source && source_assets.is_empty() {
+        return Err("phenotype source assets are missing".into());
+    }
+    let calculated = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&serde_json::json!({
+                "profileSchemaVersion": 6,
+                "catalogSchemaVersion": 2,
+                "evidenceContractVersion": "gene-profile-evidence-v2",
+                "identityContractVersion": "hgnc-identity-v2",
+                "geneSetAlgorithmVersion": "hpo-association-query-v5",
+                "phenotypeRankingAlgorithmVersion": "resnik-query-disease-v1",
+                "observed": observed,
+                "conditions": conditions,
+                "pathways": pathways,
+                "genes": genes,
+                "sourceAssets": source_assets,
+            }))
+            .map_err(|error| format!("cannot verify phenotype fingerprint: {error}"))?
+        )
+    );
+    if calculated != fingerprint {
+        return Err("phenotype generation fingerprint does not match its inputs".into());
+    }
+    if catalog["schemaVersion"] != 2
         || catalog["geneEvidenceFile"].as_str() != Some(evidence_file)
-        || catalog["candidateEvidenceFile"].as_str() != candidate_file
-        || catalog["profileFingerprint"].as_str() != Some(fingerprint)
-        || catalog["algorithmVersion"].as_str() != Some("hpo-lin-query-v4")
-        || (candidate_file.is_some()
-            && catalog["candidateAlgorithmVersion"].as_str() != Some("phenotype-candidate-v1"))
+        || catalog["fingerprint"].as_str() != Some(fingerprint)
+        || catalog["evidenceContractVersion"].as_str() != Some("gene-profile-evidence-v2")
+        || catalog["identityContractVersion"].as_str() != Some("hgnc-identity-v2")
+        || catalog["geneSetAlgorithmVersion"].as_str() != Some("hpo-association-query-v5")
+        || catalog["phenotypeRankingAlgorithmVersion"].as_str() != Some("resnik-query-disease-v1")
+        || catalog["positiveHpoFeatureCount"].as_u64() != Some(observed.len() as u64)
+        || catalog["fields"] != serde_json::Value::Array(gene_catalog_fields(observed.len()))
     {
         return Err("phenotype field catalog does not match its profile".into());
     }
@@ -924,6 +1312,44 @@ mod tests {
         )]);
         let error = validate_archive(&path).err().unwrap();
         assert!(error.contains("incomplete phenotype evidence group"));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn older_complete_phenotype_metadata_is_ignored_after_integrity_validation() {
+        assert!(
+            validate_portable_phenotype_metadata(
+                br#"{"schemaVersion":5}"#,
+                br#"{"schemaVersion":1}"#,
+                "run-fixture",
+                "legacy-evidence.parquet",
+                "legacy-catalog.json",
+                Some("legacy-candidates.parquet"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_current_phenotype_metadata_does_not_block_the_base_result() {
+        let path = fixture_archive(&[
+            (
+                "phenotypes.json",
+                "phenotype-profile",
+                br#"{"schemaVersion":6}"#,
+            ),
+            (
+                "phenotype-gene-evidence.invalid.parquet",
+                "phenotype-gene-evidence",
+                b"invalid evidence",
+            ),
+            (
+                "phenotype-field-catalog.invalid.json",
+                "phenotype-field-catalog",
+                br#"{"schemaVersion":2}"#,
+            ),
+        ]);
+        assert!(validate_archive(&path).is_ok());
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

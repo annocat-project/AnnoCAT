@@ -4,13 +4,32 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub const SOURCE_URL: &str = "https://www.genenames.org/download/";
-pub const CONTRACT_VERSION: &str = "hgnc-identity-v1";
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub const SOURCE_URL: &str = "https://www.genenames.org/download/";
+pub const CONTRACT_VERSION: &str = "hgnc-identity-v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedGene {
     pub symbol: String,
-    pub gene_id: String,
+    pub canonical_gene_id: Option<String>,
+    pub result_gene_id: Option<String>,
+    pub identity_status: String,
+}
+
+impl ResolvedGene {
+    pub fn comparison_key(&self) -> String {
+        self.canonical_gene_id
+            .clone()
+            .unwrap_or_else(|| format!("SYMBOL:{}", self.symbol))
+    }
+
+    pub fn result_id(&self) -> String {
+        self.result_gene_id
+            .clone()
+            .unwrap_or_else(|| self.symbol.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +100,9 @@ impl Resolver {
                 .resolved()
                 .unwrap_or_else(|| ResolvedGene {
                     symbol: normalize(symbol),
-                    gene_id: strip_ensembl_version(gene_id),
+                    canonical_gene_id: None,
+                    result_gene_id: nonempty(strip_ensembl_version(gene_id)),
+                    identity_status: "symbol-only".into(),
                 });
             let keys = resolver.result_keys.entry(resolved.symbol).or_default();
             if !symbol.trim().is_empty() {
@@ -101,7 +122,15 @@ impl Resolver {
     pub fn resolve_pair(&self, id: &str, label: &str) -> Resolution {
         match self.resolve(id) {
             Resolution::Unknown => self.resolve(label),
-            resolution => resolution,
+            Resolution::Resolved(by_id) => match self.resolve(label) {
+                Resolution::Resolved(by_label)
+                    if by_id.comparison_key() != by_label.comparison_key() =>
+                {
+                    Resolution::Ambiguous
+                }
+                _ => Resolution::Resolved(by_id),
+            },
+            Resolution::Ambiguous => Resolution::Ambiguous,
         }
     }
 
@@ -125,16 +154,14 @@ impl Resolver {
             })
     }
 
-    pub fn canonical_symbol(&self, symbol: &str) -> Option<ResolvedGene> {
-        self.resolve(symbol).resolved()
-    }
-
     pub fn canonicalize(&self, symbol: &str, gene_id: &str) -> ResolvedGene {
         self.resolve_pair(gene_id, symbol)
             .resolved()
             .unwrap_or_else(|| ResolvedGene {
                 symbol: normalize(symbol),
-                gene_id: strip_ensembl_version(gene_id),
+                canonical_gene_id: None,
+                result_gene_id: nonempty(strip_ensembl_version(gene_id)),
+                identity_status: "symbol-only".into(),
             })
     }
 
@@ -199,7 +226,12 @@ impl Resolver {
             left.0
                 .cmp(&right.0)
                 .then(left.1.gene.symbol.cmp(&right.1.gene.symbol))
-                .then(left.1.gene.gene_id.cmp(&right.1.gene.gene_id))
+                .then(
+                    left.1
+                        .gene
+                        .comparison_key()
+                        .cmp(&right.1.gene.comparison_key()),
+                )
         });
         matches
             .into_iter()
@@ -241,10 +273,11 @@ impl Resolver {
         let ids = self.canonical_ids.get(symbol);
         ResolvedGene {
             symbol: symbol.to_owned(),
-            gene_id: ids
+            canonical_gene_id: None,
+            result_gene_id: ids
                 .filter(|ids| ids.len() == 1)
-                .and_then(|ids| ids.iter().next().cloned())
-                .unwrap_or_else(|| symbol.to_owned()),
+                .and_then(|ids| ids.iter().next().cloned()),
+            identity_status: "symbol-only".into(),
         }
     }
 
@@ -261,11 +294,13 @@ impl Resolver {
         let runtime_id = self.canonical_ids.get(&gene.symbol);
         ResolvedGene {
             symbol: gene.symbol.clone(),
-            gene_id: runtime_id
+            canonical_gene_id: nonempty(gene.hgnc_id.clone()),
+            result_gene_id: runtime_id
                 .filter(|ids| ids.len() == 1)
                 .and_then(|ids| ids.iter().next().cloned())
                 .or_else(|| (!gene.ensembl_id.is_empty()).then(|| gene.ensembl_id.clone()))
-                .unwrap_or_else(|| gene.symbol.clone()),
+                .or_else(|| (!gene.ncbi_id.is_empty()).then(|| gene.ncbi_id.clone())),
+            identity_status: "hgnc".into(),
         }
     }
 }
@@ -500,6 +535,10 @@ fn strip_ensembl_version(value: &str) -> String {
     }
 }
 
+fn nonempty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
 fn transcript_genes(resources: &Path) -> Result<Arc<Vec<(String, String)>>, String> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<(String, String)>>>>> = OnceLock::new();
     let path = resources
@@ -564,6 +603,10 @@ mod tests {
         assert_eq!(resolver.resolve("A1S9T").resolved().unwrap().symbol, "UBA1");
         assert_eq!(resolver.resolve("ACS3"), Resolution::Ambiguous);
         assert_eq!(resolver.resolve("CBBM"), Resolution::Ambiguous);
+        assert_eq!(
+            resolver.resolve_pair("HGNC:11998", "UBA1"),
+            Resolution::Ambiguous
+        );
     }
 
     #[test]
@@ -576,7 +619,9 @@ mod tests {
             resolver.resolve("TESTGENE"),
             Resolution::Resolved(ResolvedGene {
                 symbol: "TESTGENE".into(),
-                gene_id: "ENSG99999999999".into(),
+                canonical_gene_id: None,
+                result_gene_id: Some("ENSG99999999999".into()),
+                identity_status: "symbol-only".into(),
             })
         );
     }

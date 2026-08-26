@@ -32,6 +32,9 @@ jobs:
           $pin = Get-Content -LiteralPath config/fastvep-pin.json -Raw | ConvertFrom-Json
           git clone $pin.repository "$env:RUNNER_TEMP\fastVEP"
           git -C "$env:RUNNER_TEMP\fastVEP" checkout --detach $pin.commit
+      - name: Validate phenotype ranking against pinned HPO cases
+        shell: pwsh
+        run: ./scripts/verify-phenotype-known-cases.ps1
       - name: Build, test, and package AnnoCAT with fastVEP
         shell: pwsh
         run: ./scripts/package-windows.ps1 -FastVepSource "$env:RUNNER_TEMP\fastVEP"

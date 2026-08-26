@@ -1,4 +1,4 @@
-import { createPhenotypeFeature, geneMatchDependencyIndexes, profileEvidenceDependencyIndexes, summarizeGeneMatchRow, summarizeProfileEvidenceRow } from './app/phenotypes.js';
+import { createPhenotypeFeature, geneMatchDependencyIndexes, phenotypeRankDependencyIndexes, profileEvidenceDependencyIndexes, summarizeGeneMatchRow, summarizePhenotypeRankRow, summarizeProfileEvidenceRow } from './app/phenotypes.js';
 import { createVariantPresentation, evidenceColumnPolicy, referenceSnpId } from './app/variant-presentation.js';
 import { createResultFilters } from './app/result-filters.js';
 import { createFavorOnline, favorFieldPresentation } from './app/favor-online.js';
@@ -86,11 +86,14 @@ let setupDismissed=false,lastTaskSnapshots=[],taskRenderPending=false,lastAnnota
 let resultSearchTimer=null,resultOperation='',resultQueryError='',favorResultStatus=null,favorResultStatusTimer=null;
 let favorOnline={initialize:async()=>{},updateControls:()=>{},updateForRun:async()=>{},isEnabled:()=>true,resetConfirmation:()=>{}};
 const RESULT_COLUMN_SELECTION_STORAGE_KEY='annocat.resultColumnSelections.v2';
+let resultColumnSelectionExplicit=false;
+let explicitEvidenceColumnIdentities=new Set();
 
 function resultFieldIdentity(field){return`${field.scope||''}\u001f${field.sourceId||''}\u001f${field.fieldPath||''}`}
 function fieldSourceIs(field,id){const source=String(field?.sourceId||'').toLowerCase();return source===id||source.startsWith(`${id}-`)||source.startsWith(`${id}@`)}
 function profileEvidenceField(field){return field?.columnPresentation==='profileEvidence'||fieldSourceIs(field,'hpo')&&field?.fieldPath==='phenotypeRelevance'}
 function geneMatchField(field){return field?.columnPresentation==='geneMatches'}
+function phenotypeRankField(field){return field?.columnPresentation==='phenotypeRank'}
 function selectableEvidenceField(field,index){
   if(!evidenceColumnPolicy(field).selectable)return false;
   if(field?.selectable===undefined&&field?.storageRelation==='geneEvidence'&&resultFieldCatalog.some(candidate=>candidate!==field&&candidate.sourceId===field.sourceId&&profileEvidenceField(candidate)))return false;
@@ -101,6 +104,7 @@ function selectableEvidenceEntries(){return resultFieldCatalog.map((field,index)
 function evidenceDependencyIndexes(index){
   const field=resultFieldCatalog[index];
   if(geneMatchField(field))return geneMatchDependencyIndexes(resultFieldCatalog,index);
+  if(phenotypeRankField(field))return phenotypeRankDependencyIndexes(resultFieldCatalog,index);
   if(profileEvidenceField(field))return profileEvidenceDependencyIndexes(resultFieldCatalog,index);
   const dependencies=new Set(Array.isArray(field?.presentationDependencies)?field.presentationDependencies:[]);
   return[...dependencies].map(path=>resultFieldCatalog.findIndex(candidate=>candidate.sourceId===field.sourceId&&candidate.fieldPath===path)).filter(candidate=>candidate>=0)
@@ -124,6 +128,7 @@ function recommendedEvidenceIndexes(){
     }
   };
   const leaf=field=>String(field.fieldPath||'').split(/[.\[\]]/).filter(Boolean).pop()?.toLowerCase()||'';
+  pick(field=>phenotypeRankField(field)&&evidenceColumnPolicy(field).recommended);
   pick(geneMatchField,profileEvidenceField);
   pick(
     field=>fieldSourceIs(field,'clinvar')&&field.scope==='allele'&&leaf(field)==='significance',
@@ -166,9 +171,9 @@ function resultColumnOrderToken(key){if(!key.startsWith('evidence:'))return`core
 function availableResultColumnOrder(){return[...columns.map(([key])=>`core:${key}`),...selectableEvidenceEntries().map(({field})=>`evidence:${resultFieldIdentity(field)}`)]}
 function normalizeResultColumnOrder(order=[]){const available=availableResultColumnOrder(),valid=new Set(available),seen=new Set(),normalized=[];for(const token of [...order,...available])if(valid.has(token)&&!seen.has(token)){seen.add(token);normalized.push(token)}return normalized}
 function defaultResultColumnOrder(){const core=columns.filter(([, ,shown])=>shown).map(([key])=>`core:${key}`),evidence=recommendedEvidenceIndexes().map(index=>resultColumnOrderToken(`evidence:${index}`));return normalizeResultColumnOrder([...core,...evidence])}
-function applyResultColumnSelection(){const all=storedResultColumnSelections(),saved=all[resultSchemaSelectionKey()],validCore=new Set(columns.map(([key])=>key)),selectable=new Set(selectableEvidenceEntries().map(({index})=>index));if(saved){visible=new Set((saved.core||[]).filter(key=>validCore.has(key)));const wanted=new Set(saved.evidence||[]);visibleEvidence=new Set(resultFieldCatalog.map((field,index)=>selectable.has(index)&&wanted.has(resultFieldIdentity(field))?index:null).filter(index=>index!==null).slice(0,MAX_VISIBLE_EVIDENCE_COLUMNS));resultColumnOrder=normalizeResultColumnOrder(saved.order||[]);return}visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key));visibleEvidence=new Set(recommendedEvidenceIndexes());resultColumnOrder=defaultResultColumnOrder()}
-function persistResultColumnSelection(){const all=storedResultColumnSelections(),key=resultSchemaSelectionKey();resultColumnOrder=normalizeResultColumnOrder(resultColumnOrder);all[key]={core:[...visible],evidence:[...visibleEvidence].map(index=>resultFieldCatalog[index]).filter(Boolean).map(resultFieldIdentity),order:resultColumnOrder};const entries=Object.entries(all).slice(-30);localStorage.setItem(RESULT_COLUMN_SELECTION_STORAGE_KEY,JSON.stringify(Object.fromEntries(entries)))}
-function restoreDefaultResultColumns(){visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key));visibleEvidence=new Set(recommendedEvidenceIndexes());resultColumnOrder=defaultResultColumnOrder();persistResultColumnSelection();renderColumns();if(currentResultRun){variants=[];renderTable();openCompletedRun(currentResultRun,0)}else renderTable()}
+function applyResultColumnSelection(){const all=storedResultColumnSelections(),saved=all[resultSchemaSelectionKey()],validCore=new Set(columns.map(([key])=>key)),entries=selectableEvidenceEntries(),selectable=new Set(entries.map(({index})=>index));if(saved&&saved.explicit!==false){visible=new Set((saved.core||[]).filter(key=>validCore.has(key)));const wanted=new Set(saved.evidence||[]),storedExplicit=Array.isArray(saved.explicitEvidence)?saved.explicitEvidence:entries.map(({field})=>resultFieldIdentity(field));explicitEvidenceColumnIdentities=new Set(storedExplicit);visibleEvidence=new Set(resultFieldCatalog.map((field,index)=>{if(!selectable.has(index))return null;const identity=resultFieldIdentity(field);return explicitEvidenceColumnIdentities.has(identity)?wanted.has(identity)?index:null:evidenceColumnPolicy(field).recommended?index:null}).filter(index=>index!==null).slice(0,MAX_VISIBLE_EVIDENCE_COLUMNS));resultColumnOrder=normalizeResultColumnOrder(saved.order||[]);resultColumnSelectionExplicit=true;return}visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key));visibleEvidence=new Set(recommendedEvidenceIndexes());explicitEvidenceColumnIdentities=new Set();resultColumnOrder=defaultResultColumnOrder();resultColumnSelectionExplicit=false}
+function persistResultColumnSelection(explicit=resultColumnSelectionExplicit){const all=storedResultColumnSelections(),key=resultSchemaSelectionKey();resultColumnSelectionExplicit=explicit;resultColumnOrder=normalizeResultColumnOrder(resultColumnOrder);all[key]={core:[...visible],evidence:[...visibleEvidence].map(index=>resultFieldCatalog[index]).filter(Boolean).map(resultFieldIdentity),explicitEvidence:[...explicitEvidenceColumnIdentities],order:resultColumnOrder,explicit};const entries=Object.entries(all).slice(-30);localStorage.setItem(RESULT_COLUMN_SELECTION_STORAGE_KEY,JSON.stringify(Object.fromEntries(entries)))}
+function restoreDefaultResultColumns(){visible=new Set(columns.filter(([, ,shown])=>shown).map(([key])=>key));visibleEvidence=new Set(recommendedEvidenceIndexes());explicitEvidenceColumnIdentities=new Set();resultColumnOrder=defaultResultColumnOrder();persistResultColumnSelection(false);renderColumns();if(currentResultRun){variants=[];renderTable();openCompletedRun(currentResultRun,0)}else renderTable()}
 const $=selector=>document.querySelector(selector);
 const fileName=path=>path.split(/[\\/]/).pop();
 const escapeHtml=value=>String(value).replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
@@ -435,6 +440,8 @@ async function refreshCurrentResultSchema({sourceId='',preferredFields=[],config
   const run=currentResultRun;
   const savedFilters=resultFilters.captureFilterRules();
   const selectedEvidenceIdentities=new Set([...visibleEvidence].map(index=>resultFieldCatalog[index]).filter(Boolean).map(resultFieldIdentity));
+  const preserveExplicitSelection=resultColumnSelectionExplicit;
+  const explicitEvidenceIdentities=new Set(explicitEvidenceColumnIdentities);
   const savedSorts=resultSorts.map(sort=>{if(!sort.key.startsWith('evidence:'))return{key:sort.key,direction:sort.direction};const field=resultFieldCatalog[Number(sort.key.slice(9))];return field?{identity:resultFieldIdentity(field),direction:sort.direction}:null}).filter(Boolean);
   const sourceWasPresent=Boolean(sourceId)&&resultFieldCatalog.some(field=>fieldSourceIs(field,sourceId));
   const preferredFieldPaths=new Set(preferredFields.map(field=>String(field).toLowerCase()));
@@ -450,12 +457,19 @@ async function refreshCurrentResultSchema({sourceId='',preferredFields=[],config
   resultSorts=savedSorts.map(sort=>{if(sort.key)return sort;const index=resultFieldCatalog.findIndex(field=>resultFieldIdentity(field)===sort.identity);return index<0||!selectableEvidenceField(resultFieldCatalog[index],index)?null:{key:`evidence:${index}`,direction:sort.direction}}).filter(Boolean);
   visibleEvidence=new Set(resultFieldCatalog.map((field,index)=>{
     if(!selectableEvidenceField(field,index))return null;
-    if(selectedEvidenceIdentities.has(resultFieldIdentity(field)))return index;
+    const identity=resultFieldIdentity(field);
+    if(fieldSourceIs(field,sourceId)){
+      if(explicitEvidenceIdentities.has(identity))return selectedEvidenceIdentities.has(identity)?index:null;
+      return preferredFieldPaths.has(String(field.fieldPath||'').toLowerCase())?index:null
+    }
+    if(selectedEvidenceIdentities.has(identity))return index;
     if(sourceWasPresent||!fieldSourceIs(field,sourceId))return null;
     return preferredFieldPaths.has(String(field.fieldPath||'').toLowerCase())?index:null
-  }).filter(index=>index!==null));
+  }).filter(index=>index!==null).slice(0,MAX_VISIBLE_EVIDENCE_COLUMNS));
   resultColumnOrder=normalizeResultColumnOrder(resultColumnOrder);
-  persistResultColumnSelection();
+  const preferredTokens=preferredFields.map(path=>resultFieldCatalog.findIndex(field=>fieldSourceIs(field,sourceId)&&String(field.fieldPath||'').toLowerCase()===String(path).toLowerCase())).filter(index=>index>=0).map(index=>resultColumnOrderToken(`evidence:${index}`));
+  if(preferredTokens.length){const preferredSet=new Set(preferredTokens),anchor=preferredTokens[preferredTokens.length-1],insertion=resultColumnOrder.indexOf(anchor),before=resultColumnOrder.slice(0,insertion<0?resultColumnOrder.length:insertion).filter(token=>!preferredSet.has(token)),after=(insertion<0?[]:resultColumnOrder.slice(insertion)).filter(token=>!preferredSet.has(token));resultColumnOrder=[...before,...preferredTokens,...after]}
+  persistResultColumnSelection(preserveExplicitSelection);
   renderColumns();
   resultFilters.restoreFilterRules(savedFilters);
   if(configureCatalog)configureCatalog();
@@ -487,7 +501,7 @@ function configureGeneQuery(profile){
 async function phenotypeProfileApplied(profile,action){
   await refreshCurrentResultSchema({
     sourceId:'gene-profile',
-    preferredFields:action==='apply'?['geneMatches']:[],
+    preferredFields:action==='apply'?(profile?.observed?.length>=2?['phenotypeRank','geneMatches']:['geneMatches']):[],
     configureCatalog:()=>configureGeneQuery(action==='apply'?profile:null)
   })
 }
@@ -604,7 +618,7 @@ function loadFilterPreset(...args){return resultFilters.loadFilterPreset(...args
 function deleteFilterPreset(...args){return resultFilters.deleteFilterPreset(...args)}
 function coreColumnPresentation(key,fallback){const details=coreColumnDetails[key]||[fallback,'Core annotation field in this result.'];return{label:humanReadableColumnNames?details[0]:key,readableLabel:details[0],description:details[1],fieldPath:key,sourceId:'Core annotation'}}
 function displayColumns(){const selected=new Map();columns.filter(([key])=>visible.has(key)).forEach(([key,label])=>{const presentation=coreColumnPresentation(key,label);selected.set(`core:${key}`,[key,humanReadableColumnNames?label:key,presentation.description,presentation.fieldPath,presentation.sourceId])});[...visibleEvidence].forEach(index=>{const field=resultFieldCatalog[index];if(!field)return;const presentation=evidenceFieldPresentation(field);selected.set(resultColumnOrderToken(`evidence:${index}`),[`evidence:${index}`,humanReadableColumnNames?presentation.label:field.fieldPath,presentation.description,field.fieldPath,field.sourceId])});const ordered=normalizeResultColumnOrder(resultColumnOrder).filter(token=>selected.has(token));for(const token of selected.keys())if(!ordered.includes(token))ordered.push(token);return ordered.map(token=>selected.get(token))}
-function moveResultColumn(sourceKey,targetKey){if(sourceKey===targetKey)return;const shown=displayColumns().map(([key])=>resultColumnOrderToken(key)),source=resultColumnOrderToken(sourceKey),target=resultColumnOrderToken(targetKey),from=shown.indexOf(source),to=shown.indexOf(target);if(from<0||to<0)return;shown.splice(to,0,shown.splice(from,1)[0]);const selected=new Set(shown);resultColumnOrder=[...shown,...normalizeResultColumnOrder(resultColumnOrder).filter(token=>!selected.has(token))];persistResultColumnSelection();renderTable()}
+function moveResultColumn(sourceKey,targetKey){if(sourceKey===targetKey)return;const shown=displayColumns().map(([key])=>resultColumnOrderToken(key)),source=resultColumnOrderToken(sourceKey),target=resultColumnOrderToken(targetKey),from=shown.indexOf(source),to=shown.indexOf(target);if(from<0||to<0)return;shown.splice(to,0,shown.splice(from,1)[0]);const selected=new Set(shown);resultColumnOrder=[...shown,...normalizeResultColumnOrder(resultColumnOrder).filter(token=>!selected.has(token))];persistResultColumnSelection(true);renderTable()}
 function decodeEvidenceValue(value){if(typeof value!=='string')return value;const text=value.trim();if(!(text.startsWith('[')&&text.endsWith(']')||text.startsWith('{')&&text.endsWith('}')))return value;try{return JSON.parse(text)}catch{return value}}
 function resultColumnRawValue(row,key){return key.startsWith('evidence:')?decodeEvidenceValue(row.evidence?.[key.slice(9)]):row[key]}
 function profileEvidenceValue(row,index){
@@ -612,7 +626,8 @@ function profileEvidenceValue(row,index){
   return summarizeProfileEvidenceRow({catalog:resultFieldCatalog,rowEvidence:row.evidence,index,score,decode:decodeEvidenceValue})
 }
 function geneMatchValue(row,index){return summarizeGeneMatchRow({catalog:resultFieldCatalog,rowEvidence:row.evidence,index,value:resultColumnRawValue(row,`evidence:${index}`),decode:decodeEvidenceValue})}
-function resultColumnValue(row,key){if(!key.startsWith('evidence:')){const value=row[key];if(key==='canonical')return value?'Yes':'No';return value??''}const index=Number(key.slice(9)),field=resultFieldCatalog[index]||{};if(geneMatchField(field))return geneMatchValue(row,index).display;if(profileEvidenceField(field))return profileEvidenceValue(row,index).display;const value=resultColumnRawValue(row,key);return evidenceValuePresentation({...field,consequenceTerms:row.consequence},value).display}
+function phenotypeRankValue(row,index){return summarizePhenotypeRankRow({catalog:resultFieldCatalog,rowEvidence:row.evidence,index,value:resultColumnRawValue(row,`evidence:${index}`),decode:decodeEvidenceValue})}
+function resultColumnValue(row,key){if(!key.startsWith('evidence:')){const value=row[key];if(key==='canonical')return value?'Yes':'No';return value??''}const index=Number(key.slice(9)),field=resultFieldCatalog[index]||{};if(geneMatchField(field))return geneMatchValue(row,index).display;if(phenotypeRankField(field))return phenotypeRankValue(row,index).display;if(profileEvidenceField(field))return profileEvidenceValue(row,index).display;const value=resultColumnRawValue(row,key);return evidenceValuePresentation({...field,consequenceTerms:row.consequence},value).display}
 function resultColumnCellHtml(row,key){
   if(key==='impact'){const value=resultColumnValue(row,key);return`<span class="impact impact-${String(value||'').toLowerCase().replace(/[^a-z0-9_-]/g,'')}">${escapeHtml(value)}</span>`}
   if(key==='zygosity'){const value=String(resultColumnValue(row,key)),short=value==='Heterozygous'?'Het':value.startsWith('Homozygous')?'Hom':value;return`<span title="${escapeHtml(value)}">${escapeHtml(short)}</span>`}
@@ -621,6 +636,10 @@ function resultColumnCellHtml(row,key){
     const index=Number(key.slice(9)),field=resultFieldCatalog[index];
     if(geneMatchField(field)){
       const value=geneMatchValue(row,index);
+      return`<span class="profile-evidence-cell" title="${escapeHtml(value.tooltip)}">${escapeHtml(value.display)}</span>`
+    }
+    if(phenotypeRankField(field)){
+      const value=phenotypeRankValue(row,index);
       return`<span class="profile-evidence-cell" title="${escapeHtml(value.tooltip)}">${escapeHtml(value.display)}</span>`
     }
     if(profileEvidenceField(field)){
@@ -633,6 +652,7 @@ function resultColumnCellHtml(row,key){
 function resultColumnTooltip(key,description,sourceId){
   if(!key.startsWith('evidence:'))return description;
   const field=resultFieldCatalog[Number(key.slice(9))]||{},presentation=evidenceFieldPresentation(field);
+  if(phenotypeRankField(field))return'Ranks variant genes by similarity between the selected HPO features and HPO disease profiles. Lower ranks indicate greater relative similarity. Rank 1 is highest.';
   const parts=[presentation.readingGuide||presentation.baseDescription||description];
   if(sourceId)parts.push(`Source: ${resourceTitle(sourceId)}.`);
   parts.push(field.biologicalScope==='gene'||field.scope==='gene'?'Applies to the displayed gene.':field.scope==='transcript'?'Applies to the selected transcript.':'Applies to the variant.');
@@ -808,7 +828,7 @@ function renderColumns(){
   });
   menu.querySelectorAll('[data-key]').forEach(box=>box.addEventListener('change',event=>{
     event.target.checked?visible.add(event.target.dataset.key):visible.delete(event.target.dataset.key);
-    persistResultColumnSelection();
+    persistResultColumnSelection(true);
     renderTable()
   }));
   menu.querySelectorAll('[data-evidence-index]').forEach(box=>box.addEventListener('change',event=>{
@@ -818,8 +838,9 @@ function renderColumns(){
       document.querySelector('#results .results-heading p').textContent='You can display up to 32 annotation columns at one time.';
       return
     }
+    explicitEvidenceColumnIdentities.add(resultFieldIdentity(resultFieldCatalog[index]));
     event.target.checked?visibleEvidence.add(index):visibleEvidence.delete(index);
-    persistResultColumnSelection();
+    persistResultColumnSelection(true);
     variants=[];
     renderTable();
     if(currentResultRun)openCompletedRun(currentResultRun,0)
@@ -831,8 +852,8 @@ function syncColumnGroupToggles(){
 }
 function toggleColumnGroup(toggle){
   const fields=[...toggle.closest('[data-column-group]').querySelectorAll('[data-key],[data-evidence-index]')],states=fields.map(field=>{const evidence=field.dataset.evidenceIndex!==undefined,index=evidence?Number(field.dataset.evidenceIndex):null;return{evidence,selected:evidence?visibleEvidence.has(index):visible.has(field.dataset.key)}}),select=shouldSelectColumnGroup(states,visibleEvidence.size);let evidenceChanged=false,limited=false;
-  fields.forEach(field=>{if(field.dataset.key){select?visible.add(field.dataset.key):visible.delete(field.dataset.key);field.checked=select;return}const index=Number(field.dataset.evidenceIndex),wasSelected=visibleEvidence.has(index);if(select&&!wasSelected&&visibleEvidence.size>=MAX_VISIBLE_EVIDENCE_COLUMNS){limited=true;field.checked=false;return}select?visibleEvidence.add(index):visibleEvidence.delete(index);field.checked=select;if(wasSelected!==select)evidenceChanged=true});
-  persistResultColumnSelection();syncColumnGroupToggles();renderTable();if(limited)document.querySelector('#results .results-heading p').textContent='You can display up to 32 annotation columns at one time.';if(evidenceChanged){variants=[];if(currentResultRun)openCompletedRun(currentResultRun,0)}
+  fields.forEach(field=>{if(field.dataset.key){select?visible.add(field.dataset.key):visible.delete(field.dataset.key);field.checked=select;return}const index=Number(field.dataset.evidenceIndex),wasSelected=visibleEvidence.has(index);if(select&&!wasSelected&&visibleEvidence.size>=MAX_VISIBLE_EVIDENCE_COLUMNS){limited=true;field.checked=false;return}explicitEvidenceColumnIdentities.add(resultFieldIdentity(resultFieldCatalog[index]));select?visibleEvidence.add(index):visibleEvidence.delete(index);field.checked=select;if(wasSelected!==select)evidenceChanged=true});
+  persistResultColumnSelection(true);syncColumnGroupToggles();renderTable();if(limited)document.querySelector('#results .results-heading p').textContent='You can display up to 32 annotation columns at one time.';if(evidenceChanged){variants=[];if(currentResultRun)openCompletedRun(currentResultRun,0)}
 }
 $('#column-menu').addEventListener('change',event=>{if(event.target.matches('[data-column-group-toggle]'))toggleColumnGroup(event.target);else if(event.target.matches('[data-key],[data-evidence-index]'))syncColumnGroupToggles()});
 function enabledSourceIds(){return[...document.querySelectorAll('#wizard-sources input:checked')].map(input=>input.dataset.source)}
@@ -1203,7 +1224,7 @@ revel:{score:['REVEL score','Missense pathogenicity ensemble score from 0 to 1; 
 };
 supplementaryFieldDetails['gnomad-genomes']=supplementaryFieldDetails.gnomad;
 function supplementaryFieldPresentation(resourceId,field){return supplementaryFieldDetails[resourceId]?.[field]||[field,'Retained exactly as emitted by the pinned fastVEP parser.']}
-function evidenceFieldPresentationBase(field){const source=String(field?.sourceId||'').toLowerCase(),path=String(field?.fieldPath||''),leaf=path.split(/[.\[\]]/).filter(Boolean).pop()||path;let details;if(source==='hpo'||source==='gene-profile'){const descriptions={geneMatches:'Selected features, conditions, pathways, or entered genes that match any gene linked to this variant.',geneMatch:'Whether this variant has at least one selected gene match.',matchedSelectedItems:'Selected items that match a gene linked to this variant.',matchedItemTypes:'Types of selected items that match this variant.',geneMatchDetails:'Genes and relationships behind the selected matches.',phenotypeRelevance:profileEvidenceField(field)?'Phenotype similarity and selected-condition links for the displayed gene.':'Similarity between the selected observed features and the best matching condition profile for this gene.',profileLinked:'Whether this gene has a direct observed-feature link or a selected-condition match.',includedGene:'Whether the active Genes profile includes this gene.',observedFeatureLinked:'Whether an observed feature occurs directly in an eligible condition profile linked to this gene.',bestMatchingCondition:'Condition profile with the highest phenotype relevance for this gene.',directFeatureMatches:'Number of selected observed features that occur directly in the best condition profile.',absentFeatureConflict:'Conflict between explicitly absent features and the best condition profile.',selectedConditionMatches:'Number of distinct selected conditions with an eligible exact or subtype association to this gene.',matchedSelectedConditions:'Selected MONDO conditions with an eligible association to this gene.',selectedConditionRelation:'Strongest selected-condition relation for this gene. Exact condition takes priority over condition subtype.',phenotypeEvidenceDetails:'Matched features and selected-condition associations for this gene.'};details=[geneMatchField(field)?'Gene matches':profileEvidenceField(field)?'Phenotype relevance':field?.label||readableFieldName(leaf),descriptions[leaf]||'Gene evidence from the active Genes profile.']}else if(source.includes('dbnsfp'))details=dbnsfpFieldPresentation(leaf);else if(source.includes('favor'))details=favorFieldPresentation(path,leaf);else{const resourceId=['gnomad-genomes','clinvar','dbsnp','gnomad','phylop','cadd','spliceai','revel'].find(id=>source===id||source.startsWith(`${id}-`)||source.startsWith(`${id}@`));details=resourceId?supplementaryFieldPresentation(resourceId,leaf):[field?.label||readableFieldName(leaf||'Evidence field'),'Annotation field discovered in this result.']}return{label:details[0],description:details[1],fieldPath:path,sourceId:field?.sourceId||'',valueType:field?.valueType||'unknown'}}
+function evidenceFieldPresentationBase(field){const source=String(field?.sourceId||'').toLowerCase(),path=String(field?.fieldPath||''),leaf=path.split(/[.\[\]]/).filter(Boolean).pop()||path;let details;if(source==='hpo'||source==='gene-profile'){const descriptions={geneMatches:'Selected features, conditions, pathways, or entered genes that match any gene linked to this variant.',phenotypeRank:'Ranks variant genes by similarity between the selected HPO features and HPO disease profiles. Lower ranks indicate greater relative similarity. Rank 1 is highest.',phenotypeRankDetails:'Method and provenance behind the relative phenotype rank.',geneMatch:'Whether this variant has at least one selected gene match.',matchedSelectedItems:'Selected items that match a gene linked to this variant.',matchedItemTypes:'Types of selected items that match this variant.',geneMatchDetails:'Genes and relationships behind the selected matches.',phenotypeRelevance:profileEvidenceField(field)?'Phenotype similarity and selected-condition links for the displayed gene.':'Similarity between the selected observed features and the best matching condition profile for this gene.',profileLinked:'Whether this gene has a documented feature or condition link.',includedGene:'Whether the active Genes query includes this gene.',observedFeatureLinked:'Whether a selected feature occurs directly in an eligible disease profile linked to this gene.',bestMatchingCondition:'Best-matching HPO disease profile used for phenotype ranking.',directFeatureMatches:'Number of selected features with exact disease annotations for this gene.',selectedConditionMatches:'Number of distinct selected conditions with an eligible exact or subtype association to this gene.',matchedSelectedConditions:'Selected MONDO conditions with an eligible association to this gene.',selectedConditionRelation:'Strongest selected-condition relation for this gene. Exact condition takes priority over condition subtype.',phenotypeEvidenceDetails:'Documented HPO feature and MONDO condition links for this gene.'};details=[geneMatchField(field)?'Gene matches':phenotypeRankField(field)?'Phenotype rank':profileEvidenceField(field)?'Phenotype relevance':field?.label||readableFieldName(leaf),descriptions[leaf]||'Gene evidence from the active Genes query.']}else if(source.includes('dbnsfp'))details=dbnsfpFieldPresentation(leaf);else if(source.includes('favor'))details=favorFieldPresentation(path,leaf);else{const resourceId=['gnomad-genomes','clinvar','dbsnp','gnomad','phylop','cadd','spliceai','revel'].find(id=>source===id||source.startsWith(`${id}-`)||source.startsWith(`${id}@`));details=resourceId?supplementaryFieldPresentation(resourceId,leaf):[field?.label||readableFieldName(leaf||'Evidence field'),'Annotation field discovered in this result.']}return{label:details[0],description:details[1],fieldPath:path,sourceId:field?.sourceId||'',valueType:field?.valueType||'unknown'}}
 async function loadSupplementaryFieldConfiguration(resourceId){const response=await fetch(`/api/resources/${encodeURIComponent(resourceId)}/fields`),result=await response.json();if(!response.ok)throw new Error(result.error||`Could not load ${resourceTitle(resourceId)} field configuration`);supplementaryFieldConfigurations.set(resourceId,result);return result}
 function supplementaryFieldEditorHtml(resourceId,configuration){const selected=new Set(configuration.selection.fields),groups=configuration.contract.groups.map(group=>{const checked=group.fields.filter(field=>selected.has(field)).length,required=Boolean(group.required);return`<section class="dbnsfp-field-group fui-field-config__group" data-source-field-group><div class="dbnsfp-group-heading fui-field-config__group-heading"><label><input class="fui-checkbox" type="checkbox" data-source-field-group-toggle ${required||checked===group.fields.length?'checked':''} ${required||configuration.locked?'disabled':''}><span><strong>${escapeHtml(group.label||group.id)}</strong><small>${required?'Required':`${checked} of ${group.fields.length} retained`}</small></span></label></div><div class="dbnsfp-field-list source-field-list fui-field-config__grid">${group.fields.map(field=>{const[label,description]=supplementaryFieldPresentation(resourceId,field);return`<label class="fui-field-config__option" title="${escapeHtml(field)}"><input class="fui-checkbox" type="checkbox" data-source-field="${escapeHtml(field)}" ${required||selected.has(field)?'checked':''} ${required||configuration.locked?'disabled':''}><span class="source-field-copy fui-field-config__copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(description)}</small><code>${escapeHtml(field)}</code></span></label>`}).join('')}</div></section>`}).join('');const fullByDefault=resourceId==='gnomad'||resourceId==='gnomad-genomes';return`<div class="dbnsfp-field-editor fui-field-config" data-source-field-editor="${escapeHtml(resourceId)}"><div class="dbnsfp-editor-head fui-field-config__header"><div><strong>${escapeHtml(resourceTitle(resourceId))} retained fields</strong><small data-source-field-count></small></div>${configuration.locked?'<span class="field-lock fui-badge">Prepared cache</span>':`<button type="button" class="fui-button" data-source-field-defaults>${fullByDefault?'Select all':'Restore defaults'}</button>`}</div><p>Choose what AnnoCAT keeps in the local fastVEP cache. Fewer fields reduce the cache size. The selected fields appear under this data source in results.</p>${groups}${configuration.locked?`<p class="dbnsfp-locked-note fui-status-message fui-status-message--warning">This prepared ${escapeHtml(resourceTitle(resourceId))} cache already uses this field set. Remove the cache before changing it.</p>`:''}</div>`}
 function updateSupplementaryFieldEditor(editor){if(!editor)return;const checked=editor.querySelectorAll('[data-source-field]:checked').length,total=editor.querySelectorAll('[data-source-field]').length;editor.querySelector('[data-source-field-count]').textContent=`${checked} of ${total} fields retained`;editor.querySelectorAll('[data-source-field-group]').forEach(group=>{const toggle=group.querySelector('[data-source-field-group-toggle]'),fields=[...group.querySelectorAll('[data-source-field]')],selected=fields.filter(field=>field.checked).length;if(toggle&&!toggle.disabled){toggle.checked=fields.length>0&&selected===fields.length;toggle.indeterminate=selected>0&&!toggle.checked;group.querySelector('small').textContent=`${selected} of ${fields.length} retained`}})}

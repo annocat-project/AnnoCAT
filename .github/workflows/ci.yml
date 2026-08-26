@@ -29,6 +29,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test AnnoCAT
         run: cargo test --workspace --locked -- --test-threads=1
+      - name: Validate phenotype ranking against pinned HPO cases
+        shell: pwsh
+        run: ./scripts/verify-phenotype-known-cases.ps1
       - name: Test browser modules
         shell: pwsh
         run: node --test (Get-ChildItem web/tests/*.test.mjs).FullName

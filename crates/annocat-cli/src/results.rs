@@ -8608,28 +8608,6 @@ pub(crate) fn report_gene_occurrences(
     Ok(genes)
 }
 
-pub(crate) fn report_gene_identities_from_occurrences(
-    occurrences: &[ReportGeneOccurrence],
-) -> Vec<(String, String)> {
-    let mut identities = BTreeMap::<String, HashSet<String>>::new();
-    for occurrence in occurrences {
-        identities
-            .entry(occurrence.gene_symbol.clone())
-            .or_default()
-            .insert(occurrence.gene_id.clone());
-    }
-    identities
-        .into_iter()
-        .filter_map(|(symbol, ids)| {
-            let nonempty = ids
-                .into_iter()
-                .filter(|id| !id.is_empty())
-                .collect::<Vec<_>>();
-            (nonempty.len() == 1).then(|| (symbol, nonempty.into_iter().next().unwrap()))
-        })
-        .collect()
-}
-
 pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, String)>, String> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<(String, String)>>>>> = OnceLock::new();
     let path = parquet

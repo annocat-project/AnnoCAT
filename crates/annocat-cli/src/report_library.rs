@@ -667,7 +667,30 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let fingerprint = "a".repeat(64);
+        let source_assets = serde_json::json!([{
+            "name": "hp.obo",
+            "release": "2026-07-24",
+            "sha256": "a".repeat(64)
+        }]);
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&serde_json::json!({
+                    "profileSchemaVersion": 6,
+                    "catalogSchemaVersion": 2,
+                    "evidenceContractVersion": "gene-profile-evidence-v2",
+                    "identityContractVersion": "hgnc-identity-v2",
+                    "geneSetAlgorithmVersion": "hpo-association-query-v5",
+                    "phenotypeRankingAlgorithmVersion": "resnik-query-disease-v1",
+                    "observed": ["HP:0001250"],
+                    "conditions": [],
+                    "pathways": [],
+                    "genes": [],
+                    "sourceAssets": source_assets.clone()
+                }))
+                .unwrap()
+            )
+        );
         let short = &fingerprint[..16];
         let phenotype_root = root.join(".annocat-library").join("run-import");
         fs::create_dir_all(&phenotype_root).unwrap();
@@ -679,7 +702,11 @@ mod tests {
             .unwrap()
             .execute_batch(&format!(
                 "COPY (
-                    SELECT 'ENSG1'::VARCHAR AS gene_id, 'GENE1'::VARCHAR AS gene_symbol,
+                    SELECT NULL::VARCHAR AS allele_id,
+                           'ENSG1'::VARCHAR AS gene_id, 'GENE1'::VARCHAR AS gene_symbol,
+                           NULL::VARCHAR AS canonical_gene_id,
+                           'ENSG1'::VARCHAR AS result_gene_id,
+                           'symbol-only'::VARCHAR AS identity_status,
                            'gene'::VARCHAR AS scope, 'hpo'::VARCHAR AS source_id,
                            'profileLinked'::VARCHAR AS field_path, 'boolean'::VARCHAR AS value_type,
                            NULL::VARCHAR AS string_value, NULL::BIGINT AS integer_value,
@@ -691,14 +718,19 @@ mod tests {
         fs::write(
             phenotype_root.join(&phenotype_catalog),
             serde_json::to_vec(&serde_json::json!({
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "geneEvidenceFile": phenotype_evidence,
-                "profileFingerprint": fingerprint,
+                "fingerprint": fingerprint,
                 "hpoRelease": "2026-07-24",
                 "mondoRelease": null,
-                "algorithmVersion": "hpo-lin-query-v4",
+                "evidenceContractVersion": "gene-profile-evidence-v2",
+                "identityContractVersion": "hgnc-identity-v2",
+                "geneSetAlgorithmVersion": "hpo-association-query-v5",
+                "phenotypeRankingAlgorithmVersion": "resnik-query-disease-v1",
+                "positiveHpoFeatureCount": 1,
+                "sourceAssets": source_assets,
                 "sources": [{"id": "hpo"}],
-                "fields": []
+                "fields": crate::report_import::gene_catalog_fields(1)
             }))
             .unwrap(),
         )
@@ -706,21 +738,20 @@ mod tests {
         fs::write(
             phenotype_root.join("phenotypes.json"),
             serde_json::to_vec(&serde_json::json!({
-                "schemaVersion": 4,
+                "schemaVersion": 6,
                 "runId": "run-import",
                 "updatedAt": "2026-07-30T00:00:00Z",
                 "observed": [{"id": "HP:0001250", "label": "Seizure"}],
-                "excluded": [],
                 "conditions": [],
-                "limitToLinkedGenes": false,
+                "pathways": [],
+                "genes": [],
+                "showMatchesOnly": true,
                 "activeGeneration": {
                     "fingerprint": fingerprint,
                     "evidenceFile": phenotype_evidence,
-                    "catalogFile": phenotype_catalog
-                },
-                "ranking": null,
-                "monarchSuggestions": null,
-                "monarchError": null
+                    "catalogFile": phenotype_catalog,
+                    "matchedGeneCount": 1
+                }
             }))
             .unwrap(),
         )

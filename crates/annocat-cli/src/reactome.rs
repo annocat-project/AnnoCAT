@@ -152,6 +152,15 @@ pub fn installed_status(resources: &Path) -> Option<ReadyManifest> {
     installed_release(resources).map(|(_, ready)| ready)
 }
 
+pub(crate) fn source_asset(resources: &Path) -> Option<(String, String, String)> {
+    let ready = installed_status(resources)?;
+    Some((
+        "ReactomePathways.gmt.zip".into(),
+        ready.release,
+        ready.asset_sha256,
+    ))
+}
+
 fn installed_release(resources: &Path) -> Option<(PathBuf, ReadyManifest)> {
     fs::read_dir(resources.join("reactome"))
         .ok()?
@@ -502,6 +511,10 @@ impl Knowledge {
                         subtype_count: None,
                         gene_count: Some(pathway.genes.len()),
                         synonyms: Vec::new(),
+                        symbol: None,
+                        canonical_gene_id: None,
+                        result_gene_id: None,
+                        identity_status: None,
                     },
                 ))
             })

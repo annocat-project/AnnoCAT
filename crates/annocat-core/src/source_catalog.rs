@@ -1554,15 +1554,8 @@ mod tests {
     }
 
     #[test]
-    fn online_services_are_centralized_in_the_catalog() {
-        let monarch = service("monarch-phenotype-gene-ranking").unwrap();
-        assert_eq!(monarch.provider, "Monarch Initiative");
-        assert_eq!(
-            monarch.api_url,
-            "https://api.monarchinitiative.org/v3/api/semsim/search"
-        );
-        assert_eq!(monarch.timeout_seconds, 45);
-        assert_eq!(monarch.max_results, 50);
+    fn online_annotation_service_is_centralized_in_the_catalog() {
+        assert!(service("monarch-phenotype-gene-ranking").is_none());
         let favor = service("favor-variant-annotation").unwrap();
         assert_eq!(
             favor.coding_api_url.as_deref(),

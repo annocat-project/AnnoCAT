@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   PROFILE_EVIDENCE_DEPENDENCIES,
+  phenotypeRankDependencyIndexes,
   summarizeGeneMatchRow,
+  summarizePhenotypeRankRow,
   profileEvidenceDependencyIndexes,
   summarizeProfileEvidence,
   summarizeProfileEvidenceRow,
@@ -10,7 +12,7 @@ import {
   formatGeneListSections,
   summarizeGenePreviewScope,
 } from '../src/app/phenotypes.js';
-import { applyGenericEvidenceCellPresentation } from '../src/app/variant-presentation.js';
+import { applyGenericEvidenceCellPresentation, evidenceColumnPolicy } from '../src/app/variant-presentation.js';
 
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 
@@ -69,17 +71,51 @@ test('gene matches use one compact value with detailed provenance', () => {
     catalog,
     rowEvidence: {
       1: [{
+        selectedItemId: 'HP:0002076',
         selectedItem: 'Migraine',
         itemType: 'Feature',
         geneSymbol: 'CACNA1A',
-        relation: 'Associated gene',
+        relation: 'HPO link via exact disease annotation',
       }],
     },
     index: 0,
     value: 'Migraine',
   });
   assert.equal(summary.display, 'Migraine');
-  assert.equal(summary.tooltip, 'Migraine · Feature · CACNA1A · Associated gene');
+  assert.equal(summary.tooltip, 'HP:0002076 Migraine · Feature · CACNA1A · HPO link via exact disease annotation');
+});
+
+test('phenotype rank is relative, exposes ties, and explains Resnik without implying probability', () => {
+  const catalog = [
+    {
+      sourceId: 'gene-profile',
+      fieldPath: 'phenotypeRank',
+      presentationDependencies: ['phenotypeRankDetails'],
+    },
+    { sourceId: 'gene-profile', fieldPath: 'phenotypeRankDetails' },
+  ];
+  assert.deepEqual(phenotypeRankDependencyIndexes(catalog, 0), [1]);
+  const summary = summarizePhenotypeRankRow({
+    catalog,
+    rowEvidence: {
+      1: {
+        rank: 3,
+        denominator: 4804,
+        tieCount: 2,
+        queryTermCount: 1,
+        geneSymbol: 'CACNA1A',
+        bestDisease: 'Episodic ataxia type 2',
+        bestDiseaseId: 'OMIM:108500',
+        hpoRelease: '2026-07-24',
+      },
+    },
+    index: 0,
+    value: 3,
+  });
+  assert.equal(summary.display, '3 of 4,804 · 2 tied');
+  assert.match(summary.tooltip, /broad features may produce many ties/);
+  assert.match(summary.tooltip, /Resnik query-to-disease best-match average/);
+  assert.match(summary.tooltip, /not a diagnostic probability/);
 });
 
 test('condition details populate the composite phenotype cell when no score is reported', () => {
@@ -145,4 +181,36 @@ test('generic evidence styling preserves a composite phenotype cell', () => {
     false,
   );
   assert.match(cell.innerHTML, /migraine disorder/);
+});
+
+test('legacy phenotype score and helper fields remain audit-only', () => {
+  for (const sourceId of ['hpo', 'gene-profile']) {
+    for (const fieldPath of ['phenotypeRelevance', 'geneMatch', 'absentFeatureConflict']) {
+      assert.deepEqual(
+        evidenceColumnPolicy({ sourceId, fieldPath }),
+        { selectable: false, recommended: false },
+      );
+    }
+  }
+});
+
+test('catalog recommendation controls corrected phenotype column defaults', () => {
+  assert.deepEqual(
+    evidenceColumnPolicy({
+      sourceId: 'gene-profile',
+      fieldPath: 'phenotypeRank',
+      selectable: true,
+      recommended: true,
+    }),
+    { selectable: true, recommended: true },
+  );
+  assert.deepEqual(
+    evidenceColumnPolicy({
+      sourceId: 'gene-profile',
+      fieldPath: 'phenotypeRank',
+      selectable: true,
+      recommended: false,
+    }),
+    { selectable: true, recommended: false },
+  );
 });

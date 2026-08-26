@@ -1479,7 +1479,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
             let profile = if method == "GET" {
-                phenotype::load(&paths.runs, run_id)?
+                phenotype::load_current(&paths.resources, &paths.runs, run_id)?
             } else if method == "POST" {
                 let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
                     .map_err(|error| format!("invalid phenotype profile request: {error}"))?;
@@ -3809,7 +3809,9 @@ fn prepare_completed_run_query_inputs(
     let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
         return Ok(());
     };
-    let phenotype_assets = phenotype::active_query_assets(runs_directory, requested_id)?;
+    let resources = portable_paths()?.resources;
+    let phenotype_assets =
+        phenotype::active_query_assets(&resources, runs_directory, requested_id)?;
     favor::prepare_query_assets_with_gene(
         &evidence,
         &catalog,

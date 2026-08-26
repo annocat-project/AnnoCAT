@@ -5,7 +5,6 @@ use duckdb::{Connection, params};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -21,7 +20,11 @@ use std::sync::{
 use std::time::SystemTime;
 use std::time::{Duration, UNIX_EPOCH};
 
-const PROFILE_SCHEMA_VERSION: u16 = 5;
+const PROFILE_SCHEMA_VERSION: u16 = 6;
+const CATALOG_SCHEMA_VERSION: u16 = 2;
+const EVIDENCE_CONTRACT_VERSION: &str = "gene-profile-evidence-v2";
+const GENE_SET_ALGORITHM_VERSION: &str = "hpo-association-query-v5";
+const PHENOTYPE_RANKING_ALGORITHM_VERSION: &str = "resnik-query-disease-v1";
 const INSTALL_SCHEMA_VERSION: u16 = 1;
 const PHENOTYPIC_ABNORMALITY_ROOT: &str = "HP:0000118";
 const MAX_PROFILE_TERMS: usize = 500;
@@ -49,29 +52,11 @@ pub struct PhenotypeProfile {
     pub run_id: String,
     pub updated_at: String,
     pub observed: Vec<PhenotypeTerm>,
-    pub excluded: Vec<PhenotypeTerm>,
-    #[serde(default)]
     pub conditions: Vec<PhenotypeTerm>,
-    #[serde(default)]
     pub pathways: Vec<PhenotypeTerm>,
-    #[serde(default)]
-    pub genes: Vec<PhenotypeTerm>,
-    #[serde(default)]
-    pub excluded_genes: Vec<String>,
-    #[serde(default = "default_gene_combination")]
-    pub combination: String,
-    #[serde(default)]
+    pub genes: Vec<super::gene_identity::ResolvedGene>,
     pub show_matches_only: bool,
-    #[serde(default)]
-    pub limit_to_linked_genes: bool,
-    #[serde(default)]
     pub active_generation: Option<PhenotypeGeneration>,
-    #[serde(default)]
-    pub ranking: Option<PhenotypeRanking>,
-    #[serde(default)]
-    pub monarch_suggestions: Option<MonarchGeneRanking>,
-    #[serde(default)]
-    pub monarch_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,84 +65,46 @@ pub struct PhenotypeGeneration {
     pub fingerprint: String,
     pub evidence_file: String,
     pub catalog_file: String,
-    #[serde(default)]
-    pub matched_gene_count: Option<usize>,
-    #[serde(default, skip_serializing)]
-    pub candidate_evidence_file: Option<String>,
+    pub matched_gene_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PhenotypeRanking {
-    #[serde(default = "default_phenotype_algorithm_version")]
-    pub algorithm_version: String,
-    pub provider: String,
-    pub provider_url: String,
-    pub hpo_release: String,
-    pub metric: String,
-    #[serde(default)]
-    pub score_interpretation: String,
-    pub generated_at: String,
-    pub evaluated_diseases: usize,
-    pub sample_name: Option<String>,
-    pub report_gene_count: usize,
-    pub online_enrichment: Option<MonarchGeneRanking>,
-    pub online_error: Option<String>,
-    pub diseases: Vec<RankedDisease>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceAsset {
+    name: String,
+    release: String,
+    sha256: String,
 }
 
-fn default_phenotype_algorithm_version() -> String {
-    "hpo-lin-query-v4".into()
+#[derive(Debug, Clone)]
+struct PhenotypeRanking {
+    hpo_release: String,
+    query_count: usize,
+    disease_profile_count: usize,
+    denominator: usize,
+    genes: BTreeMap<String, RankedGene>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MonarchGeneRanking {
-    pub provider: String,
-    pub provider_url: String,
-    pub metric: String,
-    #[serde(default)]
-    pub generated_at: String,
-    #[serde(default)]
-    pub result_limit: usize,
-    pub genes: Vec<MonarchRankedGene>,
+#[derive(Debug, Clone)]
+struct RankedGene {
+    rank: usize,
+    tie_count: usize,
+    raw_score: f64,
+    score_key: u64,
+    best_disease_id: String,
+    best_disease_name: String,
+    matched_terms: Vec<RankedTermMatch>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MonarchRankedGene {
-    pub rank: usize,
-    pub gene_id: String,
-    pub symbol: String,
-    pub name: String,
-    pub score: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RankedDisease {
-    pub phenotype_rank: usize,
-    pub disease_id: String,
-    pub disease_name: String,
-    pub phenotype_score: f64,
-    pub query_coverage: f64,
-    pub conflict_score: f64,
-    #[serde(default)]
-    pub conflict_frequency_complete: bool,
-    pub matched_phenotypes: Vec<PhenotypeMatch>,
-    pub genes: Vec<GeneAssociation>,
-    pub report_overlap: DiseaseReportOverlap,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PhenotypeMatch {
-    pub query: PhenotypeTerm,
-    pub disease_term: PhenotypeTerm,
-    pub similarity: f64,
-    pub direct: bool,
-    #[serde(default)]
-    pub disease_annotation: Option<DiseasePhenotypeContext>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RankedTermMatch {
+    query: PhenotypeTerm,
+    disease_term: PhenotypeTerm,
+    mica: Option<PhenotypeTerm>,
+    eligible_disease_profiles: usize,
+    mica_disease_profiles: Option<u64>,
+    resnik_similarity: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -170,6 +117,7 @@ pub struct DiseasePhenotypeContext {
     pub sex: Vec<String>,
     pub evidence: Vec<String>,
     pub references: Vec<String>,
+    pub biocuration: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,27 +129,6 @@ pub struct GeneAssociation {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DiseaseReportOverlap {
-    pub has_overlap: bool,
-    pub tier: u8,
-    pub label: String,
-    pub genes: Vec<ReportGeneOverlap>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReportGeneOverlap {
-    pub symbol: String,
-    pub variant_count: u64,
-    pub pass_count: u64,
-    pub high_impact_count: u64,
-    pub moderate_impact_count: u64,
-    pub tier: u8,
-    pub tier_label: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProfileUpdate {
@@ -209,36 +136,24 @@ pub struct ProfileUpdate {
     #[serde(default)]
     pub observed: Vec<PhenotypeTerm>,
     #[serde(default)]
-    pub excluded: Vec<PhenotypeTerm>,
-    #[serde(default)]
     pub conditions: Vec<PhenotypeTerm>,
     #[serde(default)]
     pub pathways: Vec<PhenotypeTerm>,
     #[serde(default)]
-    pub genes: Vec<PhenotypeTerm>,
-    #[serde(default)]
-    pub excluded_genes: Vec<String>,
-    #[serde(default = "default_gene_combination")]
-    pub combination: String,
+    pub genes: Vec<super::gene_identity::ResolvedGene>,
     #[serde(default)]
     pub show_matches_only: bool,
     #[serde(default)]
-    pub limit_to_linked_genes: bool,
-    #[serde(default)]
-    pub request_monarch_suggestions: bool,
-    #[serde(default)]
     pub preview_fingerprint: Option<String>,
-}
-
-fn default_gene_combination() -> String {
-    "any".into()
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenePreviewRow {
     pub symbol: String,
-    pub gene_id: String,
+    pub canonical_gene_id: Option<String>,
+    pub result_gene_id: Option<String>,
+    pub identity_status: String,
     pub sources: Vec<String>,
     pub in_result: bool,
     pub included: bool,
@@ -256,7 +171,7 @@ pub struct GenePreviewResponse {
     pub has_more: bool,
     pub rows: Vec<GenePreviewRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub all_included_genes: Option<Vec<PhenotypeTerm>>,
+    pub all_included_genes: Option<Vec<super::gene_identity::ResolvedGene>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +223,14 @@ pub struct TermSearchResult {
     pub gene_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub synonyms: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_gene_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_gene_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,7 +494,6 @@ struct DiseaseProfile {
     id: String,
     name: String,
     positive: Vec<usize>,
-    negative: Vec<usize>,
     annotations: HashMap<usize, DiseasePhenotypeContext>,
     genes: Vec<GeneAssociation>,
 }
@@ -581,7 +503,6 @@ struct DiseaseBuilder {
     id: String,
     name: String,
     positive: Vec<usize>,
-    negative: Vec<usize>,
     annotations: HashMap<usize, DiseasePhenotypeContext>,
     genes: Vec<GeneAssociation>,
 }
@@ -601,7 +522,6 @@ struct HpoKnowledge {
     phenotypic_abnormality_root: usize,
     diseases: Vec<DiseaseProfile>,
     condition_associations: Vec<ConditionAssociation>,
-    information_content: Vec<f64>,
     disease_gene_association_count: usize,
 }
 
@@ -1010,6 +930,10 @@ pub fn search_terms(
                         .take(3)
                         .cloned()
                         .collect(),
+                    symbol: None,
+                    canonical_gene_id: None,
+                    result_gene_id: None,
+                    identity_status: None,
                 },
             ))
         })
@@ -1029,6 +953,10 @@ pub fn search_terms(
                     subtype_count: Some(item.subtype_count),
                     gene_count: None,
                     synonyms: Vec::new(),
+                    symbol: None,
+                    canonical_gene_id: None,
+                    result_gene_id: None,
+                    identity_status: None,
                 },
             )
         }));
@@ -1056,7 +984,6 @@ pub fn resolve_terms(
             "A pasted gene list can contain at most {MAX_PROFILE_GENES} entries"
         ));
     }
-    let resolve_non_genes = request.entries.len() <= MAX_PROFILE_TERMS;
     let mut recognized = Vec::new();
     let mut ambiguous = Vec::new();
     let mut not_recognized = Vec::new();
@@ -1070,11 +997,7 @@ pub fn resolve_terms(
         if entry.is_empty() {
             continue;
         }
-        let mut matches = exact_gene_matches(&gene_resolver, &entry);
-        if matches.is_empty() && resolve_non_genes {
-            matches = search_terms(resources, &entry, 100).unwrap_or_default();
-            matches.extend(crate::reactome::search(resources, &entry, 100).unwrap_or_default());
-        }
+        let matches = exact_gene_matches(&gene_resolver, &entry);
         let mut matches = matches
             .into_iter()
             .filter(|item| exact_term_match(item, &entry))
@@ -1110,8 +1033,8 @@ fn exact_gene_matches(
     entry: &str,
 ) -> Vec<TermSearchResult> {
     let to_result = |matched: super::gene_identity::SearchMatch| TermSearchResult {
-        id: matched.gene.gene_id,
-        label: matched.gene.symbol,
+        id: matched.gene.result_id(),
+        label: matched.gene.symbol.clone(),
         term_type: "gene".into(),
         matched_text: matched.matched_text,
         match_kind: matched.match_kind.into(),
@@ -1119,11 +1042,15 @@ fn exact_gene_matches(
         subtype_count: None,
         gene_count: None,
         synonyms: Vec::new(),
+        symbol: Some(matched.gene.symbol),
+        canonical_gene_id: matched.gene.canonical_gene_id,
+        result_gene_id: matched.gene.result_gene_id,
+        identity_status: Some(matched.gene.identity_status),
     };
     match resolver.resolve(entry) {
         super::gene_identity::Resolution::Resolved(gene) => vec![TermSearchResult {
-            id: gene.gene_id,
-            label: gene.symbol,
+            id: gene.result_id(),
+            label: gene.symbol.clone(),
             term_type: "gene".into(),
             matched_text: entry.to_owned(),
             match_kind: "geneSymbol".into(),
@@ -1131,6 +1058,10 @@ fn exact_gene_matches(
             subtype_count: None,
             gene_count: None,
             synonyms: Vec::new(),
+            symbol: Some(gene.symbol),
+            canonical_gene_id: gene.canonical_gene_id,
+            result_gene_id: gene.result_gene_id,
+            identity_status: Some(gene.identity_status),
         }],
         super::gene_identity::Resolution::Ambiguous => resolver
             .search(entry, 100)
@@ -1154,8 +1085,8 @@ pub fn search_gene_terms(
         .search(query, limit)
         .into_iter()
         .map(|matched| TermSearchResult {
-            id: matched.gene.gene_id,
-            label: matched.gene.symbol,
+            id: matched.gene.result_id(),
+            label: matched.gene.symbol.clone(),
             term_type: "gene".into(),
             matched_text: matched.matched_text,
             match_kind: matched.match_kind.into(),
@@ -1163,6 +1094,10 @@ pub fn search_gene_terms(
             subtype_count: None,
             gene_count: None,
             synonyms: Vec::new(),
+            symbol: Some(matched.gene.symbol),
+            canonical_gene_id: matched.gene.canonical_gene_id,
+            result_gene_id: matched.gene.result_gene_id,
+            identity_status: Some(matched.gene.identity_status),
         })
         .collect())
 }
@@ -1173,18 +1108,11 @@ pub fn empty_profile(run_id: &str) -> PhenotypeProfile {
         run_id: run_id.to_owned(),
         updated_at: String::new(),
         observed: Vec::new(),
-        excluded: Vec::new(),
         conditions: Vec::new(),
         pathways: Vec::new(),
         genes: Vec::new(),
-        excluded_genes: Vec::new(),
-        combination: default_gene_combination(),
         show_matches_only: false,
-        limit_to_linked_genes: false,
         active_generation: None,
-        ranking: None,
-        monarch_suggestions: None,
-        monarch_error: None,
     }
 }
 
@@ -1199,22 +1127,85 @@ pub fn load(runs: &Path, run_id: &str) -> Result<PhenotypeProfile, String> {
     if bytes.len() > MAX_PORTABLE_PROFILE_BYTES as usize {
         return Err("phenotype profile exceeds its 64 MB safety limit".into());
     }
-    let mut profile: PhenotypeProfile = serde_json::from_slice(&bytes)
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid phenotype profile: {error}"))?;
+    let schema = value["schemaVersion"].as_u64().unwrap_or_default();
+    if schema != u64::from(PROFILE_SCHEMA_VERSION) {
+        return Err(format!(
+            "This result uses unsupported Genes query schema {schema}. Clear it before applying a new Genes query."
+        ));
+    }
+    let profile: PhenotypeProfile = serde_json::from_value(value)
         .map_err(|error| format!("invalid phenotype profile: {error}"))?;
     validate_profile(&profile, run_id)?;
-    if profile
-        .ranking
-        .as_ref()
-        .is_some_and(|ranking| ranking.algorithm_version != default_phenotype_algorithm_version())
-    {
-        profile.ranking = None;
+    Ok(profile)
+}
+
+fn current_profile_fingerprint(
+    resources: &Path,
+    profile: &PhenotypeProfile,
+) -> Result<String, String> {
+    let identity = super::gene_identity::Resolver::new(resources, &[]);
+    let source_assets = profile_source_assets(
+        resources,
+        !profile.observed.is_empty(),
+        !profile.conditions.is_empty(),
+        !profile.pathways.is_empty(),
+        identity.identity_release().is_some(),
+    )?;
+    Ok(gene_evidence_fingerprint(
+        &profile.observed,
+        &profile.conditions,
+        &profile.pathways,
+        &profile.genes,
+        &source_assets,
+    ))
+}
+
+fn validated_generation_paths(
+    runs: &Path,
+    run_id: &str,
+    profile: &PhenotypeProfile,
+) -> Option<(PathBuf, PathBuf)> {
+    let active = profile.active_generation.as_ref()?;
+    let profile_file = profile_path(runs, run_id);
+    let root = profile_file.parent()?;
+    let evidence = root.join(&active.evidence_file);
+    let catalog = root.join(&active.catalog_file);
+    if !evidence.is_file() || !catalog.is_file() {
+        return None;
     }
-    if profile
-        .active_generation
-        .as_ref()
-        .is_some_and(|active| active.candidate_evidence_file.is_some())
-    {
+    let profile_bytes = fs::read(profile_file).ok()?;
+    let catalog_bytes = fs::read(&catalog).ok()?;
+    validate_portable_metadata(
+        &profile_bytes,
+        &catalog_bytes,
+        run_id,
+        &active.evidence_file,
+        &active.catalog_file,
+        None,
+    )
+    .ok()?;
+    validate_gene_evidence_schema(&evidence).ok()?;
+    Some((evidence, catalog))
+}
+
+pub fn load_current(
+    resources: &Path,
+    runs: &Path,
+    run_id: &str,
+) -> Result<PhenotypeProfile, String> {
+    let mut profile = load(runs, run_id)?;
+    let stale = profile.active_generation.as_ref().is_some_and(|active| {
+        validated_generation_paths(runs, run_id, &profile).is_none()
+            || current_profile_fingerprint(resources, &profile)
+                .map_or(true, |fingerprint| fingerprint != active.fingerprint)
+    });
+    if stale {
         profile.active_generation = None;
+        profile.show_matches_only = false;
+        profile.updated_at = super::annotation::current_timestamp();
+        save(runs, &profile)?;
     }
     Ok(profile)
 }
@@ -1231,12 +1222,6 @@ pub fn profile_json(resources: &Path, profile: &PhenotypeProfile) -> Result<Stri
         manifest
             .as_ref()
             .map(|manifest| serde_json::Value::String(manifest.release.clone()))
-            .or_else(|| {
-                profile
-                    .ranking
-                    .as_ref()
-                    .map(|ranking| serde_json::Value::String(ranking.hpo_release.clone()))
-            })
             .unwrap_or(serde_json::Value::Null),
     );
     object.insert(
@@ -1287,47 +1272,62 @@ pub fn update(
 ) -> Result<PhenotypeProfile, String> {
     match request.action.as_str() {
         "save" => {
-            let knowledge = knowledge(resources)?;
-            let observed = normalize_terms(
-                &knowledge,
-                canonical_terms(&knowledge, &request.observed, true)?,
-                true,
-            )?;
-            let excluded = normalize_terms(
-                &knowledge,
-                canonical_terms(&knowledge, &request.excluded, true)?,
-                false,
-            )?;
-            ensure_consistent_profile(&knowledge, &observed, &excluded)?;
-            let existing = load(runs, run_id)?;
+            let needs_hpo = !request.observed.is_empty() || !request.conditions.is_empty();
+            let hpo = needs_hpo.then(|| knowledge(resources)).transpose()?;
+            let observed = hpo
+                .as_ref()
+                .map(|knowledge| {
+                    normalize_terms(
+                        knowledge,
+                        canonical_terms(knowledge, &request.observed, true)?,
+                        true,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let root = needs_hpo.then(|| release_root(resources)).transpose()?;
+            let conditions = if request.conditions.is_empty() {
+                Vec::new()
+            } else {
+                crate::mondo::knowledge(root.as_ref().expect("conditions require HPO data"))?
+                    .canonical_conditions(&request.conditions)?
+                    .into_iter()
+                    .map(|condition| PhenotypeTerm {
+                        id: condition.id,
+                        label: condition.label,
+                    })
+                    .collect()
+            };
+            let pathways = if request.pathways.is_empty() {
+                Vec::new()
+            } else {
+                crate::reactome::knowledge(resources)?
+                    .canonical_pathways(&request.pathways)?
+                    .into_iter()
+                    .map(|pathway| PhenotypeTerm {
+                        id: pathway.id,
+                        label: pathway.label,
+                    })
+                    .collect()
+            };
+            let identity = super::gene_identity::Resolver::new(resources, &[]);
+            let genes = canonical_manual_genes(&identity, &request.genes)?;
+            let existing = load(runs, run_id).unwrap_or_else(|_| empty_profile(run_id));
             let same_profile = existing.observed == observed
-                && existing.excluded == excluded
-                && existing.conditions == request.conditions
-                && existing.pathways == request.pathways
-                && existing.genes == request.genes
-                && existing.excluded_genes == request.excluded_genes
-                && existing.combination == request.combination
-                && existing.show_matches_only == request.show_matches_only
-                && existing.limit_to_linked_genes == request.limit_to_linked_genes;
+                && existing.conditions == conditions
+                && existing.pathways == pathways
+                && existing.genes == genes
+                && existing.show_matches_only == request.show_matches_only;
             let profile = PhenotypeProfile {
                 schema_version: PROFILE_SCHEMA_VERSION,
                 run_id: run_id.to_owned(),
                 updated_at: super::annotation::current_timestamp(),
                 observed,
-                excluded,
-                conditions: request.conditions,
-                pathways: request.pathways,
-                genes: request.genes,
-                excluded_genes: request.excluded_genes,
-                combination: request.combination,
+                conditions,
+                pathways,
+                genes,
                 show_matches_only: request.show_matches_only,
-                limit_to_linked_genes: request.limit_to_linked_genes,
                 active_generation: same_profile.then_some(existing.active_generation).flatten(),
-                ranking: same_profile.then_some(existing.ranking).flatten(),
-                monarch_suggestions: same_profile
-                    .then_some(existing.monarch_suggestions)
-                    .flatten(),
-                monarch_error: same_profile.then_some(existing.monarch_error).flatten(),
             };
             save(runs, &profile)?;
             Ok(profile)
@@ -1344,9 +1344,7 @@ pub fn update(
             if let Some(active) = active
                 && let Some(root) = path.parent()
             {
-                let mut names = vec![active.evidence_file, active.catalog_file];
-                names.extend(active.candidate_evidence_file);
-                for name in names {
+                for name in [active.evidence_file, active.catalog_file] {
                     let _ = fs::remove_file(root.join(name));
                 }
             }
@@ -1366,46 +1364,36 @@ pub fn apply(
     if request.action != "apply" {
         return Err("phenotype action must be apply".into());
     }
+    if !request.show_matches_only {
+        return Err("Applied Genes queries must show matching variants only".into());
+    }
     super::library_metadata::validate_run_id(run_id)?;
-    let prepared = prepare_gene_profile(resources, parquet, &request)?;
+    let prepared = prepare_gene_profile(resources, parquet, &request, true)?;
     let expected_fingerprint = gene_evidence_fingerprint(
         &prepared.observed,
-        &prepared.excluded,
         &prepared.conditions,
         &prepared.pathways,
         &prepared.genes,
-        &prepared.excluded_genes,
-        &prepared.combination,
-        prepared.mondo_release.as_deref(),
-        prepared.reactome_release.as_deref(),
-        prepared.identity.identity_release(),
-        &prepared.ranking,
+        &prepared.source_assets,
     );
     if request.preview_fingerprint.as_deref() != Some(expected_fingerprint.as_str()) {
         return Err("The resolved gene list changed. Review it again before you apply it.".into());
     }
-    let resolved = write_gene_evidence(
-        None,
-        &prepared.identity,
-        &prepared.report_genes,
-        &prepared.observed,
-        &prepared.conditions,
-        &prepared.pathways,
-        &prepared.selected_pathways,
-        &prepared.genes,
-        &prepared.excluded_genes,
-        &prepared.combination,
-        &prepared.condition_matches,
-        &prepared.ranking,
-    )?;
+    let resolved = &prepared.resolved;
     require_result_overlap(
         resolved
             .included
             .iter()
-            .filter(|symbol| resolved.result_symbols.contains(*symbol))
+            .filter(|key| resolved.result_identities.contains(*key))
             .count(),
     )?;
-    let selection = prepared.identity.result_keys(&resolved.included);
+    let included_symbols = resolved
+        .included
+        .iter()
+        .filter_map(|key| resolved.genes.get(key))
+        .map(|gene| gene.identity.symbol.clone())
+        .collect::<HashSet<_>>();
+    let selection = prepared.identity.result_keys(&included_symbols);
     let matched_report_genes =
         super::results::report_gene_occurrences(parquet, &selection.symbols, &selection.gene_ids)?
             .into_iter()
@@ -1413,60 +1401,38 @@ pub fn apply(
                 let gene = prepared
                     .identity
                     .canonicalize(&occurrence.gene_symbol, &occurrence.gene_id);
+                let gene_id = gene.result_id();
                 super::results::ReportGeneOccurrence {
                     allele_id: occurrence.allele_id,
                     gene_symbol: gene.symbol,
-                    gene_id: gene.gene_id,
+                    gene_id,
                 }
             })
             .collect::<Vec<_>>();
-    let existing = load(runs, run_id)?;
-    let same_observed = existing.observed == prepared.observed;
     let generation = publish_gene_evidence(
         runs,
         run_id,
         &prepared.identity,
         &matched_report_genes,
+        resolved,
         &prepared.observed,
-        &prepared.excluded,
         &prepared.conditions,
         &prepared.pathways,
-        &prepared.selected_pathways,
-        &prepared.genes,
-        &prepared.excluded_genes,
-        &prepared.combination,
-        &prepared.condition_matches,
         prepared.mondo_release.as_deref(),
         prepared.reactome_release.as_deref(),
         &prepared.ranking,
+        &prepared.source_assets,
     )?;
-    let (monarch_suggestions, monarch_error) = if request.request_monarch_suggestions {
-        match monarch_gene_ranking(&prepared.observed) {
-            Ok(suggestions) => (Some(suggestions), None),
-            Err(error) => (None, Some(error)),
-        }
-    } else if same_observed {
-        (existing.monarch_suggestions, existing.monarch_error)
-    } else {
-        (None, None)
-    };
     let profile = PhenotypeProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
         run_id: run_id.to_owned(),
         updated_at: super::annotation::current_timestamp(),
         observed: prepared.observed,
-        excluded: prepared.excluded,
         conditions: prepared.conditions,
         pathways: prepared.pathways,
         genes: prepared.genes,
-        excluded_genes: prepared.excluded_genes,
-        combination: prepared.combination,
-        show_matches_only: request.show_matches_only,
-        limit_to_linked_genes: request.limit_to_linked_genes,
+        show_matches_only: true,
         active_generation: Some(generation),
-        ranking: None,
-        monarch_suggestions,
-        monarch_error,
     };
     save(runs, &profile)?;
     Ok(profile)
@@ -1480,18 +1446,14 @@ fn require_result_overlap(count: usize) -> Result<(), String> {
 
 struct PreparedGeneProfile {
     observed: Vec<PhenotypeTerm>,
-    excluded: Vec<PhenotypeTerm>,
     conditions: Vec<PhenotypeTerm>,
     pathways: Vec<PhenotypeTerm>,
-    selected_pathways: Vec<crate::reactome::Pathway>,
-    genes: Vec<PhenotypeTerm>,
-    excluded_genes: Vec<String>,
-    combination: String,
-    report_genes: Vec<super::results::ReportGeneOccurrence>,
-    condition_matches: HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
+    genes: Vec<super::gene_identity::ResolvedGene>,
     mondo_release: Option<String>,
     reactome_release: Option<String>,
     ranking: PhenotypeRanking,
+    source_assets: Vec<SourceAsset>,
+    resolved: ResolvedGeneSet,
     identity: super::gene_identity::Resolver,
 }
 
@@ -1499,29 +1461,18 @@ fn prepare_gene_profile(
     resources: &Path,
     parquet: &Path,
     request: &ProfileUpdate,
+    compute_ranking: bool,
 ) -> Result<PreparedGeneProfile, String> {
-    if !matches!(request.combination.as_str(), "any" | "every") {
-        return Err("Combine linked genes must be 'any' or 'every'".into());
-    }
-    let needs_hpo = !request.observed.is_empty()
-        || !request.excluded.is_empty()
-        || !request.conditions.is_empty();
+    let needs_hpo = !request.observed.is_empty() || !request.conditions.is_empty();
     let knowledge = needs_hpo.then(|| knowledge(resources)).transpose()?;
-    let (observed, excluded) = if let Some(knowledge) = &knowledge {
-        let observed = normalize_terms(
+    let observed = if let Some(knowledge) = &knowledge {
+        normalize_terms(
             knowledge,
-            canonical_terms(knowledge, &request.observed, !request.conditions.is_empty())?,
+            canonical_terms(knowledge, &request.observed, true)?,
             true,
-        )?;
-        let excluded = normalize_terms(
-            knowledge,
-            canonical_terms(knowledge, &request.excluded, true)?,
-            false,
-        )?;
-        ensure_consistent_profile(knowledge, &observed, &excluded)?;
-        (observed, excluded)
+        )?
     } else {
-        (Vec::new(), Vec::new())
+        Vec::new()
     };
     let root = needs_hpo.then(|| release_root(resources)).transpose()?;
     let mondo = (!request.conditions.is_empty())
@@ -1545,31 +1496,15 @@ fn prepare_gene_profile(
         .into_iter()
         .map(|(gene_symbol, gene_id)| {
             let gene = identity.canonicalize(&gene_symbol, &gene_id);
+            let gene_id = gene.result_id();
             super::results::ReportGeneOccurrence {
                 allele_id: String::new(),
                 gene_symbol: gene.symbol,
-                gene_id: gene.gene_id,
+                gene_id,
             }
         })
-        .collect();
-    let genes = canonical_manual_genes(&identity, &request.genes)?;
-    let excluded_genes = request
-        .excluded_genes
-        .iter()
-        .map(|gene| {
-            identity
-                .canonical_symbol(gene)
-                .map_or_else(|| gene.trim().to_ascii_uppercase(), |gene| gene.symbol)
-        })
-        .filter(|gene| !gene.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect::<Vec<_>>();
-    if excluded_genes.len() > MAX_PROFILE_GENES
-        || excluded_genes.iter().any(|gene| !valid_gene_symbol(gene))
-    {
-        return Err("The resolved gene exclusions are invalid".into());
-    }
+    let genes = canonical_manual_genes(&identity, &request.genes)?;
     let selected_pathways = if request.pathways.is_empty() {
         Vec::new()
     } else {
@@ -1585,44 +1520,11 @@ fn prepare_gene_profile(
     if observed.is_empty() && conditions.is_empty() && pathways.is_empty() && genes.is_empty() {
         return Err("Add at least one feature, condition, pathway, or gene".into());
     }
-    if request.request_monarch_suggestions && observed.is_empty() {
-        return Err("Add an observed feature before you request Monarch suggestions".into());
-    }
     let observed_indexes = knowledge
         .as_ref()
         .map(|knowledge| term_indexes(knowledge, &observed))
         .transpose()?
         .unwrap_or_default();
-    let excluded_indexes = knowledge
-        .as_ref()
-        .map(|knowledge| term_indexes(knowledge, &excluded))
-        .transpose()?
-        .unwrap_or_default();
-    let mut diseases = knowledge
-        .as_ref()
-        .map(|knowledge| {
-            knowledge
-                .diseases
-                .par_iter()
-                .map(|disease| {
-                    rank_disease(knowledge, disease, &observed_indexes, &excluded_indexes)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    diseases.sort_by(|left, right| {
-        right
-            .phenotype_score
-            .total_cmp(&left.phenotype_score)
-            .then_with(|| right.query_coverage.total_cmp(&left.query_coverage))
-            .then_with(|| left.disease_id.cmp(&right.disease_id))
-    });
-    for (index, disease) in diseases.iter_mut().enumerate() {
-        disease.phenotype_rank = index + 1;
-        disease.phenotype_score = round(disease.phenotype_score, 2);
-        disease.query_coverage = round(disease.query_coverage, 1);
-        disease.conflict_score = round(disease.conflict_score, 1);
-    }
     let condition_matches = if let Some(mondo) = &mondo {
         knowledge
             .as_ref()
@@ -1637,87 +1539,59 @@ fn prepare_gene_profile(
     } else {
         HashMap::new()
     };
-    if !condition_matches.is_empty() {
-        let ranked = diseases
-            .iter()
-            .map(|disease| disease.disease_id.clone())
-            .collect::<HashSet<_>>();
-        diseases.extend(
-            knowledge
-                .as_ref()
-                .expect("conditions require HPO data")
-                .condition_associations
-                .iter()
-                .filter(|association| {
-                    condition_matches.contains_key(&association.id)
-                        && !ranked.contains(&association.id)
-                })
-                .map(|association| RankedDisease {
-                    phenotype_rank: 0,
-                    disease_id: association.id.clone(),
-                    disease_name: association.name.clone(),
-                    phenotype_score: 0.0,
-                    query_coverage: 0.0,
-                    conflict_score: 0.0,
-                    conflict_frequency_complete: true,
-                    matched_phenotypes: Vec::new(),
-                    genes: association.genes.clone(),
-                    report_overlap: DiseaseReportOverlap::default(),
-                }),
-        );
-    }
     let manifest = needs_hpo
         .then(|| installed_asset_manifest(resources))
         .transpose()?;
     let mondo_release = manifest
         .as_ref()
         .and_then(|manifest| manifest.mondo_release.clone());
-    let ranking = PhenotypeRanking {
-        algorithm_version: default_phenotype_algorithm_version(),
-        provider: manifest
-            .as_ref()
-            .map(|_| "Human Phenotype Ontology")
-            .unwrap_or("AnnoCAT gene selection")
-            .into(),
-        provider_url: manifest
-            .as_ref()
-            .map(|manifest| manifest.release_url.clone())
-            .unwrap_or_default(),
-        hpo_release: manifest
-            .as_ref()
-            .map(|manifest| manifest.release.clone())
-            .unwrap_or_default(),
-        metric: manifest
-            .as_ref()
-            .map(|_| "Query-to-disease best-match Lin semantic similarity")
-            .unwrap_or("Exact gene and pathway membership")
-            .into(),
-        score_interpretation: manifest.as_ref().map(|_| "A relative match between the recorded features and each disease profile. This is not a diagnosis or a disease probability.").unwrap_or("").into(),
-        generated_at: super::annotation::current_timestamp(),
-        evaluated_diseases: diseases.len(),
-        sample_name: None,
-        report_gene_count: 0,
-        online_enrichment: None,
-        online_error: None,
-        diseases,
-    };
+    let hpo_release = manifest
+        .as_ref()
+        .map(|manifest| manifest.release.clone())
+        .unwrap_or_default();
+    let ranking = knowledge.as_ref().filter(|_| compute_ranking).map_or_else(
+        || PhenotypeRanking {
+            hpo_release: String::new(),
+            query_count: 0,
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        },
+        |knowledge| {
+            build_phenotype_ranking(knowledge, &identity, &observed_indexes, hpo_release.clone())
+        },
+    );
     let reactome_release = (!pathways.is_empty())
         .then(|| crate::reactome::installed_status(resources).map(|ready| ready.release))
         .flatten();
+    let source_assets = profile_source_assets(
+        resources,
+        !observed.is_empty(),
+        !conditions.is_empty(),
+        !pathways.is_empty(),
+        identity.identity_release().is_some(),
+    )?;
+    let resolved = resolve_gene_set(
+        &identity,
+        &report_genes,
+        knowledge.as_deref(),
+        &observed,
+        &conditions,
+        &selected_pathways,
+        &genes,
+        &condition_matches,
+        &ranking,
+    )?;
     Ok(PreparedGeneProfile {
         observed,
-        excluded,
         conditions,
         pathways,
-        selected_pathways,
         genes,
-        excluded_genes,
-        combination: request.combination.clone(),
-        report_genes,
-        condition_matches,
         mondo_release,
         reactome_release,
         ranking,
+        source_assets,
+        resolved,
         identity,
     })
 }
@@ -1735,64 +1609,40 @@ pub fn preview(
     if request.action != "preview" {
         return Err("gene preview action must be preview".into());
     }
-    let prepared = prepare_gene_profile(resources, parquet, &request)?;
+    let prepared = prepare_gene_profile(resources, parquet, &request, false)?;
     let fingerprint = gene_evidence_fingerprint(
         &prepared.observed,
-        &prepared.excluded,
         &prepared.conditions,
         &prepared.pathways,
         &prepared.genes,
-        &prepared.excluded_genes,
-        &prepared.combination,
-        prepared.mondo_release.as_deref(),
-        prepared.reactome_release.as_deref(),
-        prepared.identity.identity_release(),
-        &prepared.ranking,
+        &prepared.source_assets,
     );
-    let resolved = write_gene_evidence(
-        None,
-        &prepared.identity,
-        &prepared.report_genes,
-        &prepared.observed,
-        &prepared.conditions,
-        &prepared.pathways,
-        &prepared.selected_pathways,
-        &prepared.genes,
-        &prepared.excluded_genes,
-        &prepared.combination,
-        &prepared.condition_matches,
-        &prepared.ranking,
-    )?;
+    let resolved = &prepared.resolved;
     let total_genes = resolved.genes.len();
     let genes_in_result = resolved
         .genes
         .keys()
-        .filter(|symbol| resolved.result_symbols.contains(*symbol))
+        .filter(|key| resolved.result_identities.contains(*key))
         .count();
     let included_genes = resolved.included.len();
     let included_genes_in_result = resolved
         .included
         .iter()
-        .filter(|symbol| resolved.result_symbols.contains(*symbol))
+        .filter(|key| resolved.result_identities.contains(*key))
         .count();
     let all_included_genes = include_all_symbols.then(|| {
-        resolved
+        let mut genes = resolved
             .genes
             .values()
-            .filter(|gene| resolved.included.contains(&gene.symbol))
-            .map(|gene| PhenotypeTerm {
-                id: if gene.result_gene_id.is_empty() {
-                    if gene.hpo_gene_id.is_empty() {
-                        gene.symbol.clone()
-                    } else {
-                        gene.hpo_gene_id.clone()
-                    }
-                } else {
-                    gene.result_gene_id.clone()
-                },
-                label: gene.symbol.clone(),
-            })
-            .collect::<Vec<_>>()
+            .filter(|gene| resolved.included.contains(&gene.identity.comparison_key()))
+            .map(|gene| gene.identity.clone())
+            .collect::<Vec<_>>();
+        genes.sort_by(|left, right| {
+            left.symbol
+                .cmp(&right.symbol)
+                .then(left.comparison_key().cmp(&right.comparison_key()))
+        });
+        genes
     });
     let query = query.trim().to_ascii_uppercase();
     let mut rows = resolved
@@ -1800,14 +1650,26 @@ pub fn preview(
         .values()
         .filter(|gene| {
             (query.is_empty()
-                || gene.symbol.contains(&query)
-                || gene.result_gene_id.to_ascii_uppercase().contains(&query)
-                || gene.hpo_gene_id.to_ascii_uppercase().contains(&query))
+                || gene.identity.symbol.contains(&query)
+                || gene
+                    .identity
+                    .result_gene_id
+                    .as_deref()
+                    .is_some_and(|id| id.to_ascii_uppercase().contains(&query))
+                || gene
+                    .identity
+                    .canonical_gene_id
+                    .as_deref()
+                    .is_some_and(|id| id.to_ascii_uppercase().contains(&query)))
                 && match presence {
-                    "in-result" => resolved.result_symbols.contains(&gene.symbol),
+                    "in-result" => resolved
+                        .result_identities
+                        .contains(&gene.identity.comparison_key()),
                     "not-in-result" => {
-                        resolved.included.contains(&gene.symbol)
-                            && !resolved.result_symbols.contains(&gene.symbol)
+                        resolved.included.contains(&gene.identity.comparison_key())
+                            && !resolved
+                                .result_identities
+                                .contains(&gene.identity.comparison_key())
                     }
                     _ => true,
                 }
@@ -1816,29 +1678,25 @@ pub fn preview(
             let mut matches = gene.selected_matches.values().collect::<Vec<_>>();
             matches.sort_by_key(|matched| matched.order);
             GenePreviewRow {
-                symbol: gene.symbol.clone(),
-                gene_id: if gene.result_gene_id.is_empty() {
-                    if gene.hpo_gene_id.is_empty() {
-                        gene.symbol.clone()
-                    } else {
-                        gene.hpo_gene_id.clone()
-                    }
-                } else {
-                    gene.result_gene_id.clone()
-                },
+                symbol: gene.identity.symbol.clone(),
+                canonical_gene_id: gene.identity.canonical_gene_id.clone(),
+                result_gene_id: gene.identity.result_gene_id.clone(),
+                identity_status: gene.identity.identity_status.clone(),
                 sources: matches
                     .into_iter()
                     .map(|matched| format!("{}: {}", matched.item_type, matched.label))
                     .collect(),
-                in_result: resolved.result_symbols.contains(&gene.symbol),
-                included: resolved.included.contains(&gene.symbol),
+                in_result: resolved
+                    .result_identities
+                    .contains(&gene.identity.comparison_key()),
+                included: resolved.included.contains(&gene.identity.comparison_key()),
             }
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| {
         left.symbol
             .cmp(&right.symbol)
-            .then(left.gene_id.cmp(&right.gene_id))
+            .then(left.canonical_gene_id.cmp(&right.canonical_gene_id))
     });
     let offset = offset.min(rows.len());
     let limit = limit.clamp(1, 250);
@@ -1859,51 +1717,58 @@ pub fn preview(
 
 fn canonical_manual_genes(
     identity: &super::gene_identity::Resolver,
-    requested: &[PhenotypeTerm],
-) -> Result<Vec<PhenotypeTerm>, String> {
-    let mut genes = BTreeMap::<String, PhenotypeTerm>::new();
-    for term in requested {
-        let resolved = match identity.resolve_pair(&term.id, &term.label) {
+    requested: &[super::gene_identity::ResolvedGene],
+) -> Result<Vec<super::gene_identity::ResolvedGene>, String> {
+    if requested.len() > MAX_PROFILE_GENES {
+        return Err(format!(
+            "A gene list can contain at most {MAX_PROFILE_GENES} genes"
+        ));
+    }
+    let mut genes = BTreeMap::<String, super::gene_identity::ResolvedGene>::new();
+    for submitted in requested {
+        let id = submitted
+            .canonical_gene_id
+            .as_deref()
+            .or(submitted.result_gene_id.as_deref())
+            .unwrap_or(&submitted.symbol);
+        let resolved = match identity.resolve_pair(id, &submitted.symbol) {
             super::gene_identity::Resolution::Resolved(gene) => gene,
             super::gene_identity::Resolution::Ambiguous => {
-                return Err(format!("Gene {} is ambiguous", term.label));
+                return Err(format!("Gene {} is ambiguous", submitted.symbol));
             }
             super::gene_identity::Resolution::Unknown => {
-                return Err(format!("Gene {} is not recognized", term.label));
+                return Err(format!("Gene {} is not recognized", submitted.symbol));
             }
         };
-        genes.insert(
-            resolved.symbol.clone(),
-            PhenotypeTerm {
-                id: resolved.gene_id,
-                label: resolved.symbol,
-            },
-        );
+        if submitted
+            .canonical_gene_id
+            .as_ref()
+            .zip(resolved.canonical_gene_id.as_ref())
+            .is_some_and(|(submitted, resolved)| !submitted.eq_ignore_ascii_case(resolved))
+        {
+            return Err(format!("Gene {} changed identity", submitted.symbol));
+        }
+        genes.insert(resolved.comparison_key(), resolved);
     }
     Ok(genes.into_values().collect())
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct GenePhenotypeSummary {
-    hpo_gene_id: String,
-    result_gene_id: String,
-    symbol: String,
-    has_profile: bool,
+    identity: super::gene_identity::ResolvedGene,
     observed_feature_linked: bool,
-    relevance: f64,
-    direct_matches: i64,
-    absent_conflict: f64,
-    best_condition: String,
-    details: String,
+    hpo_links: Vec<HpoAssociationLink>,
     condition_links: BTreeMap<String, GeneConditionLink>,
+    condition_evidence_links: Vec<GeneConditionLink>,
     selected_matches: BTreeMap<String, GeneSelectedMatch>,
-    manual: bool,
+    rank: Option<RankedGene>,
 }
 
+#[derive(Clone)]
 struct ResolvedGeneSet {
     genes: BTreeMap<String, GenePhenotypeSummary>,
     included: HashSet<String>,
-    result_symbols: HashSet<String>,
+    result_identities: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -1915,7 +1780,7 @@ struct GeneSelectedMatch {
     order: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct GeneConditionLink {
     selected_id: String,
     selected_label: String,
@@ -1928,10 +1793,535 @@ struct GeneConditionLink {
     association_source: String,
 }
 
+#[derive(Clone)]
+struct HpoAssociationLink {
+    selected_id: String,
+    selected_label: String,
+    annotated_id: String,
+    annotated_label: String,
+    relation: String,
+    disease_id: String,
+    disease_name: String,
+    association_type: String,
+    association_source: String,
+    annotation: DiseasePhenotypeContext,
+}
+
+fn profile_source_assets(
+    resources: &Path,
+    use_hpo: bool,
+    use_mondo: bool,
+    use_reactome: bool,
+    use_hgnc: bool,
+) -> Result<Vec<SourceAsset>, String> {
+    let mut sources = Vec::new();
+    if use_hpo || use_mondo || use_hgnc {
+        let (root, _, manifest) = installed_release(resources).ok_or_else(|| {
+            "Human Phenotype Ontology data is not installed. Install it from Data sources first."
+                .to_owned()
+        })?;
+        for asset in &manifest.assets {
+            let include = source_asset_used(&asset.kind, use_hpo, use_mondo, use_hgnc);
+            if !include {
+                continue;
+            }
+            let sha256 = if asset.sha256.len() == 64
+                && asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                asset.sha256.to_ascii_lowercase()
+            } else {
+                super::fastvep::sha256_file(&root.join("raw").join(&asset.filename))?
+            };
+            let release = if asset.kind.contains("gene-identit") {
+                manifest.hgnc_release.clone()
+            } else if asset.kind.contains("mondo") {
+                manifest.mondo_release.clone()
+            } else {
+                Some(manifest.release.clone())
+            }
+            .ok_or_else(|| format!("{} has no source release", asset.filename))?;
+            sources.push(SourceAsset {
+                name: asset.filename.clone(),
+                release,
+                sha256,
+            });
+        }
+    }
+    if use_reactome {
+        let (name, release, sha256) = crate::reactome::source_asset(resources)
+            .ok_or("Reactome pathway data is not installed")?;
+        sources.push(SourceAsset {
+            name,
+            release,
+            sha256: sha256.to_ascii_lowercase(),
+        });
+    }
+    sources.sort_by(|left, right| left.name.cmp(&right.name));
+    sources.dedup_by(|left, right| left.name == right.name);
+    Ok(sources)
+}
+
+fn source_asset_used(kind: &str, use_hpo: bool, use_mondo: bool, use_hgnc: bool) -> bool {
+    use_hpo && matches!(kind, "ontology" | "disease-annotations" | "disease-genes")
+        || use_mondo && (kind.contains("mondo") || kind == "disease-genes")
+        || use_hgnc && matches!(kind, "gene-identities" | "withdrawn-gene-identities")
+}
+
+fn resolved_association_gene(
+    identity: &super::gene_identity::Resolver,
+    association: &GeneAssociation,
+) -> Option<super::gene_identity::ResolvedGene> {
+    match identity.resolve_pair(&association.gene_id, &association.symbol) {
+        super::gene_identity::Resolution::Resolved(gene) => Some(gene),
+        super::gene_identity::Resolution::Ambiguous => None,
+        super::gene_identity::Resolution::Unknown if valid_gene_symbol(&association.symbol) => {
+            Some(super::gene_identity::ResolvedGene {
+                symbol: association.symbol.trim().to_ascii_uppercase(),
+                canonical_gene_id: None,
+                result_gene_id: None,
+                identity_status: "symbol-only".into(),
+            })
+        }
+        super::gene_identity::Resolution::Unknown => None,
+    }
+}
+
+fn resnik_similarity(
+    knowledge: &HpoKnowledge,
+    information_content: &[Option<f64>],
+    left: usize,
+    right: usize,
+) -> (f64, Option<usize>) {
+    let mut best: (f64, Option<usize>) = (0.0, None);
+    let mut left_position = 0;
+    let mut right_position = 0;
+    let left_ancestors = &knowledge.terms[left].ancestors;
+    let right_ancestors = &knowledge.terms[right].ancestors;
+    while left_position < left_ancestors.len() && right_position < right_ancestors.len() {
+        match left_ancestors[left_position].cmp(&right_ancestors[right_position]) {
+            std::cmp::Ordering::Less => left_position += 1,
+            std::cmp::Ordering::Greater => right_position += 1,
+            std::cmp::Ordering::Equal => {
+                let common = left_ancestors[left_position];
+                if let Some(value) = information_content[common]
+                    && (value > best.0
+                        || value == best.0
+                            && best.1.is_none_or(|current| {
+                                knowledge.terms[common].id < knowledge.terms[current].id
+                            }))
+                {
+                    best = (value, Some(common));
+                }
+                left_position += 1;
+                right_position += 1;
+            }
+        }
+    }
+    best
+}
+
+fn build_phenotype_ranking(
+    knowledge: &HpoKnowledge,
+    identity: &super::gene_identity::Resolver,
+    observed: &[usize],
+    hpo_release: String,
+) -> PhenotypeRanking {
+    if observed.is_empty() {
+        return PhenotypeRanking {
+            hpo_release,
+            query_count: 0,
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        };
+    }
+    let mut diseases = knowledge
+        .diseases
+        .iter()
+        .filter_map(|disease| {
+            let mut genes = BTreeMap::new();
+            for association in &disease.genes {
+                if association
+                    .association_type
+                    .eq_ignore_ascii_case("MENDELIAN")
+                    && let Some(gene) = resolved_association_gene(identity, association)
+                {
+                    genes.entry(gene.comparison_key()).or_insert(gene);
+                }
+            }
+            (!disease.positive.is_empty() && !genes.is_empty()).then_some((disease, genes))
+        })
+        .collect::<Vec<_>>();
+    diseases.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+    let disease_count = diseases.len();
+    if disease_count == 0 {
+        return PhenotypeRanking {
+            hpo_release,
+            query_count: observed.len(),
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        };
+    }
+    let mut counts = vec![0_u64; knowledge.terms.len()];
+    for (disease, _) in &diseases {
+        let mut propagated = BTreeSet::new();
+        for &annotation in &disease.positive {
+            propagated.extend(knowledge.terms[annotation].ancestors.iter().copied());
+        }
+        for term in propagated {
+            counts[term] = counts[term].saturating_add(1);
+        }
+    }
+    let information_content = counts
+        .iter()
+        .map(|&count| (count > 0).then(|| (disease_count as f64 / count as f64).ln().max(0.0)))
+        .collect::<Vec<_>>();
+    let mut query = observed.to_vec();
+    query.sort_by(|left, right| knowledge.terms[*left].id.cmp(&knowledge.terms[*right].id));
+    query.dedup();
+    let mut best_by_gene =
+        BTreeMap::<String, (super::gene_identity::ResolvedGene, RankedGene)>::new();
+    for (disease, disease_genes) in diseases {
+        let mut disease_terms = disease.positive.clone();
+        disease_terms
+            .sort_by(|left, right| knowledge.terms[*left].id.cmp(&knowledge.terms[*right].id));
+        let mut matched_terms = Vec::with_capacity(query.len());
+        let mut score_sum = 0.0;
+        for &query_term in &query {
+            let mut best: Option<(f64, usize, Option<usize>)> = None;
+            for &disease_term in &disease_terms {
+                let (score, mica) =
+                    resnik_similarity(knowledge, &information_content, query_term, disease_term);
+                if best.as_ref().is_none_or(|current| {
+                    score > current.0
+                        || score == current.0
+                            && knowledge.terms[disease_term].id < knowledge.terms[current.1].id
+                }) {
+                    best = Some((score, disease_term, mica));
+                }
+            }
+            let best = best.expect("eligible disease profiles contain a positive HPO term");
+            score_sum += best.0;
+            matched_terms.push(RankedTermMatch {
+                query: term_value(knowledge, query_term),
+                disease_term: term_value(knowledge, best.1),
+                mica: best.2.map(|index| term_value(knowledge, index)),
+                eligible_disease_profiles: disease_count,
+                mica_disease_profiles: best.2.map(|index| counts[index]),
+                resnik_similarity: best.0,
+            });
+        }
+        let raw_score = score_sum / query.len() as f64;
+        let score_key = (raw_score * 1_000_000_000_000.0 + 0.5).floor() as u64;
+        for (key, gene) in disease_genes {
+            let candidate = RankedGene {
+                rank: 0,
+                tie_count: 0,
+                raw_score,
+                score_key,
+                best_disease_id: disease.id.clone(),
+                best_disease_name: disease.name.clone(),
+                matched_terms: matched_terms.clone(),
+            };
+            best_by_gene
+                .entry(key)
+                .and_modify(|(_, current)| {
+                    if candidate.raw_score > current.raw_score
+                        || candidate.raw_score == current.raw_score
+                            && candidate.best_disease_id < current.best_disease_id
+                    {
+                        *current = candidate.clone();
+                    }
+                })
+                .or_insert((gene, candidate));
+        }
+    }
+    let denominator = best_by_gene.len();
+    let mut tie_counts = HashMap::<u64, usize>::new();
+    for (_, rank) in best_by_gene.values() {
+        *tie_counts.entry(rank.score_key).or_default() += 1;
+    }
+    let mut ranked = best_by_gene.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .1
+            .score_key
+            .cmp(&left.1.1.score_key)
+            .then(left.1.0.symbol.cmp(&right.1.0.symbol))
+            .then(left.0.cmp(&right.0))
+    });
+    let mut previous_score = None;
+    let mut competition_rank = 0;
+    let mut genes = BTreeMap::new();
+    for (position, (key, (_, mut rank))) in ranked.into_iter().enumerate() {
+        if previous_score != Some(rank.score_key) {
+            competition_rank = position + 1;
+            previous_score = Some(rank.score_key);
+        }
+        rank.rank = competition_rank;
+        rank.tie_count = tie_counts[&rank.score_key];
+        genes.insert(key, rank);
+    }
+    PhenotypeRanking {
+        hpo_release,
+        query_count: query.len(),
+        disease_profile_count: disease_count,
+        denominator,
+        genes,
+    }
+}
+
+fn new_gene_summary(
+    identity: super::gene_identity::ResolvedGene,
+    ranking: &PhenotypeRanking,
+) -> GenePhenotypeSummary {
+    let rank = ranking.genes.get(&identity.comparison_key()).cloned();
+    GenePhenotypeSummary {
+        identity,
+        observed_feature_linked: false,
+        hpo_links: Vec::new(),
+        condition_links: BTreeMap::new(),
+        condition_evidence_links: Vec::new(),
+        selected_matches: BTreeMap::new(),
+        rank,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_gene_set(
+    identity: &super::gene_identity::Resolver,
+    report_genes: &[super::results::ReportGeneOccurrence],
+    knowledge: Option<&HpoKnowledge>,
+    observed: &[PhenotypeTerm],
+    conditions: &[PhenotypeTerm],
+    selected_pathways: &[crate::reactome::Pathway],
+    manual_genes: &[super::gene_identity::ResolvedGene],
+    condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
+    ranking: &PhenotypeRanking,
+) -> Result<ResolvedGeneSet, String> {
+    let result_identities = report_genes
+        .iter()
+        .map(|gene| {
+            identity
+                .canonicalize(&gene.gene_symbol, &gene.gene_id)
+                .comparison_key()
+        })
+        .collect::<HashSet<_>>();
+    let mut genes = BTreeMap::<String, GenePhenotypeSummary>::new();
+    if let Some(knowledge) = knowledge {
+        let observed_indexes = term_indexes(knowledge, observed)?;
+        for (order, (&selected_index, selected)) in
+            observed_indexes.iter().zip(observed).enumerate()
+        {
+            for disease in &knowledge.diseases {
+                for &annotated_index in &disease.positive {
+                    let relation = if annotated_index == selected_index {
+                        Some("HPO link via exact disease annotation")
+                    } else if knowledge.terms[annotated_index]
+                        .ancestors
+                        .contains(&selected_index)
+                    {
+                        Some("HPO link via more-specific disease annotation")
+                    } else {
+                        None
+                    };
+                    let Some(relation) = relation else {
+                        continue;
+                    };
+                    for association in &disease.genes {
+                        if !association
+                            .association_type
+                            .eq_ignore_ascii_case("MENDELIAN")
+                        {
+                            continue;
+                        }
+                        let Some(resolved) = resolved_association_gene(identity, association)
+                        else {
+                            continue;
+                        };
+                        let key = resolved.comparison_key();
+                        let summary = genes
+                            .entry(key)
+                            .or_insert_with(|| new_gene_summary(resolved, ranking));
+                        summary.observed_feature_linked |= annotated_index == selected_index;
+                        summary
+                            .selected_matches
+                            .entry(format!("Feature:{}", selected.id))
+                            .and_modify(|current| {
+                                if current.relation != "HPO link via exact disease annotation"
+                                    && relation == "HPO link via exact disease annotation"
+                                {
+                                    current.relation = relation.into();
+                                }
+                            })
+                            .or_insert(GeneSelectedMatch {
+                                id: selected.id.clone(),
+                                label: selected.label.clone(),
+                                item_type: "Feature",
+                                relation: relation.into(),
+                                order,
+                            });
+                        let link = HpoAssociationLink {
+                            selected_id: selected.id.clone(),
+                            selected_label: selected.label.clone(),
+                            annotated_id: knowledge.terms[annotated_index].id.clone(),
+                            annotated_label: knowledge.terms[annotated_index].label.clone(),
+                            relation: relation.into(),
+                            disease_id: disease.id.clone(),
+                            disease_name: disease.name.clone(),
+                            association_type: association.association_type.clone(),
+                            association_source: association.source.clone(),
+                            annotation: disease
+                                .annotations
+                                .get(&annotated_index)
+                                .cloned()
+                                .unwrap_or_default(),
+                        };
+                        if !summary.hpo_links.iter().any(|current| {
+                            current.selected_id == link.selected_id
+                                && current.annotated_id == link.annotated_id
+                                && current.disease_id == link.disease_id
+                                && current.association_source == link.association_source
+                        }) {
+                            summary.hpo_links.push(link);
+                        }
+                    }
+                }
+            }
+        }
+        for association in &knowledge.condition_associations {
+            let Some(matches) = condition_matches.get(&association.id) else {
+                continue;
+            };
+            for gene_association in &association.genes {
+                if !matches!(
+                    gene_association
+                        .association_type
+                        .to_ascii_uppercase()
+                        .as_str(),
+                    "MENDELIAN" | "POLYGENIC"
+                ) {
+                    continue;
+                }
+                let Some(resolved) = resolved_association_gene(identity, gene_association) else {
+                    continue;
+                };
+                let key = resolved.comparison_key();
+                let summary = genes
+                    .entry(key)
+                    .or_insert_with(|| new_gene_summary(resolved, ranking));
+                for matched in matches {
+                    let candidate = GeneConditionLink {
+                        selected_id: matched.selected_id.clone(),
+                        selected_label: matched.selected_label.clone(),
+                        matched_id: matched.matched_id.clone(),
+                        matched_label: matched.matched_label.clone(),
+                        relation: matched.relation.into(),
+                        source_disease_id: association.id.clone(),
+                        source_disease_name: association.name.clone(),
+                        association_type: gene_association.association_type.clone(),
+                        association_source: gene_association.source.clone(),
+                    };
+                    if !summary.condition_evidence_links.contains(&candidate) {
+                        summary.condition_evidence_links.push(candidate.clone());
+                    }
+                    summary
+                        .condition_links
+                        .entry(matched.selected_id.clone())
+                        .and_modify(|current| {
+                            if current.relation != "Exact condition"
+                                && candidate.relation == "Exact condition"
+                            {
+                                *current = candidate.clone();
+                            }
+                        })
+                        .or_insert(candidate);
+                    let selected_relation = summary
+                        .condition_links
+                        .get(&matched.selected_id)
+                        .map(|link| {
+                            format!(
+                                "{} · {}",
+                                link.relation,
+                                link.association_type.to_ascii_uppercase()
+                            )
+                        })
+                        .unwrap();
+                    let order = observed.len()
+                        + conditions
+                            .iter()
+                            .position(|term| term.id == matched.selected_id)
+                            .unwrap_or(usize::MAX - observed.len());
+                    summary.selected_matches.insert(
+                        format!("Condition:{}", matched.selected_id),
+                        GeneSelectedMatch {
+                            id: matched.selected_id.clone(),
+                            label: matched.selected_label.clone(),
+                            item_type: "Condition",
+                            relation: selected_relation,
+                            order,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    for (pathway_order, pathway) in selected_pathways.iter().enumerate() {
+        for source_symbol in &pathway.genes {
+            let resolved = identity.canonicalize(source_symbol, "");
+            let key = resolved.comparison_key();
+            let summary = genes
+                .entry(key)
+                .or_insert_with(|| new_gene_summary(resolved, ranking));
+            summary.selected_matches.insert(
+                format!("Pathway:{}", pathway.id),
+                GeneSelectedMatch {
+                    id: pathway.id.clone(),
+                    label: pathway.label.clone(),
+                    item_type: "Pathway",
+                    relation: "Listed in Reactome pathway gene set".into(),
+                    order: observed.len() + conditions.len() + pathway_order,
+                },
+            );
+        }
+    }
+    for (manual_order, resolved) in manual_genes.iter().enumerate() {
+        let key = resolved.comparison_key();
+        let summary = genes
+            .entry(key.clone())
+            .or_insert_with(|| new_gene_summary(resolved.clone(), ranking));
+        summary.selected_matches.insert(
+            format!("Gene:{key}"),
+            GeneSelectedMatch {
+                id: resolved
+                    .canonical_gene_id
+                    .clone()
+                    .or_else(|| resolved.result_gene_id.clone())
+                    .unwrap_or_else(|| resolved.symbol.clone()),
+                label: resolved.symbol.clone(),
+                item_type: "Gene",
+                relation: "Entered gene".into(),
+                order: observed.len() + conditions.len() + selected_pathways.len() + manual_order,
+            },
+        );
+    }
+    let included = genes.keys().cloned().collect();
+    Ok(ResolvedGeneSet {
+        genes,
+        included,
+        result_identities,
+    })
+}
+
 struct GeneEvidenceRow {
     allele_id: Option<String>,
     gene_id: String,
     gene_symbol: String,
+    canonical_gene_id: Option<String>,
+    result_gene_id: Option<String>,
+    identity_status: String,
     field_path: &'static str,
     value_type: &'static str,
     string_value: Option<String>,
@@ -1946,32 +2336,27 @@ fn publish_gene_evidence(
     run_id: &str,
     identity: &super::gene_identity::Resolver,
     report_genes: &[super::results::ReportGeneOccurrence],
+    resolved: &ResolvedGeneSet,
     observed: &[PhenotypeTerm],
-    excluded: &[PhenotypeTerm],
     conditions: &[PhenotypeTerm],
     pathways: &[PhenotypeTerm],
-    selected_pathways: &[crate::reactome::Pathway],
-    genes: &[PhenotypeTerm],
-    excluded_genes: &[String],
-    combination: &str,
-    condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
     mondo_release: Option<&str>,
     reactome_release: Option<&str>,
     ranking: &PhenotypeRanking,
+    source_assets: &[SourceAsset],
 ) -> Result<PhenotypeGeneration, String> {
-    let fingerprint = gene_evidence_fingerprint(
-        observed,
-        excluded,
-        conditions,
-        pathways,
-        genes,
-        excluded_genes,
-        combination,
-        mondo_release,
-        reactome_release,
-        identity.identity_release(),
-        ranking,
-    );
+    let manual_genes = resolved
+        .genes
+        .values()
+        .filter(|gene| {
+            gene.selected_matches
+                .values()
+                .any(|matched| matched.item_type == "Gene")
+        })
+        .map(|gene| gene.identity.clone())
+        .collect::<Vec<_>>();
+    let fingerprint =
+        gene_evidence_fingerprint(observed, conditions, pathways, &manual_genes, source_assets);
     let short = &fingerprint[..16];
     let evidence_file = format!("phenotype-gene-evidence.{short}.parquet");
     let catalog_file = format!("phenotype-field-catalog.{short}.json");
@@ -1985,18 +2370,12 @@ fn publish_gene_evidence(
     let catalog_path = root.join(&catalog_file);
     if !evidence_path.is_file() {
         write_gene_evidence(
-            Some(&evidence_path),
+            &evidence_path,
             identity,
             report_genes,
-            observed,
-            conditions,
-            pathways,
-            selected_pathways,
-            genes,
-            excluded_genes,
-            combination,
-            condition_matches,
+            resolved,
             ranking,
+            source_assets,
         )?;
     }
     // The catalog is small and can gain presentation dependencies without rebuilding evidence.
@@ -2008,61 +2387,39 @@ fn publish_gene_evidence(
         mondo_release,
         reactome_release,
         identity.identity_release(),
-        &ranking.algorithm_version,
-        ranking.provider_url.as_str(),
+        ranking.query_count,
+        source_assets,
     )?;
     let matched_gene_count = phenotype_matched_gene_count(&evidence_path)?;
     Ok(PhenotypeGeneration {
         fingerprint,
         evidence_file,
         catalog_file,
-        matched_gene_count: Some(matched_gene_count),
-        candidate_evidence_file: None,
+        matched_gene_count,
     })
 }
 
 fn gene_evidence_fingerprint(
     observed: &[PhenotypeTerm],
-    excluded: &[PhenotypeTerm],
     conditions: &[PhenotypeTerm],
     pathways: &[PhenotypeTerm],
-    genes: &[PhenotypeTerm],
-    excluded_genes: &[String],
-    combination: &str,
-    mondo_release: Option<&str>,
-    reactome_release: Option<&str>,
-    identity_release: Option<&str>,
-    ranking: &PhenotypeRanking,
+    genes: &[super::gene_identity::ResolvedGene],
+    source_assets: &[SourceAsset],
 ) -> String {
-    let mut fingerprint_input = observed
-        .iter()
-        .map(|term| format!("O:{}", term.id))
-        .chain(excluded.iter().map(|term| format!("A:{}", term.id)))
-        .chain(conditions.iter().map(|term| format!("C:{}", term.id)))
-        .chain(pathways.iter().map(|term| format!("P:{}", term.id)))
-        .chain(genes.iter().map(|term| format!("G:{}", term.id)))
-        .chain(excluded_genes.iter().map(|gene| format!("X:{gene}")))
-        .collect::<Vec<_>>();
-    if !ranking.hpo_release.is_empty() {
-        fingerprint_input.push(format!("H:{}", ranking.hpo_release));
-    }
-    if let Some(release) = mondo_release {
-        fingerprint_input.push(format!("M:{release}"));
-    }
-    if let Some(release) = reactome_release {
-        fingerprint_input.push(format!("T:{release}"));
-    }
-    fingerprint_input.push(format!("V:{}", ranking.algorithm_version));
-    fingerprint_input.push(format!(
-        "R:allele-gene-match-v3:{}:{}",
-        super::gene_identity::CONTRACT_VERSION,
-        identity_release.unwrap_or("report-identities")
-    ));
-    fingerprint_input.push(format!("O:{combination}"));
-    format!(
-        "{:x}",
-        Sha256::digest(fingerprint_input.join("\n").as_bytes())
-    )
+    let value = json!({
+        "profileSchemaVersion": PROFILE_SCHEMA_VERSION,
+        "catalogSchemaVersion": CATALOG_SCHEMA_VERSION,
+        "evidenceContractVersion": EVIDENCE_CONTRACT_VERSION,
+        "identityContractVersion": super::gene_identity::CONTRACT_VERSION,
+        "geneSetAlgorithmVersion": GENE_SET_ALGORITHM_VERSION,
+        "phenotypeRankingAlgorithmVersion": PHENOTYPE_RANKING_ALGORITHM_VERSION,
+        "observed": observed.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
+        "conditions": conditions.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
+        "pathways": pathways.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
+        "genes": genes,
+        "sourceAssets": source_assets,
+    });
+    format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()))
 }
 
 fn phenotype_matched_gene_count(path: &Path) -> Result<usize, String> {
@@ -2079,318 +2436,68 @@ fn phenotype_matched_gene_count(path: &Path) -> Result<usize, String> {
     usize::try_from(count).map_err(|_| "phenotype-linked gene count is invalid".into())
 }
 
+fn validate_gene_evidence_schema(path: &Path) -> Result<(), String> {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .prepare(
+            "SELECT allele_id, gene_id, gene_symbol, canonical_gene_id, result_gene_id,
+                    identity_status, scope, source_id, field_path, value_type,
+                    string_value, integer_value, number_value, boolean_value, json_value
+             FROM read_parquet(?) LIMIT 0",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query(params![path.to_string_lossy().as_ref()])
+                .map(|_| ())
+        })
+        .map_err(|error| format!("invalid phenotype gene evidence: {error}"))
+}
+
+fn phenotype_rank_details(
+    gene: &super::gene_identity::ResolvedGene,
+    rank: Option<&RankedGene>,
+    ranking: &PhenotypeRanking,
+    source_assets: &[SourceAsset],
+) -> serde_json::Value {
+    json!({
+        "geneSymbol": gene.symbol,
+        "canonicalGeneId": gene.canonical_gene_id,
+        "resultGeneId": gene.result_gene_id,
+        "identityStatus": gene.identity_status,
+        "rank": rank.map(|value| value.rank),
+        "denominator": ranking.denominator,
+        "tieCount": rank.map(|value| value.tie_count).unwrap_or(0),
+        "bestDiseaseId": rank.map(|value| value.best_disease_id.as_str()),
+        "bestDisease": rank.map(|value| value.best_disease_name.as_str()),
+        "rawResnikScore": rank.map(|value| value.raw_score),
+        "scoreKey": rank.map(|value| value.score_key),
+        "algorithmVersion": PHENOTYPE_RANKING_ALGORITHM_VERSION,
+        "queryTermCount": ranking.query_count,
+        "eligibleDiseaseProfileCount": ranking.disease_profile_count,
+        "hpoRelease": ranking.hpo_release,
+        "sourceAssets": source_assets,
+        "matchedTerms": rank.map(|value| value.matched_terms.as_slice()).unwrap_or(&[]),
+    })
+}
+
 fn write_gene_evidence(
-    path: Option<&Path>,
+    path: &Path,
     identity: &super::gene_identity::Resolver,
     report_genes: &[super::results::ReportGeneOccurrence],
-    observed: &[PhenotypeTerm],
-    conditions: &[PhenotypeTerm],
-    pathways: &[PhenotypeTerm],
-    selected_pathways: &[crate::reactome::Pathway],
-    manual_genes: &[PhenotypeTerm],
-    excluded_genes: &[String],
-    combination: &str,
-    condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
+    resolved: &ResolvedGeneSet,
     ranking: &PhenotypeRanking,
-) -> Result<ResolvedGeneSet, String> {
-    let has_observed_features = !observed.is_empty();
-    let result_symbols = report_genes
-        .iter()
-        .map(|gene| gene.gene_symbol.clone())
-        .collect::<HashSet<_>>();
-    let result_gene_ids = super::results::report_gene_identities_from_occurrences(report_genes)
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let observed_order = observed
-        .iter()
-        .enumerate()
-        .map(|(order, term)| (term.id.as_str(), (order, term.label.as_str())))
-        .collect::<HashMap<_, _>>();
-    let condition_order = conditions
-        .iter()
-        .enumerate()
-        .map(|(order, term)| {
-            (
-                term.id.as_str(),
-                (observed.len() + order, term.label.as_str()),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut hpo_gene_ids = HashMap::<String, HashSet<String>>::new();
-    for gene in ranking
-        .diseases
-        .iter()
-        .flat_map(|disease| disease.genes.iter())
-    {
-        let canonical = identity.canonicalize(&gene.symbol, &gene.gene_id);
-        let symbol = canonical.symbol;
-        let gene_id = gene.gene_id.trim();
-        if !gene_id.is_empty() {
-            hpo_gene_ids
-                .entry(symbol)
-                .or_default()
-                .insert(gene_id.to_owned());
-        }
-    }
-    let mut genes = BTreeMap::<String, GenePhenotypeSummary>::new();
-    for disease in &ranking.diseases {
-        let direct_matches = disease
-            .matched_phenotypes
-            .iter()
-            .filter(|item| item.direct)
-            .count() as i64;
-        let details = serde_json::to_string(&json!({
-            "conditionId": disease.disease_id,
-            "condition": disease.disease_name,
-            "matches": disease.matched_phenotypes,
-        }))
-        .map_err(|error| format!("cannot serialize phenotype evidence details: {error}"))?;
-        for gene in &disease.genes {
-            let canonical = identity.canonicalize(&gene.symbol, &gene.gene_id);
-            let symbol = canonical.symbol;
-            let result_gene_id = result_gene_ids
-                .get(symbol.as_str())
-                .cloned()
-                .unwrap_or_default();
-            let Some(unique_hpo_ids) = hpo_gene_ids
-                .get(&symbol)
-                .filter(|gene_ids| gene_ids.len() == 1)
-            else {
-                continue;
-            };
-            let hpo_gene_id = unique_hpo_ids.iter().next().unwrap();
-            let association_type = gene.association_type.to_ascii_uppercase();
-            if has_observed_features
-                && association_type == "MENDELIAN"
-                && !disease.matched_phenotypes.is_empty()
-            {
-                let observed_feature_linked = genes
-                    .get(&symbol)
-                    .is_some_and(|current| current.observed_feature_linked)
-                    || direct_matches > 0;
-                let replace = genes
-                    .get(&symbol)
-                    .is_none_or(|current| disease.phenotype_score > current.relevance);
-                if replace {
-                    let condition_links = genes
-                        .get(&symbol)
-                        .map(|current| current.condition_links.clone())
-                        .unwrap_or_default();
-                    let selected_matches = genes
-                        .get(&symbol)
-                        .map(|current| current.selected_matches.clone())
-                        .unwrap_or_default();
-                    let manual = genes.get(&symbol).is_some_and(|current| current.manual);
-                    genes.insert(
-                        symbol.clone(),
-                        GenePhenotypeSummary {
-                            hpo_gene_id: hpo_gene_id.clone(),
-                            result_gene_id: result_gene_id.clone(),
-                            symbol: symbol.clone(),
-                            has_profile: true,
-                            observed_feature_linked,
-                            relevance: disease.phenotype_score,
-                            direct_matches,
-                            absent_conflict: disease.conflict_score,
-                            best_condition: disease.disease_name.clone(),
-                            details: details.clone(),
-                            condition_links,
-                            selected_matches,
-                            manual,
-                        },
-                    );
-                } else if direct_matches > 0
-                    && let Some(summary) = genes.get_mut(&symbol)
-                {
-                    summary.observed_feature_linked = true;
-                }
-                if let Some(summary) = genes.get_mut(&symbol) {
-                    for matched in &disease.matched_phenotypes {
-                        if let Some((order, label)) = observed_order.get(matched.query.id.as_str())
-                        {
-                            summary
-                                .selected_matches
-                                .entry(matched.query.id.clone())
-                                .or_insert(GeneSelectedMatch {
-                                    id: matched.query.id.clone(),
-                                    label: (*label).to_owned(),
-                                    item_type: "Feature",
-                                    relation: if matched.direct {
-                                        "Direct feature".into()
-                                    } else {
-                                        "Related feature".into()
-                                    },
-                                    order: *order,
-                                });
-                        }
-                    }
-                }
-            }
-            if !matches!(association_type.as_str(), "MENDELIAN" | "POLYGENIC") {
-                continue;
-            }
-            for matched in condition_matches
-                .get(&disease.disease_id)
-                .into_iter()
-                .flatten()
-            {
-                let summary = genes
-                    .entry(symbol.clone())
-                    .or_insert_with(|| GenePhenotypeSummary {
-                        hpo_gene_id: hpo_gene_id.clone(),
-                        result_gene_id: result_gene_id.clone(),
-                        symbol: symbol.clone(),
-                        ..GenePhenotypeSummary::default()
-                    });
-                let candidate = GeneConditionLink {
-                    selected_id: matched.selected_id.clone(),
-                    selected_label: matched.selected_label.clone(),
-                    matched_id: matched.matched_id.clone(),
-                    matched_label: matched.matched_label.clone(),
-                    relation: matched.relation.into(),
-                    source_disease_id: disease.disease_id.clone(),
-                    source_disease_name: disease.disease_name.clone(),
-                    association_type: gene.association_type.clone(),
-                    association_source: gene.source.clone(),
-                };
-                summary
-                    .condition_links
-                    .entry(matched.selected_id.clone())
-                    .and_modify(|current| {
-                        if current.relation != "Exact condition"
-                            && candidate.relation == "Exact condition"
-                        {
-                            *current = candidate.clone();
-                        }
-                    })
-                    .or_insert(candidate);
-                let (order, label) = condition_order
-                    .get(matched.selected_id.as_str())
-                    .copied()
-                    .unwrap_or((usize::MAX, matched.selected_label.as_str()));
-                summary.selected_matches.insert(
-                    matched.selected_id.clone(),
-                    GeneSelectedMatch {
-                        id: matched.selected_id.clone(),
-                        label: label.to_owned(),
-                        item_type: "Condition",
-                        relation: matched.relation.into(),
-                        order,
-                    },
-                );
-            }
-        }
-    }
-    for (symbol, result_gene_id) in &result_gene_ids {
-        let Some(hpo_gene_id) = hpo_gene_ids
-            .get(symbol)
-            .filter(|gene_ids| gene_ids.len() == 1)
-            .and_then(|gene_ids| gene_ids.iter().next())
-        else {
-            continue;
-        };
-        genes
-            .entry(symbol.clone())
-            .or_insert_with(|| GenePhenotypeSummary {
-                hpo_gene_id: hpo_gene_id.clone(),
-                result_gene_id: result_gene_id.clone(),
-                symbol: symbol.clone(),
-                ..GenePhenotypeSummary::default()
-            });
-    }
-    for (order, pathway) in selected_pathways.iter().enumerate() {
-        for source_symbol in &pathway.genes {
-            let symbol = identity.canonical_symbol(source_symbol).map_or_else(
-                || source_symbol.trim().to_ascii_uppercase(),
-                |gene| gene.symbol,
-            );
-            let result_gene_id = result_gene_ids.get(&symbol).cloned().unwrap_or_default();
-            let summary = genes
-                .entry(symbol.clone())
-                .or_insert_with(|| GenePhenotypeSummary {
-                    result_gene_id,
-                    symbol: symbol.clone(),
-                    ..GenePhenotypeSummary::default()
-                });
-            summary.selected_matches.insert(
-                pathway.id.clone(),
-                GeneSelectedMatch {
-                    id: pathway.id.clone(),
-                    label: pathway.label.clone(),
-                    item_type: "Pathway",
-                    relation: "Pathway member".into(),
-                    order: observed.len() + conditions.len() + order,
-                },
-            );
-        }
-    }
-    for (order, selected) in manual_genes.iter().enumerate() {
-        let symbol = selected.label.to_ascii_uppercase();
-        let result_gene_id = result_gene_ids.get(&symbol).cloned().unwrap_or_default();
-        let summary = genes
-            .entry(symbol.clone())
-            .or_insert_with(|| GenePhenotypeSummary {
-                hpo_gene_id: selected
-                    .id
-                    .starts_with("ENSG")
-                    .then(|| selected.id.clone())
-                    .unwrap_or_default(),
-                result_gene_id,
-                symbol: symbol.clone(),
-                ..GenePhenotypeSummary::default()
-            });
-        summary.manual = true;
-        summary.selected_matches.insert(
-            format!("GENE:{symbol}"),
-            GeneSelectedMatch {
-                id: selected.id.clone(),
-                label: symbol,
-                item_type: "Gene",
-                relation: "Entered gene".into(),
-                order: observed.len() + conditions.len() + pathways.len() + order,
-            },
-        );
-    }
-    let excluded = excluded_genes
-        .iter()
-        .map(|gene| gene.trim().to_ascii_uppercase())
-        .collect::<HashSet<_>>();
-    let source_item_count = observed.len() + conditions.len() + pathways.len();
-    let included = genes
-        .iter()
-        .filter_map(|(symbol, summary)| {
-            if excluded.contains(symbol) {
-                return None;
-            }
-            let linked = summary
-                .selected_matches
-                .values()
-                .filter(|matched| matched.item_type != "Gene")
-                .map(|matched| matched.id.as_str())
-                .collect::<HashSet<_>>()
-                .len();
-            (summary.manual
-                || (combination == "every" && source_item_count > 0 && linked == source_item_count)
-                || (combination != "every" && linked > 0))
-                .then_some(symbol.clone())
-        })
-        .collect::<HashSet<_>>();
-    let resolved = ResolvedGeneSet {
-        genes,
-        included,
-        result_symbols,
-    };
-    let Some(path) = path else {
-        return Ok(resolved);
-    };
-    let genes = &resolved.genes;
-    let included = &resolved.included;
-    let mut rows = Vec::with_capacity(genes.len() * 11 + report_genes.len());
-    for gene in genes.values() {
+    source_assets: &[SourceAsset],
+) -> Result<(), String> {
+    let mut rows = Vec::with_capacity(resolved.genes.len() * 12 + report_genes.len() * 7);
+    for gene in resolved.genes.values() {
+        let identity = &gene.identity;
         let base = |field_path, value_type| GeneEvidenceRow {
             allele_id: None,
-            gene_id: gene.result_gene_id.clone(),
-            gene_symbol: gene.symbol.clone(),
+            gene_id: identity.result_id(),
+            gene_symbol: identity.symbol.clone(),
+            canonical_gene_id: identity.canonical_gene_id.clone(),
+            result_gene_id: identity.result_gene_id.clone(),
+            identity_status: identity.identity_status.clone(),
             field_path,
             value_type,
             string_value: None,
@@ -2399,6 +2506,13 @@ fn write_gene_evidence(
             boolean_value: None,
             json_value: None,
         };
+        let direct_matches = gene
+            .hpo_links
+            .iter()
+            .filter(|link| link.selected_id == link.annotated_id)
+            .map(|link| link.selected_id.as_str())
+            .collect::<HashSet<_>>()
+            .len() as i64;
         let condition_count = gene.condition_links.len() as i64;
         let matched_conditions = gene
             .condition_links
@@ -2417,9 +2531,27 @@ fn write_gene_evidence(
         } else {
             ""
         };
-        let condition_details = gene
-            .condition_links
-            .values()
+        let hpo_links = gene
+            .hpo_links
+            .iter()
+            .map(|link| {
+                json!({
+                    "selectedFeatureId": link.selected_id,
+                    "selectedFeature": link.selected_label,
+                    "annotatedFeatureId": link.annotated_id,
+                    "annotatedFeature": link.annotated_label,
+                    "relation": link.relation,
+                    "sourceDiseaseId": link.disease_id,
+                    "sourceDisease": link.disease_name,
+                    "associationType": link.association_type,
+                    "associationSource": link.association_source,
+                    "annotation": link.annotation,
+                })
+            })
+            .collect::<Vec<_>>();
+        let condition_links = gene
+            .condition_evidence_links
+            .iter()
             .map(|link| {
                 json!({
                     "selectedConditionId": link.selected_id,
@@ -2434,31 +2566,43 @@ fn write_gene_evidence(
                 })
             })
             .collect::<Vec<_>>();
-        let combined_details = serde_json::to_string(&json!({
-            "geneResolution": "uniqueGeneSymbol",
-            "resultGeneId": gene.result_gene_id,
-            "hpoGeneId": gene.hpo_gene_id,
-            "bestPhenotypeMatch": serde_json::from_str::<serde_json::Value>(&gene.details)
-                .unwrap_or(serde_json::Value::Null),
-            "conditionLinks": condition_details,
+        let evidence_details = serde_json::to_string(&json!({
+            "evidenceContractVersion": EVIDENCE_CONTRACT_VERSION,
+            "identity": identity,
+            "hpoLinks": hpo_links,
+            "conditionLinks": condition_links,
             "selectedMatches": gene.selected_matches.values().map(|matched| json!({
-                "id": matched.id,
-                "label": matched.label,
-                "type": matched.item_type,
+                "selectedItemId": matched.id,
+                "selectedItem": matched.label,
+                "itemType": matched.item_type,
                 "relation": matched.relation,
             })).collect::<Vec<_>>(),
         }))
-        .map_err(|error| format!("cannot serialize phenotype and condition details: {error}"))?;
+        .map_err(|error| format!("cannot serialize phenotype evidence details: {error}"))?;
+        if ranking.query_count > 0 {
+            rows.push(GeneEvidenceRow {
+                integer_value: gene.rank.as_ref().map(|rank| rank.rank as i64),
+                ..base("phenotypeRank", "integer")
+            });
+            rows.push(GeneEvidenceRow {
+                json_value: Some(
+                    serde_json::to_string(&phenotype_rank_details(
+                        identity,
+                        gene.rank.as_ref(),
+                        ranking,
+                        source_assets,
+                    ))
+                    .map_err(|error| format!("cannot serialize phenotype rank details: {error}"))?,
+                ),
+                ..base("phenotypeRankDetails", "json")
+            });
+        }
         rows.push(GeneEvidenceRow {
-            number_value: (has_observed_features && gene.has_profile).then_some(gene.relevance),
-            ..base("phenotypeRelevance", "number")
-        });
-        rows.push(GeneEvidenceRow {
-            boolean_value: Some(gene.observed_feature_linked || condition_count > 0),
+            boolean_value: Some(!gene.hpo_links.is_empty() || !gene.condition_links.is_empty()),
             ..base("profileLinked", "boolean")
         });
         rows.push(GeneEvidenceRow {
-            boolean_value: Some(included.contains(&gene.symbol)),
+            boolean_value: Some(resolved.included.contains(&identity.comparison_key())),
             ..base("includedGene", "boolean")
         });
         rows.push(GeneEvidenceRow {
@@ -2466,18 +2610,15 @@ fn write_gene_evidence(
             ..base("observedFeatureLinked", "boolean")
         });
         rows.push(GeneEvidenceRow {
-            string_value: (has_observed_features && gene.has_profile)
-                .then(|| gene.best_condition.clone()),
+            string_value: gene
+                .rank
+                .as_ref()
+                .map(|rank| rank.best_disease_name.clone()),
             ..base("bestMatchingCondition", "text")
         });
         rows.push(GeneEvidenceRow {
-            integer_value: Some(gene.direct_matches),
+            integer_value: Some(direct_matches),
             ..base("directFeatureMatches", "integer")
-        });
-        rows.push(GeneEvidenceRow {
-            number_value: (has_observed_features && gene.has_profile)
-                .then_some(gene.absent_conflict),
-            ..base("absentFeatureConflict", "number")
         });
         rows.push(GeneEvidenceRow {
             integer_value: Some(condition_count),
@@ -2492,25 +2633,42 @@ fn write_gene_evidence(
             ..base("selectedConditionRelation", "text")
         });
         rows.push(GeneEvidenceRow {
-            json_value: Some(combined_details),
+            json_value: Some(evidence_details),
             ..base("phenotypeEvidenceDetails", "json")
         });
     }
-    let mut allele_matches =
-        BTreeMap::<String, Vec<(&GenePhenotypeSummary, &GeneSelectedMatch)>>::new();
+
+    let mut allele_matches = BTreeMap::<
+        String,
+        Vec<(
+            super::gene_identity::ResolvedGene,
+            GeneSelectedMatch,
+            Option<RankedGene>,
+        )>,
+    >::new();
+    let mut seen = HashSet::new();
     for occurrence in report_genes {
         let canonical = identity.canonicalize(&occurrence.gene_symbol, &occurrence.gene_id);
-        let Some(gene) = genes
-            .get(&canonical.symbol)
-            .filter(|gene| included.contains(&gene.symbol))
+        let key = canonical.comparison_key();
+        let Some(gene) = resolved
+            .genes
+            .get(&key)
+            .filter(|_| resolved.included.contains(&key))
         else {
             continue;
         };
         for matched in gene.selected_matches.values() {
-            allele_matches
-                .entry(occurrence.allele_id.clone())
-                .or_default()
-                .push((gene, matched));
+            if seen.insert((
+                occurrence.allele_id.clone(),
+                key.clone(),
+                matched.item_type,
+                matched.id.clone(),
+            )) {
+                allele_matches
+                    .entry(occurrence.allele_id.clone())
+                    .or_default()
+                    .push((gene.identity.clone(), matched.clone(), gene.rank.clone()));
+            }
         }
     }
     for (allele_id, mut matches) in allele_matches {
@@ -2518,44 +2676,44 @@ fn write_gene_evidence(
             left.1
                 .order
                 .cmp(&right.1.order)
-                .then_with(|| left.1.label.cmp(&right.1.label))
-                .then_with(|| left.0.symbol.cmp(&right.0.symbol))
+                .then(left.1.label.cmp(&right.1.label))
+                .then(left.0.symbol.cmp(&right.0.symbol))
+                .then(left.0.comparison_key().cmp(&right.0.comparison_key()))
         });
-        matches.dedup_by(|left, right| left.0.symbol == right.0.symbol && left.1.id == right.1.id);
-        let first = matches[0].1;
-        let display = if matches.len() == 1 {
-            first.label.clone()
+        let mut compact = BTreeMap::<(usize, &'static str, String), (&str, String)>::new();
+        for (_, matched, _) in &matches {
+            compact
+                .entry((matched.order, matched.item_type, matched.id.clone()))
+                .or_insert((matched.item_type, matched.label.clone()));
+        }
+        let compact = compact.into_values().collect::<Vec<_>>();
+        let display = if compact.len() == 1 {
+            compact[0].1.clone()
         } else {
-            format!("{} +{}", first.label, matches.len() - 1)
+            format!("{} +{}", compact[0].1, compact.len() - 1)
         };
-        let gene_symbols = matches
+        let labels = compact
             .iter()
-            .map(|(gene, _)| gene.symbol.as_str())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let item_types = matches
-            .iter()
-            .map(|(_, matched)| matched.item_type)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let labels = matches
-            .iter()
-            .map(|(_, matched)| matched.label.as_str())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+            .map(|(_, label)| label.as_str())
             .collect::<Vec<_>>()
             .join("; ");
+        let item_types = compact
+            .iter()
+            .map(|(item_type, _)| *item_type)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
         let details = serde_json::to_string(
             &matches
                 .iter()
-                .map(|(gene, matched)| {
+                .map(|(gene, matched, _)| {
                     json!({
-                        "geneId": gene.result_gene_id,
+                        "alleleId": allele_id,
                         "geneSymbol": gene.symbol,
+                        "canonicalGeneId": gene.canonical_gene_id,
+                        "resultGeneId": gene.result_gene_id,
+                        "identityStatus": gene.identity_status,
                         "selectedItemId": matched.id,
                         "selectedItem": matched.label,
                         "itemType": matched.item_type,
@@ -2565,10 +2723,20 @@ fn write_gene_evidence(
                 .collect::<Vec<_>>(),
         )
         .map_err(|error| format!("cannot serialize gene matches: {error}"))?;
+        let gene_symbols = matches
+            .iter()
+            .map(|(gene, _, _)| gene.symbol.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
         let base = |field_path, value_type| GeneEvidenceRow {
             allele_id: Some(allele_id.clone()),
             gene_id: String::new(),
             gene_symbol: gene_symbols.clone(),
+            canonical_gene_id: None,
+            result_gene_id: None,
+            identity_status: String::new(),
             field_path,
             value_type,
             string_value: None,
@@ -2597,11 +2765,63 @@ fn write_gene_evidence(
             json_value: Some(details),
             ..base("geneMatchDetails", "json")
         });
+
+        if ranking.query_count > 0 {
+            let best = matches
+                .iter()
+                .filter_map(|(gene, _, rank)| rank.as_ref().map(|rank| (gene, rank)))
+                .min_by(|left, right| {
+                    left.1
+                        .rank
+                        .cmp(&right.1.rank)
+                        .then(left.0.symbol.cmp(&right.0.symbol))
+                        .then(left.0.comparison_key().cmp(&right.0.comparison_key()))
+                });
+            let fallback = &matches[0].0;
+            let (rank_gene, rank) = best
+                .map(|(gene, rank)| (gene, Some(rank)))
+                .unwrap_or((fallback, None));
+            let rank_base = |field_path, value_type| GeneEvidenceRow {
+                allele_id: Some(allele_id.clone()),
+                gene_id: rank_gene.result_id(),
+                gene_symbol: rank_gene.symbol.clone(),
+                canonical_gene_id: rank_gene.canonical_gene_id.clone(),
+                result_gene_id: rank_gene.result_gene_id.clone(),
+                identity_status: rank_gene.identity_status.clone(),
+                field_path,
+                value_type,
+                string_value: None,
+                integer_value: None,
+                number_value: None,
+                boolean_value: None,
+                json_value: None,
+            };
+            rows.push(GeneEvidenceRow {
+                integer_value: rank.map(|value| value.rank as i64),
+                ..rank_base("phenotypeRank", "integer")
+            });
+            rows.push(GeneEvidenceRow {
+                json_value: Some(
+                    serde_json::to_string(&phenotype_rank_details(
+                        rank_gene,
+                        rank,
+                        ranking,
+                        source_assets,
+                    ))
+                    .map_err(|error| format!("cannot serialize phenotype rank details: {error}"))?,
+                ),
+                ..rank_base("phenotypeRankDetails", "json")
+            });
+        }
     }
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("allele_id", DataType::Utf8, true),
         Field::new("gene_id", DataType::Utf8, false),
         Field::new("gene_symbol", DataType::Utf8, false),
+        Field::new("canonical_gene_id", DataType::Utf8, true),
+        Field::new("result_gene_id", DataType::Utf8, true),
+        Field::new("identity_status", DataType::Utf8, false),
         Field::new("scope", DataType::Utf8, false),
         Field::new("source_id", DataType::Utf8, false),
         Field::new("field_path", DataType::Utf8, false),
@@ -2629,6 +2849,21 @@ fn write_gene_evidence(
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|row| row.gene_symbol.as_str())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.canonical_gene_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.result_gene_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|row| row.identity_status.as_str())
                     .collect::<Vec<_>>(),
             )),
             Arc::new(StringArray::from(vec!["gene"; len])),
@@ -2689,7 +2924,7 @@ fn write_gene_evidence(
         return Err("phenotype evidence row count changed while writing".into());
     }
     super::library_metadata::publish_atomic_file(&temporary, path)?;
-    Ok(resolved)
+    Ok(())
 }
 
 fn write_gene_catalog(
@@ -2700,163 +2935,13 @@ fn write_gene_catalog(
     mondo_release: Option<&str>,
     reactome_release: Option<&str>,
     identity_release: Option<&str>,
-    algorithm_version: &str,
-    provider_url: &str,
+    positive_hpo_feature_count: usize,
+    source_assets: &[SourceAsset],
 ) -> Result<(), String> {
-    let definitions = [
-        ("phenotypeRelevance", "number", "Phenotype relevance", false),
-        ("profileLinked", "boolean", "Profile link", false),
-        ("includedGene", "boolean", "Included gene", false),
-        (
-            "observedFeatureLinked",
-            "boolean",
-            "Observed feature link",
-            false,
-        ),
-        (
-            "bestMatchingCondition",
-            "text",
-            "Best matching condition",
-            false,
-        ),
-        (
-            "directFeatureMatches",
-            "integer",
-            "Direct feature matches",
-            false,
-        ),
-        (
-            "absentFeatureConflict",
-            "number",
-            "Absent feature conflict",
-            false,
-        ),
-        (
-            "selectedConditionMatches",
-            "integer",
-            "Condition matches",
-            false,
-        ),
-        (
-            "matchedSelectedConditions",
-            "text",
-            "Matched selected conditions",
-            false,
-        ),
-        (
-            "selectedConditionRelation",
-            "text",
-            "Selected condition relation",
-            false,
-        ),
-        (
-            "phenotypeEvidenceDetails",
-            "json",
-            "Phenotype evidence details",
-            false,
-        ),
-    ];
-    let mut fields = definitions
-        .iter()
-        .map(|(field, value_type, label, recommended)| {
-            json!({
-                "scope": "gene",
-                "physicalScope": "gene",
-                "biologicalScope": "gene",
-                "sourceId": "gene-profile",
-                "fieldPath": field,
-                "valueType": value_type,
-                "label": label,
-                "recommended": recommended,
-                "selectable": *field == "phenotypeRelevance",
-                "storageRelation": "geneEvidence",
-                "resolutionPolicy": "geneDirect",
-                "columnPresentation": (*field == "phenotypeRelevance").then_some("profileEvidence"),
-                "presentationDependencies": (*field == "phenotypeRelevance").then_some([
-                    "selectedConditionMatches",
-                    "matchedSelectedConditions",
-                    "selectedConditionRelation",
-                    "directFeatureMatches",
-                    "absentFeatureConflict",
-                    "phenotypeEvidenceDetails"
-                ]),
-            })
-        })
-        .collect::<Vec<_>>();
-    fields.extend([
-        json!({
-            "scope": "gene",
-            "physicalScope": "gene",
-            "biologicalScope": "gene",
-            "sourceId": "gene-profile",
-            "fieldPath": "geneMatches",
-            "valueType": "text",
-            "label": "Gene matches",
-            "recommended": true,
-            "selectable": true,
-            "storageRelation": "geneEvidence",
-            "resolutionPolicy": "alleleGeneDirect",
-            "columnPresentation": "geneMatches",
-            "presentationDependencies": [
-                "geneMatch", "matchedSelectedItems", "matchedItemTypes", "geneMatchDetails"
-            ]
-        }),
-        json!({
-            "scope": "gene",
-            "physicalScope": "gene",
-            "biologicalScope": "gene",
-            "sourceId": "gene-profile",
-            "fieldPath": "geneMatch",
-            "valueType": "boolean",
-            "label": "Gene match",
-            "recommended": false,
-            "selectable": true,
-            "storageRelation": "geneEvidence",
-            "resolutionPolicy": "alleleGeneDirect"
-        }),
-        json!({
-            "scope": "gene",
-            "physicalScope": "gene",
-            "biologicalScope": "gene",
-            "sourceId": "gene-profile",
-            "fieldPath": "matchedSelectedItems",
-            "valueType": "text",
-            "label": "Matched selected item",
-            "recommended": false,
-            "selectable": true,
-            "storageRelation": "geneEvidence",
-            "resolutionPolicy": "alleleGeneDirect"
-        }),
-        json!({
-            "scope": "gene",
-            "physicalScope": "gene",
-            "biologicalScope": "gene",
-            "sourceId": "gene-profile",
-            "fieldPath": "matchedItemTypes",
-            "valueType": "text",
-            "label": "Matched item type",
-            "recommended": false,
-            "selectable": true,
-            "storageRelation": "geneEvidence",
-            "resolutionPolicy": "alleleGeneDirect"
-        }),
-        json!({
-            "scope": "gene",
-            "physicalScope": "gene",
-            "biologicalScope": "gene",
-            "sourceId": "gene-profile",
-            "fieldPath": "geneMatchDetails",
-            "valueType": "json",
-            "label": "Gene match details",
-            "recommended": false,
-            "selectable": false,
-            "storageRelation": "geneEvidence",
-            "resolutionPolicy": "alleleGeneDirect"
-        }),
-    ]);
+    let fields = super::report_import::gene_catalog_fields(positive_hpo_feature_count);
     let mut sources = vec![json!({
         "id": "gene-profile",
-        "name": "Genes profile"
+        "name": "Genes query"
     })];
     if let Some(release) = identity_release {
         sources.push(json!({
@@ -2871,7 +2956,7 @@ fn write_gene_catalog(
             "id": "hpo",
             "name": "Human Phenotype Ontology",
             "release": hpo_release,
-            "providerUrl": provider_url
+            "providerUrl": "https://hpo.jax.org/"
         }));
     }
     if let Some(release) = mondo_release {
@@ -2891,13 +2976,15 @@ fn write_gene_catalog(
         }));
     }
     let catalog = json!({
-        "schemaVersion": 1,
+        "schemaVersion": CATALOG_SCHEMA_VERSION,
+        "fingerprint": fingerprint,
         "geneEvidenceFile": evidence_file,
-        "profileFingerprint": fingerprint,
-        "hpoRelease": hpo_release,
-        "mondoRelease": mondo_release,
-        "reactomeRelease": reactome_release,
-        "algorithmVersion": algorithm_version,
+        "evidenceContractVersion": EVIDENCE_CONTRACT_VERSION,
+        "identityContractVersion": super::gene_identity::CONTRACT_VERSION,
+        "geneSetAlgorithmVersion": GENE_SET_ALGORITHM_VERSION,
+        "phenotypeRankingAlgorithmVersion": PHENOTYPE_RANKING_ALGORITHM_VERSION,
+        "positiveHpoFeatureCount": positive_hpo_feature_count,
+        "sourceAssets": source_assets,
         "sources": sources,
         "fields": fields,
     });
@@ -2908,201 +2995,35 @@ fn write_gene_catalog(
 }
 
 pub fn active_query_assets(
+    resources: &Path,
     runs: &Path,
     run_id: &str,
 ) -> Result<Option<(PathBuf, PathBuf)>, String> {
-    let profile = load(runs, run_id)?;
-    let Some(active) = profile.active_generation else {
+    let stored = profile_path(runs, run_id);
+    if !stored.is_file() {
+        return Ok(None);
+    }
+    let Ok(bytes) = fs::read(&stored) else {
         return Ok(None);
     };
-    let profile = profile_path(runs, run_id);
-    let root = profile
-        .parent()
-        .ok_or("phenotype profile has no directory")?;
-    let evidence = root.join(active.evidence_file);
-    let catalog = root.join(active.catalog_file);
-    if !evidence.is_file() || !catalog.is_file() {
-        return Err("active phenotype evidence is incomplete".into());
-    }
-    Ok(Some((evidence, catalog)))
-}
-
-fn monarch_gene_ranking(observed: &[PhenotypeTerm]) -> Result<MonarchGeneRanking, String> {
-    let service = annocat_core::source_catalog::service("monarch-phenotype-gene-ranking")
-        .ok_or("Monarch gene-suggestion service is not configured")?;
-    let payload = monarch_request_payload(observed, service.max_results);
-    let payload = serde_json::to_vec(&payload)
-        .map_err(|error| format!("cannot serialize Monarch gene-ranking request: {error}"))?;
-    let response = super::http_client::source()?
-        .post(&service.api_url)
-        .timeout(Duration::from_secs(service.timeout_seconds))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(payload)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| format!("Monarch gene ranking was unavailable: {error}"))?
-        .bytes()
-        .map_err(|error| format!("cannot read Monarch gene-ranking data: {error}"))?;
-    let genes = parse_monarch_genes(&response)?;
-    Ok(MonarchGeneRanking {
-        provider: service.provider.clone(),
-        provider_url: service.provider_url.clone(),
-        metric: "Ancestor information content, bidirectional".into(),
-        generated_at: super::annotation::current_timestamp(),
-        result_limit: service.max_results,
-        genes,
-    })
-}
-
-fn monarch_request_payload(observed: &[PhenotypeTerm], limit: usize) -> serde_json::Value {
-    serde_json::json!({
-        "termset": observed.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
-        "group": "Human Genes",
-        "metric": "ancestor_information_content",
-        "directionality": "bidirectional",
-        "limit": limit
-    })
-}
-
-fn parse_monarch_genes(response: &[u8]) -> Result<Vec<MonarchRankedGene>, String> {
-    let response: serde_json::Value = serde_json::from_slice(response)
-        .map_err(|error| format!("Monarch returned invalid gene-ranking data: {error}"))?;
-    let rows = response
-        .as_array()
-        .or_else(|| response.get("items").and_then(serde_json::Value::as_array))
-        .ok_or("Monarch gene ranking did not contain a result list")?;
-    let genes = rows
-        .iter()
-        .filter_map(|row| {
-            let subject = row.get("subject")?.as_object()?;
-            let gene_id = subject.get("id")?.as_str()?.trim();
-            let symbol = subject
-                .get("symbol")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| subject.get("name").and_then(serde_json::Value::as_str))?
-                .trim();
-            let score = row.get("score")?.as_f64()?;
-            if gene_id.is_empty() || symbol.is_empty() || !score.is_finite() {
-                return None;
-            }
-            Some(MonarchRankedGene {
-                rank: 0,
-                gene_id: gene_id.to_owned(),
-                symbol: symbol.to_owned(),
-                name: subject
-                    .get("full_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(symbol)
-                    .trim()
-                    .to_owned(),
-                score,
-            })
-        })
-        .enumerate()
-        .map(|(index, mut gene)| {
-            gene.rank = index + 1;
-            gene
-        })
-        .collect::<Vec<_>>();
-    if genes.is_empty() {
-        return Err("Monarch gene ranking did not contain usable human-gene results".into());
-    }
-    Ok(genes)
-}
-
-fn rank_disease(
-    knowledge: &HpoKnowledge,
-    disease: &DiseaseProfile,
-    observed: &[usize],
-    excluded: &[usize],
-) -> RankedDisease {
-    let observed_best = observed
-        .iter()
-        .map(|&query| {
-            disease
-                .positive
-                .iter()
-                .map(|&term| (term, term_similarity(knowledge, query, term)))
-                .max_by(|left, right| left.1.total_cmp(&right.1))
-                .unwrap_or((query, 0.0))
-        })
-        .collect::<Vec<_>>();
-    let query_average = mean(observed_best.iter().map(|(_, score)| *score));
-    let absent_matches = excluded
-        .iter()
-        .filter_map(|&absent| {
-            disease
-                .positive
-                .iter()
-                .map(|&term| {
-                    (
-                        term_similarity(knowledge, absent, term),
-                        disease
-                            .annotations
-                            .get(&term)
-                            .and_then(|annotation| annotation.frequency_probability),
-                    )
-                })
-                .max_by(|left, right| left.0.total_cmp(&right.0))
-        })
-        .collect::<Vec<_>>();
-    let absent_conflict = mean(
-        absent_matches
-            .iter()
-            .map(|(similarity, frequency)| similarity * frequency.unwrap_or(1.0)),
-    );
-    let conflict_frequency_complete = absent_matches
-        .iter()
-        .all(|(_, frequency)| frequency.is_some());
-    let disease_negative_conflict = mean(disease.negative.iter().map(|&negative| {
-        observed
-            .iter()
-            .map(|&query| term_similarity(knowledge, query, negative))
-            .fold(0.0, f64::max)
-    }));
-    let conflict_score = match (excluded.is_empty(), disease.negative.is_empty()) {
-        (true, true) => 0.0,
-        (false, true) => absent_conflict,
-        (true, false) => disease_negative_conflict,
-        (false, false) => (absent_conflict + disease_negative_conflict) / 2.0,
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(None);
     };
-    let score = query_average.clamp(0.0, 1.0) * 100.0;
-    let direct_match_percentage = if observed.is_empty() {
-        0.0
-    } else {
-        observed
-            .iter()
-            .zip(&observed_best)
-            .filter(|(query, (matched, _))| **query == *matched)
-            .count() as f64
-            / observed.len() as f64
-            * 100.0
-    };
-    let mut matched_phenotypes = observed
-        .iter()
-        .zip(observed_best)
-        .map(|(&query, (matched, similarity))| PhenotypeMatch {
-            query: term_value(knowledge, query),
-            disease_term: term_value(knowledge, matched),
-            similarity,
-            direct: query == matched,
-            disease_annotation: disease.annotations.get(&matched).cloned(),
-        })
-        .collect::<Vec<_>>();
-    matched_phenotypes.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
-    matched_phenotypes.truncate(5);
-    RankedDisease {
-        phenotype_rank: 0,
-        disease_id: disease.id.clone(),
-        disease_name: disease.name.clone(),
-        phenotype_score: score,
-        query_coverage: direct_match_percentage,
-        conflict_score: conflict_score * 100.0,
-        conflict_frequency_complete,
-        matched_phenotypes,
-        genes: disease.genes.clone(),
-        report_overlap: DiseaseReportOverlap::default(),
+    if value["schemaVersion"].as_u64() != Some(u64::from(PROFILE_SCHEMA_VERSION)) {
+        return Ok(None);
     }
+    let Ok(profile) = load(runs, run_id) else {
+        return Ok(None);
+    };
+    let Some(active) = profile.active_generation.as_ref() else {
+        return Ok(None);
+    };
+    if current_profile_fingerprint(resources, &profile)
+        .map_or(true, |fingerprint| fingerprint != active.fingerprint)
+    {
+        return Ok(None);
+    }
+    Ok(validated_generation_paths(runs, run_id, &profile))
 }
 
 fn knowledge(resources: &Path) -> Result<Arc<HpoKnowledge>, String> {
@@ -3164,27 +3085,6 @@ fn load_knowledge_from_root(root: &Path) -> Result<HpoKnowledge, String> {
         })
         .collect();
     diseases.retain(|disease| !disease.positive.is_empty());
-    let mut counts = vec![0_u64; terms.len()];
-    for disease in &diseases {
-        let mut propagated = HashSet::new();
-        for &annotation in &disease.positive {
-            propagated.extend(terms[annotation].ancestors.iter().copied());
-        }
-        for index in propagated {
-            counts[index] = counts[index].saturating_add(1);
-        }
-    }
-    let disease_count = diseases.len().max(1) as f64;
-    let information_content = counts
-        .iter()
-        .map(|&count| {
-            if count == 0 {
-                disease_count.ln()
-            } else {
-                (disease_count / count as f64).ln().max(0.0)
-            }
-        })
-        .collect();
     Ok(HpoKnowledge {
         terms,
         term_index,
@@ -3192,7 +3092,6 @@ fn load_knowledge_from_root(root: &Path) -> Result<HpoKnowledge, String> {
         phenotypic_abnormality_root,
         diseases,
         condition_associations,
-        information_content,
         disease_gene_association_count: association_count,
     })
 }
@@ -3387,6 +3286,7 @@ fn merge_disease_annotation(
     sex: &str,
     evidence: &str,
     reference: &str,
+    biocuration: &str,
 ) {
     let (probability, label) = phenotype_frequency(frequency_raw);
     if probability > target.frequency_probability {
@@ -3401,6 +3301,7 @@ fn merge_disease_annotation(
     append_unique(&mut target.sex, sex);
     append_unique(&mut target.evidence, evidence);
     append_unique(&mut target.references, reference);
+    append_unique(&mut target.biocuration, biocuration);
 }
 
 fn parse_diseases(
@@ -3463,12 +3364,11 @@ fn parse_diseases(
                 id: disease_id.to_owned(),
                 name: value("disease_name").to_owned(),
                 positive: Vec::new(),
-                negative: Vec::new(),
                 annotations: HashMap::new(),
                 genes: Vec::new(),
             });
         if value("qualifier") == "NOT" || value("frequency") == "HP:0040285" {
-            disease.negative.push(index);
+            continue;
         } else {
             disease.positive.push(index);
             merge_disease_annotation(
@@ -3478,6 +3378,7 @@ fn parse_diseases(
                 value("sex"),
                 value("evidence"),
                 value("reference"),
+                value("biocuration"),
             );
         }
     }
@@ -3528,7 +3429,6 @@ fn parse_diseases(
                 id: disease_id.to_owned(),
                 name: disease_id.to_owned(),
                 positive: Vec::new(),
-                negative: Vec::new(),
                 annotations: HashMap::new(),
                 genes: Vec::new(),
             });
@@ -3545,23 +3445,6 @@ fn parse_diseases(
         .map(|mut disease| {
             disease.positive.sort_unstable();
             disease.positive.dedup();
-            let positive = disease.positive.clone();
-            disease.positive.retain(|index| {
-                !positive
-                    .iter()
-                    .any(|other| index != other && terms[*other].ancestors.contains(index))
-            });
-            disease
-                .annotations
-                .retain(|index, _| disease.positive.contains(index));
-            disease.negative.sort_unstable();
-            disease.negative.dedup();
-            let negative = disease.negative.clone();
-            disease.negative.retain(|index| {
-                !negative
-                    .iter()
-                    .any(|other| index != other && terms[*index].ancestors.contains(other))
-            });
             disease.genes.sort_by(|left, right| {
                 left.symbol
                     .cmp(&right.symbol)
@@ -3579,41 +3462,12 @@ fn parse_diseases(
                 id: disease.id,
                 name: disease.name,
                 positive: disease.positive,
-                negative: disease.negative,
                 annotations: disease.annotations,
                 genes: disease.genes,
             }
         })
         .collect();
     Ok((profiles, association_count))
-}
-
-fn term_similarity(knowledge: &HpoKnowledge, left: usize, right: usize) -> f64 {
-    if left == right {
-        return 1.0;
-    }
-    let left_ancestors = &knowledge.terms[left].ancestors;
-    let right_ancestors = &knowledge.terms[right].ancestors;
-    let mut left_position = 0;
-    let mut right_position = 0;
-    let mut mica = 0.0_f64;
-    while left_position < left_ancestors.len() && right_position < right_ancestors.len() {
-        match left_ancestors[left_position].cmp(&right_ancestors[right_position]) {
-            std::cmp::Ordering::Less => left_position += 1,
-            std::cmp::Ordering::Greater => right_position += 1,
-            std::cmp::Ordering::Equal => {
-                mica = mica.max(knowledge.information_content[left_ancestors[left_position]]);
-                left_position += 1;
-                right_position += 1;
-            }
-        }
-    }
-    let denominator = knowledge.information_content[left] + knowledge.information_content[right];
-    if denominator <= f64::EPSILON {
-        0.0
-    } else {
-        (2.0 * mica / denominator).clamp(0.0, 1.0)
-    }
 }
 
 fn canonical_terms(
@@ -3686,58 +3540,6 @@ fn normalize_terms(
         .collect())
 }
 
-fn ensure_consistent_profile(
-    knowledge: &HpoKnowledge,
-    observed: &[PhenotypeTerm],
-    excluded: &[PhenotypeTerm],
-) -> Result<(), String> {
-    if observed.len().saturating_add(excluded.len()) > MAX_PROFILE_TERMS {
-        return Err(format!(
-            "a phenotype profile can contain at most {MAX_PROFILE_TERMS} terms"
-        ));
-    }
-    let observed_indexes = term_indexes(knowledge, observed)?;
-    let excluded_indexes = term_indexes(knowledge, excluded)?;
-    for (&observed_index, observed_term) in observed_indexes.iter().zip(observed) {
-        if let Some((_, excluded_term)) =
-            excluded_indexes
-                .iter()
-                .zip(excluded)
-                .find(|(excluded_index, _)| {
-                    knowledge.terms[observed_index]
-                        .ancestors
-                        .contains(excluded_index)
-                })
-        {
-            return Err(format!(
-                "{} ({}) is observed but is a descendant of explicitly absent {} ({})",
-                observed_term.label, observed_term.id, excluded_term.label, excluded_term.id
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn ensure_exactly_disjoint(
-    observed: &[PhenotypeTerm],
-    excluded: &[PhenotypeTerm],
-) -> Result<(), String> {
-    let observed = observed
-        .iter()
-        .map(|term| term.id.as_str())
-        .collect::<HashSet<_>>();
-    if let Some(term) = excluded
-        .iter()
-        .find(|term| observed.contains(term.id.as_str()))
-    {
-        return Err(format!(
-            "{} cannot be both observed and explicitly absent",
-            term.id
-        ));
-    }
-    Ok(())
-}
-
 fn term_indexes(knowledge: &HpoKnowledge, terms: &[PhenotypeTerm]) -> Result<Vec<usize>, String> {
     terms
         .iter()
@@ -3775,15 +3577,12 @@ fn term_value(knowledge: &HpoKnowledge, index: usize) -> PhenotypeTerm {
 }
 
 fn validate_profile(profile: &PhenotypeProfile, run_id: &str) -> Result<(), String> {
-    if !(2..=PROFILE_SCHEMA_VERSION).contains(&profile.schema_version) || profile.run_id != run_id {
+    if profile.schema_version != PROFILE_SCHEMA_VERSION || profile.run_id != run_id {
         return Err("phenotype profile identity is invalid".into());
     }
-    for term in profile.observed.iter().chain(&profile.excluded) {
+    for term in &profile.observed {
         validate_hpo_id(&term.id)?;
-        if term.label.trim().is_empty()
-            || term.label.len() > 300
-            || term.label.chars().any(char::is_control)
-        {
+        if invalid_profile_label(&term.label) {
             return Err(format!("invalid label for {}", term.id));
         }
     }
@@ -3791,41 +3590,69 @@ fn validate_profile(profile: &PhenotypeProfile, run_id: &str) -> Result<(), Stri
         if !term.id.starts_with("MONDO:")
             || term.id[6..].is_empty()
             || !term.id[6..].bytes().all(|byte| byte.is_ascii_digit())
-            || term.label.trim().is_empty()
-            || term.label.len() > 300
-            || term.label.chars().any(char::is_control)
+            || invalid_profile_label(&term.label)
         {
             return Err("phenotype profile contains an invalid condition".into());
         }
     }
     for term in &profile.pathways {
         if !term.id.starts_with("R-HSA-")
+            || term.id[6..].is_empty()
             || !term.id[6..].bytes().all(|byte| byte.is_ascii_digit())
             || invalid_profile_label(&term.label)
         {
             return Err("gene profile contains an invalid pathway".into());
         }
     }
+    let mut gene_keys = HashSet::new();
     for gene in &profile.genes {
-        let valid_id = gene.id.starts_with("ENSG")
-            && gene.id[4..].split('.').next().is_some_and(|value| {
-                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-            });
-        let valid_symbol = valid_gene_symbol(&gene.id) || valid_gene_symbol(&gene.label);
-        if (!valid_id && !valid_symbol) || invalid_profile_label(&gene.label) {
-            return Err("gene profile contains an invalid gene".into());
+        let valid_hgnc = gene.canonical_gene_id.as_deref().is_some_and(|id| {
+            id.starts_with("HGNC:")
+                && !id[5..].is_empty()
+                && id[5..].bytes().all(|byte| byte.is_ascii_digit())
+        });
+        let valid_result = gene.result_gene_id.as_deref().is_none_or(|id| {
+            !id.trim().is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+        });
+        let valid_identity = match gene.identity_status.as_str() {
+            "hgnc" => valid_hgnc,
+            "symbol-only" => gene.canonical_gene_id.is_none(),
+            _ => false,
+        };
+        if !valid_gene_symbol(&gene.symbol)
+            || !valid_result
+            || !valid_identity
+            || !gene_keys.insert(gene.comparison_key())
+        {
+            return Err("gene profile contains an invalid gene identity".into());
         }
     }
-    if profile.excluded_genes.len() > MAX_PROFILE_GENES
-        || profile
-            .excluded_genes
-            .iter()
-            .any(|gene| !valid_gene_symbol(gene))
-        || !matches!(profile.combination.as_str(), "any" | "every")
-    {
-        return Err("gene profile options are invalid".into());
-    }
     if let Some(active) = &profile.active_generation {
+        if !profile.show_matches_only {
+            return Err("an active Genes query must show matching variants only".into());
+        }
+        if profile.observed.is_empty()
+            && profile.conditions.is_empty()
+            && profile.pathways.is_empty()
+            && profile.genes.is_empty()
+        {
+            return Err("an active Genes query must contain a selection".into());
+        }
+        if active.matched_gene_count == 0
+            || active.fingerprint.len() != 64
+            || !active
+                .fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err("phenotype profile contains an invalid active generation".into());
+        }
+        let short = &active.fingerprint[..16];
+        if active.evidence_file != format!("phenotype-gene-evidence.{short}.parquet")
+            || active.catalog_file != format!("phenotype-field-catalog.{short}.json")
+        {
+            return Err("phenotype profile contains an invalid active generation".into());
+        }
         for name in [&active.evidence_file, &active.catalog_file] {
             if name.is_empty()
                 || name.len() > 180
@@ -3839,25 +3666,14 @@ fn validate_profile(profile: &PhenotypeProfile, run_id: &str) -> Result<(), Stri
     if profile
         .observed
         .len()
-        .saturating_add(profile.excluded.len())
         .saturating_add(profile.conditions.len())
         .saturating_add(profile.pathways.len())
         > MAX_PROFILE_TERMS
         || profile.genes.len() > MAX_PROFILE_GENES
     {
-        return Err(format!(
-            "a phenotype profile can contain at most {MAX_PROFILE_TERMS} terms"
-        ));
+        return Err("gene profile contains too many selections".into());
     }
-    if let Some(suggestions) = &profile.monarch_suggestions {
-        validate_monarch_suggestions(suggestions)?;
-    }
-    if profile.monarch_error.as_ref().is_some_and(|error| {
-        error.len() > 2_000 || error.chars().any(|character| character.is_control())
-    }) {
-        return Err("phenotype profile contains an invalid Monarch error".into());
-    }
-    ensure_exactly_disjoint(&profile.observed, &profile.excluded)
+    Ok(())
 }
 
 fn invalid_profile_label(label: &str) -> bool {
@@ -3871,45 +3687,6 @@ fn valid_gene_symbol(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
-}
-
-fn validate_monarch_suggestions(suggestions: &MonarchGeneRanking) -> Result<(), String> {
-    if suggestions.genes.len() > 100
-        || suggestions.provider.trim().is_empty()
-        || suggestions.provider.len() > 200
-        || !suggestions.provider_url.starts_with("https://")
-        || suggestions.provider_url.len() > 1_000
-        || suggestions.metric.len() > 300
-        || suggestions.generated_at.len() > 100
-        || suggestions
-            .provider
-            .chars()
-            .chain(suggestions.provider_url.chars())
-            .chain(suggestions.metric.chars())
-            .chain(suggestions.generated_at.chars())
-            .any(char::is_control)
-    {
-        return Err("phenotype profile contains invalid Monarch suggestions".into());
-    }
-    for (index, gene) in suggestions.genes.iter().enumerate() {
-        if gene.rank != index + 1
-            || gene.gene_id.trim().is_empty()
-            || gene.gene_id.len() > 100
-            || gene.symbol.trim().is_empty()
-            || gene.symbol.len() > 100
-            || gene.name.len() > 300
-            || !gene.score.is_finite()
-            || gene
-                .gene_id
-                .chars()
-                .chain(gene.symbol.chars())
-                .chain(gene.name.chars())
-                .any(char::is_control)
-        {
-            return Err("phenotype profile contains invalid Monarch suggestions".into());
-        }
-    }
-    Ok(())
 }
 
 fn validate_hpo_id(id: &str) -> Result<(), String> {
@@ -3946,6 +3723,13 @@ pub(crate) fn packaged_assets(
     }
     let profile_bytes = fs::read(&profile_file)
         .map_err(|error| format!("cannot read phenotype profile: {error}"))?;
+    let profile_value: serde_json::Value = match serde_json::from_slice(&profile_bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if profile_value["schemaVersion"].as_u64() != Some(u64::from(PROFILE_SCHEMA_VERSION)) {
+        return Ok(Vec::new());
+    }
     let profile = load(runs, run_id)?;
     let Some(active) = profile.active_generation.as_ref() else {
         return Ok(Vec::new());
@@ -3968,6 +3752,7 @@ pub(crate) fn packaged_assets(
     if !evidence.is_file() {
         return Err("active phenotype evidence is missing".into());
     }
+    validate_gene_evidence_schema(&evidence)?;
     let assets = vec![
         ("phenotypes.json".into(), "phenotype-profile", profile_file),
         (
@@ -3992,59 +3777,23 @@ pub(crate) fn validate_portable_metadata(
     catalog_file: &str,
     candidate_file: Option<&str>,
 ) -> Result<PhenotypeProfile, String> {
-    if candidate_file.is_some() {
-        return Err("phenotype candidate ranking data is no longer supported".into());
-    }
     if profile_bytes.is_empty() || profile_bytes.len() > MAX_PORTABLE_PROFILE_BYTES as usize {
         return Err("phenotype profile has an invalid size".into());
     }
     if catalog_bytes.is_empty() || catalog_bytes.len() > MAX_PORTABLE_CATALOG_BYTES as usize {
         return Err("phenotype field catalog has an invalid size".into());
     }
+    super::report_import::validate_portable_phenotype_metadata(
+        profile_bytes,
+        catalog_bytes,
+        run_id,
+        evidence_file,
+        catalog_file,
+        candidate_file,
+    )?;
     let profile: PhenotypeProfile = serde_json::from_slice(profile_bytes)
         .map_err(|error| format!("invalid phenotype profile: {error}"))?;
     validate_profile(&profile, run_id)?;
-    let active = profile
-        .active_generation
-        .as_ref()
-        .ok_or("portable phenotype profile has no active evidence")?;
-    if active.evidence_file != evidence_file
-        || active.catalog_file != catalog_file
-        || active.candidate_evidence_file.is_some()
-    {
-        return Err("phenotype profile does not name the packaged evidence files".into());
-    }
-    if active.fingerprint.len() != 64
-        || !active
-            .fingerprint
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err("phenotype profile has an invalid fingerprint".into());
-    }
-    let short = &active.fingerprint[..16];
-    if active.evidence_file != format!("phenotype-gene-evidence.{short}.parquet")
-        || active.catalog_file != format!("phenotype-field-catalog.{short}.json")
-    {
-        return Err("phenotype generation filenames do not match its fingerprint".into());
-    }
-    let catalog: serde_json::Value = serde_json::from_slice(catalog_bytes)
-        .map_err(|error| format!("invalid phenotype field catalog: {error}"))?;
-    if catalog["schemaVersion"] != 1
-        || catalog["geneEvidenceFile"].as_str() != Some(evidence_file)
-        || !catalog["candidateEvidenceFile"].is_null()
-        || catalog["profileFingerprint"].as_str() != Some(&active.fingerprint)
-        || catalog["algorithmVersion"].as_str() != Some("hpo-lin-query-v4")
-        || catalog["hpoRelease"]
-            .as_str()
-            .is_none_or(|release| release.is_empty() || release.len() > 100)
-        || (!profile.conditions.is_empty()
-            && catalog["mondoRelease"]
-                .as_str()
-                .is_none_or(|release| release.is_empty() || release.len() > 100))
-    {
-        return Err("phenotype field catalog does not match its profile".into());
-    }
     Ok(profile)
 }
 
@@ -4058,9 +3807,18 @@ pub(crate) fn install_portable_group(
 ) -> Result<(), String> {
     let profile_bytes = fs::read(profile_file)
         .map_err(|error| format!("cannot read phenotype profile: {error}"))?;
+    let profile_value: serde_json::Value = match serde_json::from_slice(&profile_bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    if profile_value["schemaVersion"].as_u64() != Some(u64::from(PROFILE_SCHEMA_VERSION)) {
+        return Ok(());
+    }
     let catalog_bytes = fs::read(catalog_file)
         .map_err(|error| format!("cannot read phenotype field catalog: {error}"))?;
-    let profile = validate_portable_metadata(
+    // Portable phenotype metadata is optional result state. Keep an integrity-valid base
+    // result when that nested state is unsupported or semantically invalid.
+    let profile = match validate_portable_metadata(
         &profile_bytes,
         &catalog_bytes,
         run_id,
@@ -4079,20 +3837,13 @@ pub(crate) fn install_portable_group(
                     .ok_or("phenotype candidate evidence has an invalid filename")
             })
             .transpose()?,
-    )?;
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
-    connection
-        .prepare(
-            "SELECT gene_id, gene_symbol, scope, source_id, field_path, value_type,
-                    string_value, integer_value, number_value, boolean_value, json_value
-             FROM read_parquet(?) LIMIT 0",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query(params![evidence_file.to_string_lossy().as_ref()])
-                .map(|_| ())
-        })
-        .map_err(|error| format!("invalid phenotype gene evidence: {error}"))?;
+    ) {
+        Ok(profile) => profile,
+        Err(_) => return Ok(()),
+    };
+    if validate_gene_evidence_schema(evidence_file).is_err() {
+        return Ok(());
+    }
     let root = profile_path(runs, run_id)
         .parent()
         .ok_or("phenotype profile has no directory")?
@@ -4717,22 +4468,6 @@ fn normalize_search(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-fn mean(values: impl Iterator<Item = f64>) -> f64 {
-    let (total, count) = values.fold((0.0, 0_usize), |(total, count), value| {
-        (total + value, count + 1)
-    });
-    if count == 0 {
-        0.0
-    } else {
-        total / count as f64
-    }
-}
-
-fn round(value: f64, places: i32) -> f64 {
-    let factor = 10_f64.powi(places);
-    (value * factor).round() / factor
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4744,6 +4479,57 @@ mod tests {
             require_result_overlap(0).unwrap_err(),
             "No resolved genes have variants in this result."
         );
+    }
+
+    #[test]
+    fn condition_provenance_includes_the_disease_gene_source() {
+        assert!(source_asset_used("disease-genes", false, true, false));
+        assert!(source_asset_used("mondo-ontology", false, true, false));
+        assert!(!source_asset_used(
+            "disease-annotations",
+            false,
+            true,
+            false
+        ));
+        assert!(source_asset_used("gene-identities", false, false, true));
+    }
+
+    #[test]
+    fn source_checksum_changes_the_gene_evidence_fingerprint() {
+        let source = |sha256: String| SourceAsset {
+            name: "hp.obo".into(),
+            release: "same-release".into(),
+            sha256,
+        };
+        let first = gene_evidence_fingerprint(&[], &[], &[], &[], &[source("a".repeat(64))]);
+        let second = gene_evidence_fingerprint(&[], &[], &[], &[], &[source("b".repeat(64))]);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn unsupported_or_invalid_saved_queries_never_attach_to_result_queries() {
+        let runs = std::env::temp_dir().join(format!(
+            "annocat-unsupported-phenotype-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = runs.join(".annocat-library").join("run-1");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("phenotypes.json"), br#"{"schemaVersion":5}"#).unwrap();
+        assert!(
+            active_query_assets(Path::new("missing"), &runs, "run-1")
+                .unwrap()
+                .is_none()
+        );
+        fs::write(root.join("phenotypes.json"), b"not json").unwrap();
+        assert!(
+            active_query_assets(Path::new("missing"), &runs, "run-1")
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(runs).unwrap();
     }
 
     #[test]
@@ -4789,6 +4575,10 @@ mod tests {
             subtype_count: None,
             gene_count: None,
             synonyms: Vec::new(),
+            symbol: Some("TP53".into()),
+            canonical_gene_id: Some("HGNC:11998".into()),
+            result_gene_id: Some("ENSG00000141510".into()),
+            identity_status: Some("hgnc".into()),
         };
         assert!(exact_term_match(&gene, "tp53"));
         gene.match_kind = "geneIdentifier".into();
@@ -4870,20 +4660,436 @@ mod tests {
             terms,
             diseases: Vec::new(),
             condition_associations: Vec::new(),
-            information_content: vec![0.0, 2.0, 2.0, 2.0, 3.0, 0.0],
             disease_gene_association_count: 0,
         }
     }
 
-    fn disease(id: &str, positive: &[usize]) -> DiseaseProfile {
+    fn disease(
+        id: &str,
+        positive: &[usize],
+        symbol: &str,
+        association_type: &str,
+    ) -> DiseaseProfile {
         DiseaseProfile {
             id: id.into(),
             name: id.into(),
             positive: positive.to_vec(),
-            negative: Vec::new(),
             annotations: HashMap::new(),
-            genes: Vec::new(),
+            genes: vec![GeneAssociation {
+                gene_id: format!("NCBIGene:{}", &id[id.find(':').unwrap_or(0) + 1..]),
+                symbol: symbol.into(),
+                association_type: association_type.into(),
+                source: "test".into(),
+            }],
         }
+    }
+
+    #[test]
+    fn hpo_membership_is_exact_or_descendant_while_resnik_ranks_the_global_universe() {
+        let mut knowledge = test_knowledge();
+        knowledge.diseases = vec![
+            disease("OMIM:1", &[4, 1], "GENE1", "MENDELIAN"),
+            disease("OMIM:2", &[2], "GENE2", "MENDELIAN"),
+            disease("OMIM:3", &[3], "GENE3", "MENDELIAN"),
+            disease("OMIM:4", &[1], "POLY1", "POLYGENIC"),
+        ];
+        let report = ["GENE1", "GENE2", "POLY1"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, symbol)| (symbol.into(), format!("ENSG{index:011}")))
+            .collect::<Vec<_>>();
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let ranking = build_phenotype_ranking(&knowledge, &resolver, &[1], "test".into());
+        assert_eq!(ranking.denominator, 3);
+        assert_eq!(ranking.genes["SYMBOL:GENE1"].rank, 1);
+        assert!(ranking.genes["SYMBOL:GENE1"].raw_score > 0.0);
+        assert_eq!(ranking.genes["SYMBOL:GENE2"].rank, 2);
+        assert_eq!(ranking.genes["SYMBOL:GENE2"].tie_count, 2);
+        assert!(ranking.genes.contains_key("SYMBOL:GENE3"));
+        assert!(!ranking.genes.contains_key("SYMBOL:POLY1"));
+
+        let occurrences = report
+            .iter()
+            .map(
+                |(symbol, gene_id)| super::super::results::ReportGeneOccurrence {
+                    allele_id: String::new(),
+                    gene_symbol: symbol.clone(),
+                    gene_id: gene_id.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let resolved = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            Some(&knowledge),
+            &[PhenotypeTerm {
+                id: "HP:0001250".into(),
+                label: "Seizure".into(),
+            }],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &ranking,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved
+                .genes
+                .values()
+                .map(|gene| gene.identity.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["GENE1"]
+        );
+        let gene = &resolved.genes["SYMBOL:GENE1"];
+        assert_eq!(gene.hpo_links.len(), 2);
+        assert_eq!(
+            gene.selected_matches["Feature:HP:0001250"].relation,
+            "HPO link via exact disease annotation"
+        );
+
+        knowledge.diseases = vec![
+            disease("OMIM:1", &[1], "GENE1", "MENDELIAN"),
+            disease("OMIM:2", &[4], "GENE2", "MENDELIAN"),
+            disease("OMIM:3", &[2], "GENE3", "MENDELIAN"),
+        ];
+        let exact_only = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            Some(&knowledge),
+            &[PhenotypeTerm {
+                id: "HP:0002197".into(),
+                label: "Generalized-onset seizure".into(),
+            }],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &PhenotypeRanking {
+                hpo_release: "test".into(),
+                query_count: 0,
+                disease_profile_count: 0,
+                denominator: 0,
+                genes: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            exact_only
+                .genes
+                .values()
+                .map(|gene| gene.identity.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["GENE2"]
+        );
+    }
+
+    #[test]
+    fn mondo_condition_evidence_retains_each_source_association() {
+        let mut knowledge = test_knowledge();
+        let association = |id: &str, association_type: &str| ConditionAssociation {
+            id: id.into(),
+            name: id.into(),
+            genes: vec![GeneAssociation {
+                gene_id: "ENSG00000000001".into(),
+                symbol: "GENE1".into(),
+                association_type: association_type.into(),
+                source: format!("{id}-source"),
+            }],
+        };
+        knowledge.condition_associations = vec![
+            association("OMIM:1", "MENDELIAN"),
+            association("OMIM:2", "POLYGENIC"),
+        ];
+        let report = vec![("GENE1".into(), "ENSG00000000001".into())];
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let occurrence = super::super::results::ReportGeneOccurrence {
+            allele_id: "allele-1".into(),
+            gene_symbol: report[0].0.clone(),
+            gene_id: report[0].1.clone(),
+        };
+        let matched = |matched_id: &str, relation| crate::mondo::DiseaseConditionMatch {
+            selected_id: "MONDO:0000001".into(),
+            selected_label: "Selected condition".into(),
+            matched_id: matched_id.into(),
+            matched_label: matched_id.into(),
+            relation,
+        };
+        let condition_matches = HashMap::from([
+            (
+                "OMIM:1".into(),
+                vec![matched("MONDO:0000001", "Exact condition")],
+            ),
+            (
+                "OMIM:2".into(),
+                vec![matched("MONDO:0000002", "Condition subtype")],
+            ),
+        ]);
+        let ranking = PhenotypeRanking {
+            hpo_release: String::new(),
+            query_count: 0,
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        };
+        let resolved = resolve_gene_set(
+            &resolver,
+            &[occurrence],
+            Some(&knowledge),
+            &[],
+            &[PhenotypeTerm {
+                id: "MONDO:0000001".into(),
+                label: "Selected condition".into(),
+            }],
+            &[],
+            &[],
+            &condition_matches,
+            &ranking,
+        )
+        .unwrap();
+        let gene = &resolved.genes["SYMBOL:GENE1"];
+        assert_eq!(gene.condition_links.len(), 1);
+        assert_eq!(gene.condition_evidence_links.len(), 2);
+        assert_eq!(
+            gene.selected_matches["Condition:MONDO:0000001"].relation,
+            "Exact condition · MENDELIAN"
+        );
+    }
+
+    #[test]
+    fn resnik_ranking_uses_fixed_ic_best_match_averaging_and_competition_ties() {
+        let mut knowledge = test_knowledge();
+        let mut second = disease("OMIM:2", &[1], "GENE2", "MENDELIAN");
+        second.genes.push(GeneAssociation {
+            gene_id: "".into(),
+            symbol: "GENE1".into(),
+            association_type: "MENDELIAN".into(),
+            source: "test".into(),
+        });
+        let mut conflicting = disease("OMIM:5", &[4], "GENE2", "MENDELIAN");
+        conflicting.genes[0].gene_id = "ENSG00000000000".into();
+        knowledge.diseases = vec![
+            disease("OMIM:1", &[4], "GENE1", "MENDELIAN"),
+            second,
+            disease("OMIM:3", &[2], "GENE3", "MENDELIAN"),
+            disease("OMIM:4", &[3], "GENE4", "MENDELIAN"),
+            conflicting,
+        ];
+        let report = ["GENE1", "GENE2", "GENE3", "GENE4"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, symbol)| (symbol.into(), format!("ENSG{index:011}")))
+            .collect::<Vec<_>>();
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let ranking = build_phenotype_ranking(&knowledge, &resolver, &[2, 4], "test".into());
+
+        assert_eq!(ranking.query_count, 2);
+        assert_eq!(ranking.denominator, 4);
+        let expected_top = std::f64::consts::LN_2;
+        let expected_key = (expected_top * 1_000_000_000_000.0 + 0.5).floor() as u64;
+        for symbol in ["GENE1", "GENE3"] {
+            let rank = &ranking.genes[&format!("SYMBOL:{symbol}")];
+            assert!((rank.raw_score - expected_top).abs() < 1e-12);
+            assert_eq!(rank.score_key, expected_key);
+            assert_eq!(rank.rank, 1);
+            assert_eq!(rank.tie_count, 2);
+        }
+        assert_eq!(ranking.genes["SYMBOL:GENE1"].best_disease_id, "OMIM:1");
+        assert_eq!(ranking.genes["SYMBOL:GENE2"].rank, 3);
+        assert!((ranking.genes["SYMBOL:GENE2"].raw_score - expected_top / 2.0).abs() < 1e-12);
+        assert_eq!(ranking.genes["SYMBOL:GENE4"].rank, 4);
+        assert_eq!(ranking.genes["SYMBOL:GENE4"].raw_score, 0.0);
+        assert_eq!(
+            ranking.genes["SYMBOL:GENE1"].matched_terms[0].query.id,
+            "HP:0001263"
+        );
+
+        let unsupported = knowledge.terms.len();
+        knowledge.terms.push(OntologyTerm {
+            id: "HP:9999999".into(),
+            label: "Unannotated feature".into(),
+            synonyms: Vec::new(),
+            search_text: "unannotated feature".into(),
+            parents: vec![0],
+            ancestors: vec![0, unsupported],
+            obsolete: false,
+            replacement: None,
+        });
+        knowledge
+            .term_index
+            .insert("HP:9999999".into(), unsupported);
+        let zero = build_phenotype_ranking(&knowledge, &resolver, &[unsupported], "test".into());
+        assert_eq!(zero.denominator, 4);
+        assert!(zero.genes.values().all(|rank| rank.raw_score == 0.0));
+        assert!(zero.genes.values().all(|rank| rank.raw_score.is_finite()));
+        assert!(
+            zero.genes
+                .values()
+                .all(|rank| rank.rank == 1 && rank.tie_count == 4)
+        );
+    }
+
+    #[test]
+    fn allele_gene_matches_deduplicate_selected_items_but_keep_gene_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-gene-match-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("evidence.parquet");
+        let report = vec![
+            ("GENE1".into(), "ENSG00000000001".into()),
+            ("GENE2".into(), "ENSG00000000002".into()),
+        ];
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let occurrences = report
+            .iter()
+            .map(
+                |(symbol, gene_id)| super::super::results::ReportGeneOccurrence {
+                    allele_id: "allele-1".into(),
+                    gene_symbol: symbol.clone(),
+                    gene_id: gene_id.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let pathways = vec![
+            crate::reactome::Pathway {
+                id: "R-HSA-1".into(),
+                label: "First pathway".into(),
+                genes: vec!["GENE1".into(), "GENE2".into()],
+            },
+            crate::reactome::Pathway {
+                id: "R-HSA-2".into(),
+                label: "Second pathway".into(),
+                genes: vec!["GENE1".into()],
+            },
+        ];
+        let ranking = PhenotypeRanking {
+            hpo_release: String::new(),
+            query_count: 0,
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        };
+        let resolved = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            None,
+            &[],
+            &[],
+            &pathways,
+            &[],
+            &HashMap::new(),
+            &ranking,
+        )
+        .unwrap();
+        write_gene_evidence(&path, &resolver, &occurrences, &resolved, &ranking, &[]).unwrap();
+
+        let connection = Connection::open_in_memory().unwrap();
+        let query = |field: &str| -> String {
+            connection
+                .query_row(
+                    "SELECT string_value FROM read_parquet(?) WHERE field_path=?",
+                    params![path.to_string_lossy().as_ref(), field],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(query("geneMatches"), "First pathway +1");
+        let details: String = connection
+            .query_row(
+                "SELECT json_value FROM read_parquet(?) WHERE field_path='geneMatchDetails'",
+                params![path.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let details: serde_json::Value = serde_json::from_str(&details).unwrap();
+        assert_eq!(details.as_array().unwrap().len(), 3);
+        assert!(details.as_array().unwrap().iter().all(|row| {
+            row["identityStatus"] == "symbol-only"
+                && row["resultGeneId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("ENSG"))
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT to the root containing raw/hp.obo and HPO tables"]
+    fn official_hpo_known_cases_rank_within_top_twenty() {
+        let root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let knowledge = load_knowledge_from_root(&root).unwrap();
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &[]);
+        let mut global_denominator = None;
+        for (disease_id, target_symbol) in [("OMIM:607208", "SCN1A"), ("OMIM:108500", "CACNA1A")] {
+            let disease = knowledge
+                .diseases
+                .iter()
+                .find(|disease| disease.id == disease_id)
+                .unwrap_or_else(|| panic!("official HPO fixture has no {disease_id} profile"));
+            let ranking = build_phenotype_ranking(
+                &knowledge,
+                &resolver,
+                &disease.positive,
+                "official-fixture".into(),
+            );
+            let target = &ranking.genes[&format!("SYMBOL:{target_symbol}")];
+            global_denominator.get_or_insert(ranking.denominator);
+            let target_group_end = ranking
+                .genes
+                .values()
+                .filter(|rank| rank.score_key >= target.score_key)
+                .count();
+            eprintln!(
+                "{disease_id} {target_symbol}: rank {}, tie {}, group end {}, denominator {}",
+                target.rank, target.tie_count, target_group_end, ranking.denominator
+            );
+            assert!(
+                target_group_end <= 20,
+                "{target_symbol} ended at {target_group_end} for {disease_id}"
+            );
+        }
+
+        let empty_ranking = PhenotypeRanking {
+            hpo_release: "official-fixture".into(),
+            query_count: 0,
+            disease_profile_count: 0,
+            denominator: 0,
+            genes: BTreeMap::new(),
+        };
+        let mut counts = Vec::new();
+        for (id, label) in [
+            ("HP:0001250", "Seizure"),
+            ("HP:0004322", "Short stature"),
+            ("HP:0001631", "Atrial septal defect"),
+        ] {
+            let resolved = resolve_gene_set(
+                &resolver,
+                &[],
+                Some(&knowledge),
+                &[PhenotypeTerm {
+                    id: id.into(),
+                    label: label.into(),
+                }],
+                &[],
+                &[],
+                &[],
+                &HashMap::new(),
+                &empty_ranking,
+            )
+            .unwrap();
+            counts.push(resolved.included.len());
+        }
+        eprintln!("official HPO association counts: {counts:?}");
+        assert_eq!(counts.iter().copied().collect::<HashSet<_>>().len(), 3);
+        assert!(
+            counts
+                .iter()
+                .all(|count| *count > 0 && *count < global_denominator.unwrap())
+        );
     }
 
     #[test]
@@ -5122,104 +5328,6 @@ mod tests {
     }
 
     #[test]
-    fn patient_to_disease_similarity_prefers_the_better_query_match() {
-        let knowledge = test_knowledge();
-        let matching = rank_disease(&knowledge, &disease("matching", &[1, 2]), &[1, 2], &[]);
-        let partial = rank_disease(&knowledge, &disease("partial", &[1, 3]), &[1, 2], &[]);
-        assert!(matching.phenotype_score > partial.phenotype_score);
-        assert_eq!(matching.query_coverage, 100.0);
-    }
-
-    #[test]
-    fn unrecorded_disease_findings_do_not_lower_an_exact_query_match() {
-        let knowledge = test_knowledge();
-        let ranked = rank_disease(
-            &knowledge,
-            &disease("exact-with-additional-findings", &[1, 2, 3]),
-            &[1],
-            &[],
-        );
-        assert_eq!(ranked.phenotype_score, 100.0);
-        assert_eq!(ranked.query_coverage, 100.0);
-    }
-
-    #[test]
-    fn explicitly_absent_terms_are_reported_separately_from_similarity() {
-        let knowledge = test_knowledge();
-        let profile = disease("conflict", &[1, 2]);
-        let without_absent = rank_disease(&knowledge, &profile, &[1], &[]);
-        let with_absent = rank_disease(&knowledge, &profile, &[1], &[2]);
-        assert_eq!(with_absent.phenotype_score, without_absent.phenotype_score);
-        assert_eq!(with_absent.conflict_score, 100.0);
-        assert!(!with_absent.conflict_frequency_complete);
-    }
-
-    #[test]
-    fn absent_feature_conflict_respects_reported_disease_frequency() {
-        let knowledge = test_knowledge();
-        let mut profile = disease("frequency-weighted-conflict", &[1, 2]);
-        profile.annotations.insert(
-            2,
-            DiseasePhenotypeContext {
-                frequency_probability: Some(0.17),
-                ..DiseasePhenotypeContext::default()
-            },
-        );
-        let ranked = rank_disease(&knowledge, &profile, &[1], &[2]);
-        assert!((ranked.conflict_score - 17.0).abs() < f64::EPSILON);
-        assert!(ranked.conflict_frequency_complete);
-    }
-
-    #[test]
-    fn monarch_request_uses_the_cataloged_result_limit() {
-        let terms = vec![PhenotypeTerm {
-            id: "HP:0001250".into(),
-            label: "Seizure".into(),
-        }];
-        let service =
-            annocat_core::source_catalog::service("monarch-phenotype-gene-ranking").unwrap();
-        let payload = monarch_request_payload(&terms, service.max_results);
-        assert_eq!(payload["limit"], 50);
-        assert_eq!(payload["termset"][0], "HP:0001250");
-    }
-
-    #[test]
-    fn monarch_response_parser_keeps_gene_identity_and_order() {
-        let genes = parse_monarch_genes(
-            br#"[{"subject":{"id":"HGNC:1","symbol":"GENE1","full_name":"Gene one"},"score":0.91},
-                 {"subject":{"id":"HGNC:2","symbol":"GENE2"},"score":0.72}]"#,
-        )
-        .unwrap();
-        assert_eq!(genes.len(), 2);
-        assert_eq!(genes[0].rank, 1);
-        assert_eq!(genes[0].symbol, "GENE1");
-        assert_eq!(genes[0].name, "Gene one");
-        assert_eq!(genes[1].rank, 2);
-        assert_eq!(genes[1].name, "GENE2");
-    }
-
-    #[test]
-    fn monarch_suggestions_require_safe_ordered_provider_data() {
-        let mut suggestions = MonarchGeneRanking {
-            provider: "Monarch Initiative".into(),
-            provider_url: "https://monarchinitiative.org/".into(),
-            metric: "Ancestor information content, bidirectional".into(),
-            generated_at: "2026-07-31T00:00:00Z".into(),
-            result_limit: 50,
-            genes: vec![MonarchRankedGene {
-                rank: 1,
-                gene_id: "HGNC:1".into(),
-                symbol: "GENE1".into(),
-                name: "Gene one".into(),
-                score: 0.91,
-            }],
-        };
-        assert!(validate_monarch_suggestions(&suggestions).is_ok());
-        suggestions.provider_url = "javascript:alert(1)".into();
-        assert!(validate_monarch_suggestions(&suggestions).is_err());
-    }
-
-    #[test]
     fn clearing_a_profile_removes_its_active_generation() {
         let runs = std::env::temp_dir().join(format!(
             "annocat-hpo-clear-{}",
@@ -5230,17 +5338,21 @@ mod tests {
         ));
         let root = runs.join(".annocat-library").join("run-1");
         fs::create_dir_all(&root).unwrap();
-        let evidence = root.join("phenotype-gene-evidence.test.parquet");
-        let catalog = root.join("phenotype-field-catalog.test.json");
+        let evidence = root.join("phenotype-gene-evidence.aaaaaaaaaaaaaaaa.parquet");
+        let catalog = root.join("phenotype-field-catalog.aaaaaaaaaaaaaaaa.json");
         fs::write(&evidence, b"evidence").unwrap();
         fs::write(&catalog, b"catalog").unwrap();
         let mut profile = empty_profile("run-1");
+        profile.observed.push(PhenotypeTerm {
+            id: "HP:0001250".into(),
+            label: "Seizure".into(),
+        });
+        profile.show_matches_only = true;
         profile.active_generation = Some(PhenotypeGeneration {
-            fingerprint: "test".into(),
+            fingerprint: "a".repeat(64),
             evidence_file: evidence.file_name().unwrap().to_string_lossy().into_owned(),
             catalog_file: catalog.file_name().unwrap().to_string_lossy().into_owned(),
-            matched_gene_count: None,
-            candidate_evidence_file: None,
+            matched_gene_count: 1,
         });
         save(&runs, &profile).unwrap();
 
@@ -5251,15 +5363,10 @@ mod tests {
             ProfileUpdate {
                 action: "clear".into(),
                 observed: Vec::new(),
-                excluded: Vec::new(),
                 conditions: Vec::new(),
                 pathways: Vec::new(),
                 genes: Vec::new(),
-                excluded_genes: Vec::new(),
-                combination: default_gene_combination(),
                 show_matches_only: false,
-                limit_to_linked_genes: false,
-                request_monarch_suggestions: false,
                 preview_fingerprint: None,
             },
         )
@@ -5268,38 +5375,6 @@ mod tests {
         assert!(!profile_path(&runs, "run-1").exists());
         assert!(!evidence.exists());
         assert!(!catalog.exists());
-        fs::remove_dir_all(runs).unwrap();
-    }
-
-    #[test]
-    fn loading_a_profile_invalidates_legacy_candidate_evidence() {
-        let runs = std::env::temp_dir().join(format!(
-            "annocat-hpo-stale-candidates-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let root = runs.join(".annocat-library").join("run-1");
-        fs::create_dir_all(&root).unwrap();
-        let mut profile = empty_profile("run-1");
-        profile.active_generation = Some(PhenotypeGeneration {
-            fingerprint: "test".into(),
-            evidence_file: "phenotype-gene-evidence.test.parquet".into(),
-            catalog_file: "phenotype-field-catalog.test.json".into(),
-            matched_gene_count: None,
-            candidate_evidence_file: None,
-        });
-        let mut value = serde_json::to_value(profile).unwrap();
-        value["activeGeneration"]["candidateEvidenceFile"] =
-            "phenotype-candidate-evidence.test.parquet".into();
-        fs::write(
-            profile_path(&runs, "run-1"),
-            serde_json::to_vec(&value).unwrap(),
-        )
-        .unwrap();
-
-        assert!(load(&runs, "run-1").unwrap().active_generation.is_none());
         fs::remove_dir_all(runs).unwrap();
     }
 
@@ -5341,15 +5416,7 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_ancestor_conflicts_with_an_observed_descendant() {
-        let knowledge = test_knowledge();
-        let observed = vec![term_value(&knowledge, 4)];
-        let excluded = vec![term_value(&knowledge, 1)];
-        assert!(ensure_consistent_profile(&knowledge, &observed, &excluded).is_err());
-    }
-
-    #[test]
-    fn gene_catalog_recommends_only_the_composite_match_column() {
+    fn gene_catalog_recommendations_follow_the_hpo_feature_count() {
         let root = std::env::temp_dir().join(format!(
             "annocat-hpo-catalog-{}",
             SystemTime::now()
@@ -5358,393 +5425,57 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let path = root.join("phenotype-field-catalog.test.json");
-        write_gene_catalog(
-            &path,
-            "phenotype-gene-evidence.test.parquet",
-            "test",
-            "hpo-test",
-            Some("mondo-test"),
-            None,
-            Some("hgnc-test"),
-            "test",
-            "https://example.test",
-        )
-        .unwrap();
-        let catalog: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        let fields = catalog["fields"].as_array().unwrap();
-        assert_eq!(
-            fields
-                .iter()
-                .filter(|field| field["recommended"] == true)
-                .map(|field| field["fieldPath"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["geneMatches"]
-        );
-        let composite = fields
-            .iter()
-            .find(|field| field["fieldPath"] == "phenotypeRelevance")
-            .unwrap();
-        assert!(
-            composite["presentationDependencies"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "phenotypeEvidenceDetails")
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn pathway_matches_include_every_gene_occurrence_for_an_allele() {
-        let root = std::env::temp_dir().join(format!(
-            "annocat-pathway-gene-evidence-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("gene-evidence.parquet");
-        let ranking = PhenotypeRanking {
-            algorithm_version: default_phenotype_algorithm_version(),
-            provider: "Selected genes".into(),
-            provider_url: String::new(),
-            hpo_release: String::new(),
-            metric: String::new(),
-            score_interpretation: String::new(),
-            generated_at: String::new(),
-            evaluated_diseases: 0,
-            sample_name: None,
-            report_gene_count: 2,
-            online_enrichment: None,
-            online_error: None,
-            diseases: Vec::new(),
-        };
-        let pathway = crate::reactome::Pathway {
-            id: "R-HSA-1".into(),
-            label: "Example pathway".into(),
-            genes: vec!["GENE1".into(), "GENE2".into()],
-        };
-        write_gene_evidence(
-            Some(&path),
-            &crate::gene_identity::Resolver::new(
-                Path::new("missing"),
-                &[
-                    ("GENE1".into(), "ENSG1".into()),
-                    ("GENE2".into(), "ENSG2".into()),
-                ],
-            ),
-            &[
-                crate::results::ReportGeneOccurrence {
-                    allele_id: "allele-1".into(),
-                    gene_symbol: "GENE1".into(),
-                    gene_id: "ENSG1".into(),
-                },
-                crate::results::ReportGeneOccurrence {
-                    allele_id: "allele-1".into(),
-                    gene_symbol: "GENE2".into(),
-                    gene_id: "ENSG2".into(),
-                },
-            ],
-            &[],
-            &[],
-            &[PhenotypeTerm {
-                id: pathway.id.clone(),
-                label: pathway.label.clone(),
-            }],
-            &[pathway],
-            &[],
-            &[],
-            "any",
-            &HashMap::new(),
-            &ranking,
-        )
-        .unwrap();
-
-        let connection = Connection::open_in_memory().unwrap();
-        let parquet = path.to_string_lossy();
-        let (display, details): (String, String) = connection
-            .query_row(
-                "SELECT string_value,
-                        (SELECT json_value FROM read_parquet(?) WHERE allele_id='allele-1' AND field_path='geneMatchDetails')
-                 FROM read_parquet(?)
-                 WHERE allele_id='allele-1' AND field_path='geneMatches'",
-                params![parquet.as_ref(), parquet.as_ref()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+        let sources = vec![SourceAsset {
+            name: "hp.obo".into(),
+            release: "hpo-test".into(),
+            sha256: "a".repeat(64),
+        }];
+        for (feature_count, expected) in [
+            (0, vec!["geneMatches"]),
+            (1, vec!["geneMatches"]),
+            (2, vec!["phenotypeRank", "geneMatches"]),
+        ] {
+            let path = root.join(format!("phenotype-field-catalog.{feature_count}.json"));
+            write_gene_catalog(
+                &path,
+                "phenotype-gene-evidence.test.parquet",
+                "test",
+                "hpo-test",
+                Some("mondo-test"),
+                None,
+                Some("hgnc-test"),
+                feature_count,
+                &sources,
             )
             .unwrap();
-        assert_eq!(display, "Example pathway +1");
-        assert!(details.contains("GENE1"));
-        assert!(details.contains("GENE2"));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn condition_only_links_do_not_create_a_similarity_score() {
-        let root = std::env::temp_dir().join(format!(
-            "annocat-hpo-gene-evidence-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("gene-evidence.parquet");
-        let ranking = PhenotypeRanking {
-            algorithm_version: default_phenotype_algorithm_version(),
-            provider: "Human Phenotype Ontology".into(),
-            provider_url: "https://hpo.jax.org/".into(),
-            hpo_release: "test".into(),
-            metric: "test".into(),
-            score_interpretation: String::new(),
-            generated_at: String::new(),
-            evaluated_diseases: 1,
-            sample_name: None,
-            report_gene_count: 1,
-            online_enrichment: None,
-            online_error: None,
-            diseases: vec![RankedDisease {
-                phenotype_rank: 1,
-                disease_id: "OMIM:1".into(),
-                disease_name: "Example condition".into(),
-                phenotype_score: 0.0,
-                query_coverage: 0.0,
-                conflict_score: 0.0,
-                conflict_frequency_complete: true,
-                matched_phenotypes: Vec::new(),
-                genes: vec![GeneAssociation {
-                    gene_id: "1".into(),
-                    symbol: "GENE1".into(),
-                    association_type: "MENDELIAN".into(),
-                    source: "HPO".into(),
-                }],
-                report_overlap: DiseaseReportOverlap::default(),
-            }],
-        };
-        let condition_matches = HashMap::from([(
-            "OMIM:1".into(),
-            vec![crate::mondo::DiseaseConditionMatch {
-                selected_id: "MONDO:0000001".into(),
-                selected_label: "Selected condition".into(),
-                matched_id: "MONDO:0000001".into(),
-                matched_label: "Selected condition".into(),
-                relation: "Exact condition",
-            }],
-        )]);
-        write_gene_evidence(
-            Some(&path),
-            &crate::gene_identity::Resolver::new(
-                Path::new("missing"),
-                &[("GENE1".into(), "ENSG1".into())],
-            ),
-            &[crate::results::ReportGeneOccurrence {
-                allele_id: "allele-1".into(),
-                gene_symbol: "GENE1".into(),
-                gene_id: "ENSG1".into(),
-            }],
-            &[],
-            &[PhenotypeTerm {
-                id: "MONDO:0000001".into(),
-                label: "Selected condition".into(),
-            }],
-            &[],
-            &[],
-            &[],
-            &[],
-            "any",
-            &condition_matches,
-            &ranking,
-        )
-        .unwrap();
-        let connection = Connection::open_in_memory().unwrap();
-        let parquet = path.to_string_lossy();
-        let profile_link: bool = connection
-            .query_row(
-                "SELECT boolean_value FROM read_parquet(?) WHERE field_path='profileLinked'",
-                params![parquet.as_ref()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let condition_matches: i64 = connection
-            .query_row(
-                "SELECT integer_value FROM read_parquet(?) WHERE field_path='selectedConditionMatches'",
-                params![parquet.as_ref()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let condition_label: String = connection
-            .query_row(
-                "SELECT string_value FROM read_parquet(?) WHERE field_path='matchedSelectedConditions'",
-                params![parquet.as_ref()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let relevance_count: i64 = connection
-            .query_row(
-                "SELECT count(number_value) FROM read_parquet(?) WHERE field_path='phenotypeRelevance'",
-                params![parquet.as_ref()],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(profile_link);
-        assert_eq!(condition_matches, 1);
-        assert_eq!(condition_label, "MONDO:0000001 Selected condition");
-        assert_eq!(relevance_count, 0);
-        assert_eq!(phenotype_matched_gene_count(&path).unwrap(), 1);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn gene_evidence_uses_association_types_for_their_documented_purpose() {
-        let root = std::env::temp_dir().join(format!(
-            "annocat-hpo-association-types-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("gene-evidence.parquet");
-        let ranking = PhenotypeRanking {
-            algorithm_version: default_phenotype_algorithm_version(),
-            provider: "Human Phenotype Ontology".into(),
-            provider_url: "https://hpo.jax.org/".into(),
-            hpo_release: "test".into(),
-            metric: "test".into(),
-            score_interpretation: String::new(),
-            generated_at: String::new(),
-            evaluated_diseases: 1,
-            sample_name: None,
-            report_gene_count: 3,
-            online_enrichment: None,
-            online_error: None,
-            diseases: vec![RankedDisease {
-                phenotype_rank: 1,
-                disease_id: "OMIM:1".into(),
-                disease_name: "Example condition".into(),
-                phenotype_score: 80.0,
-                query_coverage: 100.0,
-                conflict_score: 0.0,
-                conflict_frequency_complete: true,
-                matched_phenotypes: vec![PhenotypeMatch {
-                    query: PhenotypeTerm {
-                        id: "HP:0001250".into(),
-                        label: "Seizure".into(),
-                    },
-                    disease_term: PhenotypeTerm {
-                        id: "HP:0001250".into(),
-                        label: "Seizure".into(),
-                    },
-                    similarity: 1.0,
-                    direct: true,
-                    disease_annotation: None,
-                }],
-                genes: vec![
-                    GeneAssociation {
-                        gene_id: "ENSG1".into(),
-                        symbol: "MENDEL".into(),
-                        association_type: "MENDELIAN".into(),
-                        source: "HPO".into(),
-                    },
-                    GeneAssociation {
-                        gene_id: "ENSG2".into(),
-                        symbol: "POLY".into(),
-                        association_type: "POLYGENIC".into(),
-                        source: "HPO".into(),
-                    },
-                    GeneAssociation {
-                        gene_id: "ENSG3".into(),
-                        symbol: "UNKNOWN".into(),
-                        association_type: "UNKNOWN".into(),
-                        source: "HPO".into(),
-                    },
-                ],
-                report_overlap: DiseaseReportOverlap::default(),
-            }],
-        };
-        let condition_matches = HashMap::from([(
-            "OMIM:1".into(),
-            vec![crate::mondo::DiseaseConditionMatch {
-                selected_id: "MONDO:0000001".into(),
-                selected_label: "Selected condition".into(),
-                matched_id: "MONDO:0000001".into(),
-                matched_label: "Selected condition".into(),
-                relation: "Exact condition",
-            }],
-        )]);
-        write_gene_evidence(
-            Some(&path),
-            &crate::gene_identity::Resolver::new(
-                Path::new("missing"),
-                &[
-                    ("MENDEL".into(), "ENSG1".into()),
-                    ("POLY".into(), "ENSG2".into()),
-                    ("UNKNOWN".into(), "ENSG3".into()),
-                ],
-            ),
-            &[
-                crate::results::ReportGeneOccurrence {
-                    allele_id: "allele-1".into(),
-                    gene_symbol: "MENDEL".into(),
-                    gene_id: "ENSG1".into(),
-                },
-                crate::results::ReportGeneOccurrence {
-                    allele_id: "allele-2".into(),
-                    gene_symbol: "POLY".into(),
-                    gene_id: "ENSG2".into(),
-                },
-                crate::results::ReportGeneOccurrence {
-                    allele_id: "allele-3".into(),
-                    gene_symbol: "UNKNOWN".into(),
-                    gene_id: "ENSG3".into(),
-                },
-            ],
-            &[PhenotypeTerm {
-                id: "HP:0001250".into(),
-                label: "Seizure".into(),
-            }],
-            &[PhenotypeTerm {
-                id: "MONDO:0000001".into(),
-                label: "Selected condition".into(),
-            }],
-            &[],
-            &[],
-            &[],
-            &[],
-            "any",
-            &condition_matches,
-            &ranking,
-        )
-        .unwrap();
-        let connection = Connection::open_in_memory().unwrap();
-        let parquet = path.to_string_lossy();
-        let boolean = |symbol: &str, field: &str| -> bool {
-            connection
-                .query_row(
-                    "SELECT boolean_value FROM read_parquet(?)
-                     WHERE gene_symbol=? AND field_path=?",
-                    params![parquet.as_ref(), symbol, field],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        let integer = |symbol: &str, field: &str| -> i64 {
-            connection
-                .query_row(
-                    "SELECT integer_value FROM read_parquet(?)
-                     WHERE gene_symbol=? AND field_path=?",
-                    params![parquet.as_ref(), symbol, field],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        assert!(boolean("MENDEL", "observedFeatureLinked"));
-        assert!(!boolean("POLY", "observedFeatureLinked"));
-        assert!(!boolean("UNKNOWN", "observedFeatureLinked"));
-        assert_eq!(integer("MENDEL", "selectedConditionMatches"), 1);
-        assert_eq!(integer("POLY", "selectedConditionMatches"), 1);
-        assert_eq!(integer("UNKNOWN", "selectedConditionMatches"), 0);
+            let catalog: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(catalog["schemaVersion"], CATALOG_SCHEMA_VERSION);
+            assert_eq!(catalog["positiveHpoFeatureCount"], feature_count);
+            let fields = catalog["fields"].as_array().unwrap();
+            assert_eq!(
+                fields
+                    .iter()
+                    .filter(|field| field["recommended"] == true)
+                    .map(|field| field["fieldPath"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                fields
+                    .iter()
+                    .any(|field| field["fieldPath"] == "phenotypeRank"),
+                feature_count > 0
+            );
+            assert!(
+                fields
+                    .iter()
+                    .filter(|field| field["selectable"] == false)
+                    .all(|field| !field["fieldPath"]
+                        .as_str()
+                        .is_some_and(|path| path == "geneMatches" || path == "phenotypeRank"))
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5778,9 +5509,13 @@ mod tests {
         assert_eq!(knowledge.active_terms.len(), 2);
         assert_eq!(knowledge.diseases.len(), 1);
         assert_eq!(knowledge.condition_associations.len(), 2);
-        assert_eq!(knowledge.diseases[0].positive.len(), 1);
+        assert_eq!(knowledge.diseases[0].positive.len(), 2);
         assert_eq!(
             knowledge.terms[knowledge.diseases[0].positive[0]].id,
+            "HP:0001250"
+        );
+        assert_eq!(
+            knowledge.terms[knowledge.diseases[0].positive[1]].id,
             "HP:0002197"
         );
         assert_eq!(knowledge.diseases[0].genes[0].symbol, "GENE1");

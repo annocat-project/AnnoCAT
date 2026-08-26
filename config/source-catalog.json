@@ -237,15 +237,6 @@
   ],
   "services": [
     {
-      "id": "monarch-phenotype-gene-ranking",
-      "provider": "Monarch Initiative",
-      "purpose": "Consent-gated online phenotype-to-gene semantic-similarity ranking",
-      "apiUrl": "https://api.monarchinitiative.org/v3/api/semsim/search",
-      "providerUrl": "https://monarchinitiative.org/",
-      "timeoutSeconds": 45,
-      "maxResults": 50
-    },
-    {
       "id": "favor-variant-annotation",
       "provider": "FAVOR",
       "purpose": "Online GRCh38 annotations for selected or filtered result sets",

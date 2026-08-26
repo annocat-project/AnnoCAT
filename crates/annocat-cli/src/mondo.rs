@@ -658,6 +658,20 @@ impl MondoKnowledge {
         else {
             return Vec::new();
         };
+        let mut disease_index = disease_index;
+        let mut visited = HashSet::new();
+        while self.terms[disease_index].deprecated {
+            if !visited.insert(disease_index) {
+                return Vec::new();
+            }
+            let Some(replacement) = self.terms[disease_index].replacement else {
+                return Vec::new();
+            };
+            disease_index = replacement;
+        }
+        if self.active_terms.binary_search(&disease_index).is_err() {
+            return Vec::new();
+        }
         let matched = &self.terms[disease_index];
         selected
             .iter()
@@ -823,6 +837,10 @@ mod tests {
         );
         assert_eq!(
             knowledge.disease_matches(&selected, "ORPHA:43")[0].matched_id,
+            "MONDO:0000002"
+        );
+        assert_eq!(
+            knowledge.disease_matches(&selected, "MONDO:0000003")[0].matched_id,
             "MONDO:0000002"
         );
         assert_eq!(knowledge.subtype_count("MONDO:0000001"), Some(1));

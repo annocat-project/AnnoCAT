@@ -13,16 +13,33 @@ phenotype.
 
 ## Document status
 
-This is a specification and defect record, with implementation status captured
-on 2026-08-25. **Required** describes the target contract; it does not mean the
-behavior is already present in a release or in the local working tree.
+This is a specification, defect record, and implementation record, with status
+updated on 2026-08-25. **Required** describes the target contract. The local
+implementation status below does not mean the behavior has been published in a
+release.
 
 | Scope inspected on 2026-08-25 | Exact identity | Conformance to this contract |
 |---|---|---|
 | Public Windows release | GitHub release [`v0.1.0`](https://github.com/annocat-project/AnnoCAT/releases/tag/v0.1.0), release record published 2026-08-20; tag commit `795b5161cda0b814f27b886dc17f242546256bbe`; asset `AnnoCat-0.1.0-windows-x86_64.zip`, uploaded 2026-08-23, SHA-256 `fb27c464e07d6ec59152079dfc4b7fe80d0fbf116eaefd31d73821d6ca9c327a` | Uses the defective `hpo-lin-query-v4` behavior and does not conform to the corrected contract |
-| Local tracked baseline | Commit `7893de24f301da440390467b893fc6733567ac00` | Does not implement the corrected contract |
-| Local working tree | The tracked baseline plus uncommitted changes inspected on 2026-08-25 | Contains the zero-overlap Apply guard and preservation of the **View N without variants** inspection action; the remaining corrected behavior is not implemented |
-| Target corrected evidence | Profile schema `6`, catalog schema `2`, evidence contract `gene-profile-evidence-v2` | Defined by this document; must not be described as published until a release asset and commit are recorded here |
+| Local tracked baseline | Commit `40582038aa95eca0446a4eddc9b21f18862261c1` | Contains the zero-overlap Apply guard and this specification, but not the remaining corrected contract |
+| Local working tree | The tracked baseline plus the uncommitted implementation inspected and tested on 2026-08-25 | Implements the functional, schema, scientific-method, and existing-UI contract described here; it is not committed, pushed, or published |
+| Target corrected evidence | Profile schema `6`, catalog schema `2`, evidence contract `gene-profile-evidence-v2` | Implemented in the local working tree; it must not be described as published until a release commit, workflow result, asset, and digest are recorded here |
+
+Local verification on 2026-08-25 used the pinned source manifests and produced
+the following evidence:
+
+| Check | Local result |
+|---|---|
+| Full Rust workspace, including the standalone report worker and AppContainer tests | 381 passed, 5 intentionally ignored, 0 failed |
+| Browser-module suite | 36 passed, 0 failed |
+| Pinned HPO known-case gate | SCN1A/OMIM:607208 rank 1 and CACNA1A/OMIM:108500 rank 1; each tie group ends at 1 in a 4,805-gene denominator |
+| Pinned HPO association sanity queries | Seizure 1,575; Short stature 987; Atrial septal defect 355; all distinct and non-universal |
+| Isolated local UI smoke test | Existing Genes popover retained; entered HNF1A resolved to 1 of 1 result gene; **Gene matches** displayed `HNF1A`, no `true` value or **Gene associations** section appeared, and the compact tooltip worked by keyboard and Escape |
+| Static and repository checks | Rust formatting, edited JavaScript syntax, and `git diff --check` passed; the final UI detector reported only two pre-existing width-transition warnings outside the changed CSS block |
+
+These are local results, not GitHub Actions or release evidence. The workflows
+are changed to run the pinned HPO gate, but that remote execution cannot occur
+until the implementation is committed and pushed.
 
 The public defect counts below are observations from that exact `v0.1.0`
 release with the stated installed data, not timeless properties of AnnoCAT.
@@ -947,7 +964,8 @@ boundaries:
 5. Revalidate every schema-6 HPO, MONDO, Reactome, and gene selection against the
    installed releases. Clear the active generation whenever a schema, contract,
    algorithm, source hash, or resolved identity differs, forcing a visible new
-   preview before apply.
+   preview before apply. Reject the preview as a whole when any saved item is
+   unavailable or ambiguous; do not silently apply a partial saved query.
 6. When a result contains profile schema 5 or earlier, open the result but do
    not restore or migrate its saved Genes query or active filter. Show an
    unsupported-query notice in the existing popover message area. Do not add a
@@ -993,8 +1011,9 @@ boundaries:
     scope and the phenotype-data warning in export metadata.
 16. Add accessible status and tooltip behavior through the existing message,
     task-status, and compact-cell surfaces; do not add another progress panel or
-    tooltip icon. Ignore stale asynchronous previews and establish the
-    regression-performance gate below.
+    tooltip icon. Ignore stale asynchronous previews. Treat performance timing
+    as release telemetry until a reproducible runner baseline exists; do not add
+    a flaky blocking threshold to this correction.
 17. Gate release on the specified unit, browser, workspace, source-contract,
     deterministic Resnik, and public known-case checks. Record the exact commit,
     release asset digest, and reference-source hashes for the released build.
@@ -1025,8 +1044,8 @@ schema 5 does not delete or invalidate those lists. **Use list** loads only
 their resolved genes, **Delete** removes only the selected list, and **Clear**
 does not delete them.
 
-A supported schema-6 record is still revalidated whenever its result is opened,
-because installed reference releases may have changed:
+A supported schema-6 record is revalidated through a fresh preview whenever its
+Genes popover is opened, because installed reference releases may have changed:
 
 - an HPO or MONDO identifier is preserved only when it is active, or replaced
   when the installed ontology supplies exactly one documented replacement;
@@ -1035,9 +1054,15 @@ because installed reference releases may have changed:
   label matching;
 - an HGNC identifier resolves to its current approved symbol, while a
   symbol-only selection is resolved again and may become ambiguous; and
-- an unavailable, multiply replaced, ambiguous, or unresolved item stays
-  visibly marked in the loaded query and is excluded from preview. **Apply**
-  remains disabled until the user removes it or selects a unique replacement.
+- an unavailable, multiply replaced, ambiguous, or unresolved item remains
+  visible as its existing chip, the existing inline message reports the failed
+  revalidation, and the server rejects the preview as a whole. **Apply** remains
+  disabled until the user removes the item or selects a unique replacement.
+
+Failing the whole preview is intentional. It prevents an old multi-item query
+from silently changing meaning by dropping one item and applying the rest. A
+unique documented replacement is canonicalized by the server and is stored
+with its current label when the user applies the reviewed preview.
 
 Any change to selections, resolved identities, source hashes, schema or contract
 versions, or either algorithm version invalidates the fingerprint and active
@@ -1144,11 +1169,10 @@ understandable and safe:
   Responses for older request fingerprints are ignored, so a slow earlier
   search cannot overwrite the latest query. Closing the popover or clearing the
   query remains possible while resolution runs.
-- The release records p50 and p95 preview/ranking time for the versioned
-  phenotype performance fixture on the same GitHub runner class. A p95 greater
-  than twice the last conforming baseline blocks release unless the changed
-  reference corpus and an explicit reviewed exception are recorded. This is a
-  regression budget, not a cross-hardware completion-time promise.
+- Release qualification may record preview/ranking timing as telemetry. It is
+  not a blocking threshold until a versioned fixture and a reproducible baseline
+  from the same runner class have been checked in. Functional release gates must
+  not depend on an invented local-to-CI timing conversion.
 
 ## Required regression coverage
 
@@ -1242,9 +1266,9 @@ The maintained test contract includes:
 
 Verification includes the focused Rust phenotype tests, HGNC, MONDO, and
 Reactome unit suites, browser phenotype tests, full Rust workspace, full web
-suite, and formatting/lint checks in `.github/workflows/ci.yml` (**Test**).
-Deterministic Resnik fixtures, the predeclared public known-case set, and the
-performance fixture belong in that phenotype test path. The separate
+suite, and formatting checks in `.github/workflows/ci.yml` (**Test**).
+Deterministic Resnik fixtures and the predeclared public known-case set belong
+in that phenotype test path. The separate
 `.github/workflows/source-contract-validation.yml` workflow validates upstream
 file formats and remains a release-packaging gate; it does not replace the
 phenotype behavior and scientific-contract tests. The Windows release workflow
