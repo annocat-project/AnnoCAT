@@ -8,6 +8,7 @@ import {
   summarizeProfileEvidenceRow,
   splitGeneListEntries,
   formatGeneListSections,
+  summarizeGenePreviewScope,
 } from '../src/app/phenotypes.js';
 import { applyGenericEvidenceCellPresentation } from '../src/app/variant-presentation.js';
 
@@ -33,6 +34,26 @@ test('labeled gene-list sections remain editable and resolve only their genes', 
     splitGeneListEntries(text),
     ['SRD5A2', 'CYP21A2', 'CACNA1A', 'ATP1A2'],
   );
+});
+
+test('zero-overlap previews keep the missing-genes action but cannot apply', () => {
+  const scope = summarizeGenePreviewScope({
+    includedGenes: 3,
+    includedGenesInResult: 0,
+    genesInResult: 20,
+  });
+  assert.equal(scope.canApply, false);
+  assert.match(scope.html, /No resolved genes have variants in this result/);
+  assert.match(scope.html, /data-view-missing-genes/);
+  assert.match(scope.html, /View 3 without variants/);
+
+  const partial = summarizeGenePreviewScope({
+    includedGenes: 3,
+    includedGenesInResult: 1,
+    genesInResult: 20,
+  });
+  assert.equal(partial.canApply, true);
+  assert.match(partial.html, /View 2 without variants/);
 });
 
 test('gene matches use one compact value with detailed provenance', () => {

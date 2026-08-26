@@ -1398,6 +1398,13 @@ pub fn apply(
         &prepared.condition_matches,
         &prepared.ranking,
     )?;
+    require_result_overlap(
+        resolved
+            .included
+            .iter()
+            .filter(|symbol| resolved.result_symbols.contains(*symbol))
+            .count(),
+    )?;
     let selection = prepared.identity.result_keys(&resolved.included);
     let matched_report_genes =
         super::results::report_gene_occurrences(parquet, &selection.symbols, &selection.gene_ids)?
@@ -1443,8 +1450,6 @@ pub fn apply(
     } else {
         (None, None)
     };
-    let show_matches_only =
-        request.show_matches_only && generation.matched_gene_count.is_some_and(|count| count > 0);
     let profile = PhenotypeProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
         run_id: run_id.to_owned(),
@@ -1456,7 +1461,7 @@ pub fn apply(
         genes: prepared.genes,
         excluded_genes: prepared.excluded_genes,
         combination: prepared.combination,
-        show_matches_only,
+        show_matches_only: request.show_matches_only,
         limit_to_linked_genes: request.limit_to_linked_genes,
         active_generation: Some(generation),
         ranking: None,
@@ -1465,6 +1470,12 @@ pub fn apply(
     };
     save(runs, &profile)?;
     Ok(profile)
+}
+
+fn require_result_overlap(count: usize) -> Result<(), String> {
+    (count > 0)
+        .then_some(())
+        .ok_or_else(|| "No resolved genes have variants in this result.".into())
 }
 
 struct PreparedGeneProfile {
@@ -4725,6 +4736,15 @@ fn round(value: f64, places: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_requires_at_least_one_gene_in_the_result() {
+        assert!(require_result_overlap(1).is_ok());
+        assert_eq!(
+            require_result_overlap(0).unwrap_err(),
+            "No resolved genes have variants in this result."
+        );
+    }
 
     #[test]
     fn large_pasted_gene_lists_use_one_exact_resolver() {

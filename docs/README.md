@@ -11,6 +11,7 @@
 
 ## Technical reference
 
+- [Phenotype, condition, pathway, and gene resolution](phenotype-and-gene-resolution.md)
 - [How AnnoCAT selects transcripts and evidence](transcript-and-evidence-selection.md)
 - [How AnnoCAT displays prediction evidence](evidence-display.md)
 - [Validate annotation results](annotation-validation.md)

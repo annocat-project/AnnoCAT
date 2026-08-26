@@ -202,6 +202,22 @@ export function formatGeneListSections(sections) {
   ).join('\n\n');
 }
 
+export function summarizeGenePreviewScope(preview) {
+  if (!preview) return { canApply: false, html: '' };
+  const includedInResult = preview.includedGenesInResult ??
+    Math.min(preview.includedGenes, preview.genesInResult);
+  const withoutVariants = Math.max(0, preview.includedGenes - includedInResult);
+  const viewMissing = withoutVariants
+    ? ` <button type="button" class="fui-button fui-button--subtle" data-view-missing-genes>View ${withoutVariants.toLocaleString()} without variants</button>`
+    : '';
+  return {
+    canApply: includedInResult > 0,
+    html: includedInResult === 0
+      ? `No resolved genes have variants in this result.${viewMissing}`
+      : `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${viewMissing}`,
+  };
+}
+
 export function createPhenotypeFeature({
   $,
   escapeHtml,
@@ -703,13 +719,7 @@ export function createPhenotypeFeature({
       terms('genes').length;
     const validProfile = hasPositiveInput();
     const previewReady = Boolean(preview?.fingerprint) && !previewLoading && !pasteLoading && !unresolvedPasteCount();
-    const includedInResult = preview
-      ? preview.includedGenesInResult ?? Math.min(preview.includedGenes, preview.genesInResult)
-      : 0;
-    const unmatchedGenes = preview ? Math.max(0, preview.includedGenes - includedInResult) : 0;
-    const scopeSummary = preview
-      ? `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${unmatchedGenes ? ` <button type="button" class="fui-button fui-button--subtle" data-view-missing-genes>View ${unmatchedGenes.toLocaleString()} without variants</button>` : ''}`
-      : '';
+    const { canApply, html: scopeSummary } = summarizeGenePreviewScope(preview);
     popover.innerHTML = `<div class="phenotype-popover__content">
         <label class="fui-field phenotype-search-field phenotype-popover__search"><span class="fui-field__label">Add a feature, condition, pathway, or gene</span><input class="fui-input" type="search" data-phenotype-search autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="phenotype-search-results" aria-expanded="false" placeholder="Search names or identifiers"><div id="phenotype-search-results" class="phenotype-search-results fui-popover fui-popover--listbox" data-phenotype-results role="listbox"></div></label>
         ${hpoReady && profile.mondoRelease && reactomeReady
@@ -724,7 +734,7 @@ export function createPhenotypeFeature({
         <p class="phenotype-scope-note">${scopeSummary}</p>
         ${message ? `<div class="phenotype-message" role="status"><span>${escapeHtml(message)}</span></div>` : ''}
       </div>
-      <footer class="phenotype-popover__footer result-filter-actions"><button type="button" class="fui-button" data-clear-phenotypes ${hasSelection && !applying ? '' : 'disabled'}>Clear</button><button type="button" class="fui-button fui-button--primary" data-apply-phenotypes ${validProfile && previewReady && !applying ? '' : 'disabled'}>${applying ? 'Applying…' : previewLoading || pasteLoading ? 'Resolving…' : 'Apply'}</button></footer>`;
+      <footer class="phenotype-popover__footer result-filter-actions"><button type="button" class="fui-button" data-clear-phenotypes ${hasSelection && !applying ? '' : 'disabled'}>Clear</button><button type="button" class="fui-button fui-button--primary" data-apply-phenotypes ${validProfile && previewReady && canApply && !applying ? '' : 'disabled'}>${applying ? 'Applying…' : previewLoading || pasteLoading ? 'Resolving…' : 'Apply'}</button></footer>`;
     popover
       .querySelector('.phenotype-popover__content')
       ?.toggleAttribute('inert', applying);
