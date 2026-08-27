@@ -6,24 +6,55 @@ on:
   pull_request:
     paths:
       - ".github/workflows/source-contract-validation.yml"
-      - "config/fastvep-pin.json"
+      - "config/**"
+      - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/mondo.rs"
+      - "crates/annocat-cli/src/phenotype.rs"
       - "crates/annocat-cli/src/results.rs"
+      - "crates/annocat-core/src/source_catalog.rs"
       - "fixtures/source-cache-parity/**"
+      - "scripts/verify-configured-urls.py"
       - "scripts/verify-supplementary-cache-parity.py"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/source-contract-validation.yml"
-      - "config/fastvep-pin.json"
+      - "config/**"
+      - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/mondo.rs"
+      - "crates/annocat-cli/src/phenotype.rs"
       - "crates/annocat-cli/src/results.rs"
+      - "crates/annocat-core/src/source_catalog.rs"
       - "fixtures/source-cache-parity/**"
+      - "scripts/verify-configured-urls.py"
       - "scripts/verify-supplementary-cache-parity.py"
 
 permissions:
   contents: read
 
 jobs:
+  urls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test configured URL validator
+        run: python scripts/verify-configured-urls.py --self-test
+      - name: Validate configured URLs
+        run: >-
+          python scripts/verify-configured-urls.py
+          --verify-sha256
+          --report "$RUNNER_TEMP/configured-urls.json"
+      - name: Upload URL validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: configured-url-validation
+          path: ${{ runner.temp }}/configured-urls.json
+          if-no-files-found: warn
+          retention-days: 14
+
   fastvep:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -53,6 +84,14 @@ jobs:
             tail -n 1)
           test -n "$test_binary"
           cp "$test_binary" "$RUNNER_TEMP/binary/annocat-source-contract-tests"
+      - name: Validate official rolling source resolvers
+        run: |
+          test_binary="$RUNNER_TEMP/binary/annocat-source-contract-tests"
+          test_name="profile_status_tests::official_rolling_source_resolvers_return_downloadable_artifacts"
+          matches=$("$test_binary" --list --format terse | \
+            awk -v expected="$test_name: test" '$0 == expected { count++ } END { print count + 0 }')
+          test "$matches" -eq 1
+          "$test_binary" --ignored --exact "$test_name" --test-threads=1
       - uses: actions/upload-artifact@v4
         with:
           name: source-contract-binaries

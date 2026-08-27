@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub const SOURCE_URL: &str = "https://www.genenames.org/download/";
 pub const CONTRACT_VERSION: &str = "hgnc-identity-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,12 +45,6 @@ pub struct SearchMatch {
     pub match_kind: &'static str,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ResultKeys {
-    pub symbols: HashSet<String>,
-    pub gene_ids: BTreeSet<String>,
-}
-
 #[derive(Debug)]
 struct Gene {
     symbol: String,
@@ -73,7 +66,6 @@ pub struct Resolver {
     identity_release: Option<String>,
     runtime_direct: HashMap<String, BTreeSet<String>>,
     canonical_ids: HashMap<String, BTreeSet<String>>,
-    result_keys: HashMap<String, ResultKeys>,
 }
 
 impl Resolver {
@@ -84,7 +76,6 @@ impl Resolver {
             identity_release: installed.map(|(_, release)| release),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         };
         if let Ok(genes) = transcript_genes(resources) {
             for (symbol, gene_id) in genes.iter() {
@@ -93,24 +84,6 @@ impl Resolver {
         }
         for (symbol, gene_id) in report {
             resolver.add_runtime(symbol, gene_id);
-        }
-        for (symbol, gene_id) in report {
-            let resolved = resolver
-                .resolve_pair(gene_id, symbol)
-                .resolved()
-                .unwrap_or_else(|| ResolvedGene {
-                    symbol: normalize(symbol),
-                    canonical_gene_id: None,
-                    result_gene_id: nonempty(strip_ensembl_version(gene_id)),
-                    identity_status: "symbol-only".into(),
-                });
-            let keys = resolver.result_keys.entry(resolved.symbol).or_default();
-            if !symbol.trim().is_empty() {
-                keys.symbols.insert(normalize(symbol));
-            }
-            if !gene_id.trim().is_empty() {
-                keys.gene_ids.insert(normalize(gene_id));
-            }
         }
         resolver
     }
@@ -163,17 +136,6 @@ impl Resolver {
                 result_gene_id: nonempty(strip_ensembl_version(gene_id)),
                 identity_status: "symbol-only".into(),
             })
-    }
-
-    pub fn result_keys(&self, included: &std::collections::HashSet<String>) -> ResultKeys {
-        let mut keys = ResultKeys::default();
-        for symbol in included {
-            if let Some(found) = self.result_keys.get(symbol) {
-                keys.symbols.extend(found.symbols.iter().cloned());
-                keys.gene_ids.extend(found.gene_ids.iter().cloned());
-            }
-        }
-        keys
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchMatch> {
@@ -589,7 +551,6 @@ mod tests {
             identity_release: Some("2026-08-07".into()),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         }
     }
 
@@ -651,7 +612,6 @@ mod tests {
             identity_release: Some("test".into()),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         };
 
         assert_eq!(

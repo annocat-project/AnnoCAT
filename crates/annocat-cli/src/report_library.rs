@@ -181,11 +181,7 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     if favor_role_count != 0 && favor_role_count != favor_roles.len() {
         return Err("imported online annotation files are incomplete".into());
     }
-    let phenotype_roles = [
-        "phenotype-profile",
-        "phenotype-gene-evidence",
-        "phenotype-field-catalog",
-    ];
+    let phenotype_roles = ["phenotype-profile"];
     let phenotype_role_count = phenotype_roles
         .iter()
         .filter(|role_name| roles.contains_key(**role_name))
@@ -193,9 +189,11 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
     if phenotype_role_count != 0 && phenotype_role_count != phenotype_roles.len() {
         return Err("imported phenotype evidence files are incomplete".into());
     }
-    let has_phenotype_candidates = roles.contains_key("phenotype-candidate-evidence");
-    if has_phenotype_candidates && phenotype_role_count != phenotype_roles.len() {
-        return Err("imported phenotype ranks have no matching profile".into());
+    if roles.contains_key("phenotype-gene-evidence")
+        || roles.contains_key("phenotype-field-catalog")
+        || roles.contains_key("phenotype-candidate-evidence")
+    {
+        return Err("imported result contains unsupported legacy phenotype evidence files".into());
     }
     let variant_count = manifest.variant_count;
     if result_kind == "vcf-only" {
@@ -337,11 +335,6 @@ pub fn import(path: &Path, runs: &Path) -> Result<ImportedReport, String> {
             runs,
             &manifest.run_id,
             &imported("phenotype-profile"),
-            &imported("phenotype-gene-evidence"),
-            &imported("phenotype-field-catalog"),
-            has_phenotype_candidates
-                .then(|| imported("phenotype-candidate-evidence"))
-                .as_deref(),
         ) {
             let _ = fs::remove_dir_all(&final_directory);
             let _ = crate::library_metadata::remove_candidate_snapshot(runs, &manifest.run_id);
@@ -667,74 +660,9 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let source_assets = serde_json::json!([{
-            "name": "hp.obo",
-            "release": "2026-07-24",
-            "sha256": "a".repeat(64)
-        }]);
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&serde_json::json!({
-                    "profileSchemaVersion": 6,
-                    "catalogSchemaVersion": 2,
-                    "evidenceContractVersion": "gene-profile-evidence-v2",
-                    "identityContractVersion": "hgnc-identity-v2",
-                    "geneSetAlgorithmVersion": "hpo-association-query-v5",
-                    "phenotypeRankingAlgorithmVersion": "resnik-query-disease-v1",
-                    "observed": ["HP:0001250"],
-                    "conditions": [],
-                    "pathways": [],
-                    "genes": [],
-                    "sourceAssets": source_assets.clone()
-                }))
-                .unwrap()
-            )
-        );
-        let short = &fingerprint[..16];
+        let fingerprint = "a".repeat(64);
         let phenotype_root = root.join(".annocat-library").join("run-import");
         fs::create_dir_all(&phenotype_root).unwrap();
-        let phenotype_evidence = format!("phenotype-gene-evidence.{short}.parquet");
-        let phenotype_catalog = format!("phenotype-field-catalog.{short}.json");
-        let evidence_path = phenotype_root.join(&phenotype_evidence);
-        let escaped_path = evidence_path.to_string_lossy().replace('\'', "''");
-        duckdb::Connection::open_in_memory()
-            .unwrap()
-            .execute_batch(&format!(
-                "COPY (
-                    SELECT NULL::VARCHAR AS allele_id,
-                           'ENSG1'::VARCHAR AS gene_id, 'GENE1'::VARCHAR AS gene_symbol,
-                           NULL::VARCHAR AS canonical_gene_id,
-                           'ENSG1'::VARCHAR AS result_gene_id,
-                           'symbol-only'::VARCHAR AS identity_status,
-                           'gene'::VARCHAR AS scope, 'hpo'::VARCHAR AS source_id,
-                           'profileLinked'::VARCHAR AS field_path, 'boolean'::VARCHAR AS value_type,
-                           NULL::VARCHAR AS string_value, NULL::BIGINT AS integer_value,
-                           NULL::DOUBLE AS number_value, true::BOOLEAN AS boolean_value,
-                           NULL::VARCHAR AS json_value
-                ) TO '{escaped_path}' (FORMAT PARQUET)"
-            ))
-            .unwrap();
-        fs::write(
-            phenotype_root.join(&phenotype_catalog),
-            serde_json::to_vec(&serde_json::json!({
-                "schemaVersion": 2,
-                "geneEvidenceFile": phenotype_evidence,
-                "fingerprint": fingerprint,
-                "hpoRelease": "2026-07-24",
-                "mondoRelease": null,
-                "evidenceContractVersion": "gene-profile-evidence-v2",
-                "identityContractVersion": "hgnc-identity-v2",
-                "geneSetAlgorithmVersion": "hpo-association-query-v5",
-                "phenotypeRankingAlgorithmVersion": "resnik-query-disease-v1",
-                "positiveHpoFeatureCount": 1,
-                "sourceAssets": source_assets,
-                "sources": [{"id": "hpo"}],
-                "fields": crate::report_import::gene_catalog_fields(1)
-            }))
-            .unwrap(),
-        )
-        .unwrap();
         fs::write(
             phenotype_root.join("phenotypes.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -748,8 +676,6 @@ mod tests {
                 "showMatchesOnly": true,
                 "activeGeneration": {
                     "fingerprint": fingerprint,
-                    "evidenceFile": phenotype_evidence,
-                    "catalogFile": phenotype_catalog,
                     "matchedGeneCount": 1
                 }
             }))

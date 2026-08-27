@@ -460,13 +460,38 @@ pub fn prepare_query_assets(
     canonical_evidence: &Path,
     canonical_catalog: &Path,
 ) -> Result<(), String> {
-    prepare_query_assets_with_gene(canonical_evidence, canonical_catalog, None)
+    let existing = canonical_evidence
+        .parent()
+        .map(|root| root.join(QUERY_CATALOG_FILE))
+        .filter(|path| path.is_file())
+        .map(|path| {
+            serde_json::from_slice::<Value>(
+                &fs::read(path)
+                    .map_err(|error| format!("cannot read query field catalog: {error}"))?,
+            )
+            .map_err(|error| format!("invalid query field catalog: {error}"))
+        })
+        .transpose()?
+        .and_then(|catalog| {
+            catalog["activeGeneQueryContractVersion"]
+                .is_string()
+                .then(|| {
+                    json!({
+                        "activeGeneQueryContractVersion": catalog["activeGeneQueryContractVersion"],
+                        "fingerprint": catalog["activeGeneQueryFingerprint"],
+                        "fields": catalog["fields"].as_array().into_iter().flatten()
+                            .filter(|field| field["storageRelation"] == "activeGeneQuery")
+                            .cloned().collect::<Vec<_>>()
+                    })
+                })
+        });
+    prepare_query_assets_with_active_gene(canonical_evidence, canonical_catalog, existing.as_ref())
 }
 
-pub fn prepare_query_assets_with_gene(
+pub fn prepare_query_assets_with_active_gene(
     canonical_evidence: &Path,
     canonical_catalog: &Path,
-    gene_assets: Option<(&Path, &Path)>,
+    gene_catalog: Option<&Value>,
 ) -> Result<(), String> {
     let _guard = query_asset_lock()
         .lock()
@@ -477,11 +502,11 @@ pub fn prepare_query_assets_with_gene(
     let favor_evidence = run_directory.join(EVIDENCE_FILE);
     let favor_catalog = run_directory.join(FIELD_CATALOG_FILE);
     let has_favor = favor_evidence.is_file() && favor_catalog.is_file();
-    let gene_catalog = gene_assets.map(|(_, gene_catalog)| gene_catalog);
+    let merged_catalog = run_directory.join(QUERY_CATALOG_FILE);
+    super::results::remove_obsolete_gene_query_projections(&merged_catalog)?;
     if !has_favor && gene_catalog.is_none() {
-        let stale = run_directory.join(QUERY_CATALOG_FILE);
-        if stale.is_file() {
-            fs::remove_file(stale)
+        if merged_catalog.is_file() {
+            fs::remove_file(merged_catalog)
                 .map_err(|error| format!("cannot remove stale query catalog: {error}"))?;
         }
         return Ok(());
@@ -490,7 +515,7 @@ pub fn prepare_query_assets_with_gene(
         canonical_catalog,
         has_favor.then_some(favor_catalog.as_path()),
         gene_catalog,
-        &run_directory.join(QUERY_CATALOG_FILE),
+        &merged_catalog,
     )
 }
 
@@ -1450,7 +1475,7 @@ fn publish_table(connection: &Connection, table: &str, destination: &Path) -> Re
 fn merge_query_catalogs(
     canonical: &Path,
     favor: Option<&Path>,
-    gene: Option<&Path>,
+    gene: Option<&Value>,
     destination: &Path,
 ) -> Result<(), String> {
     let mut canonical_value: Value = serde_json::from_slice(
@@ -1462,8 +1487,11 @@ fn merge_query_catalogs(
         .as_array_mut()
         .ok_or("canonical field catalog has no fields")?;
     canonical_fields.retain(|field| field["sourceId"] != SOURCE_ID);
-    canonical_fields
-        .retain(|field| field["sourceId"] != "hpo" && field["storageRelation"] != "geneEvidence");
+    canonical_fields.retain(|field| {
+        field["sourceId"] != "hpo"
+            && field["storageRelation"] != "geneEvidence"
+            && field["storageRelation"] != "activeGeneQuery"
+    });
     if let Some(favor) = favor {
         let favor_value: Value = serde_json::from_slice(
             &fs::read(favor)
@@ -1479,24 +1507,19 @@ fn merge_query_catalogs(
         );
     }
     if let Some(gene) = gene {
-        let gene_value: Value = serde_json::from_slice(
-            &fs::read(gene)
-                .map_err(|error| format!("cannot read phenotype field catalog: {error}"))?,
-        )
-        .map_err(|error| format!("invalid phenotype field catalog: {error}"))?;
         canonical_fields.extend(
-            gene_value["fields"]
+            gene["fields"]
                 .as_array()
                 .ok_or("phenotype field catalog has no fields")?
                 .iter()
                 .cloned(),
         );
-        let evidence_file = gene_value["geneEvidenceFile"]
-            .as_str()
-            .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
-            .ok_or("phenotype field catalog has an invalid gene evidence file")?;
-        canonical_value["geneEvidenceFile"] = Value::String(evidence_file.into());
+        canonical_value["activeGeneQueryContractVersion"] =
+            gene["activeGeneQueryContractVersion"].clone();
+        canonical_value["activeGeneQueryFingerprint"] = gene["fingerprint"].clone();
     } else if let Some(object) = canonical_value.as_object_mut() {
+        object.remove("activeGeneQueryContractVersion");
+        object.remove("activeGeneQueryFingerprint");
         object.remove("geneEvidenceFile");
     }
     let contents =
@@ -1866,7 +1889,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let canonical = root.join("canonical.json");
-        let phenotype = root.join("phenotype.json");
         let merged = root.join("merged.json");
         fs::write(
             &canonical,
@@ -1880,27 +1902,22 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        fs::write(
-            &phenotype,
-            serde_json::to_vec(&json!({
-                "geneEvidenceFile": "phenotype-gene-evidence.parquet",
-                "fields": [
-                    {"sourceId": "hpo", "fieldPath": "phenotypeRelevance", "storageRelation": "geneEvidence"},
-                    {"sourceId": "hpo", "fieldPath": "selectedConditionMatches", "storageRelation": "geneEvidence"}
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        merge_query_catalogs(&canonical, None, Some(&phenotype), &merged).unwrap();
+        let phenotype_catalog = json!({
+            "activeGeneQueryContractVersion": "gene-profile-live-v1",
+            "fingerprint": "a".repeat(64),
+            "fields": [
+                {"sourceId": "gene-profile", "fieldPath": "geneMatches", "storageRelation": "activeGeneQuery"},
+                {"sourceId": "gene-profile", "fieldPath": "phenotypeRank", "storageRelation": "activeGeneQuery"}
+            ]
+        });
+        merge_query_catalogs(&canonical, None, Some(&phenotype_catalog), &merged).unwrap();
 
         let catalog: Value = serde_json::from_slice(&fs::read(&merged).unwrap()).unwrap();
         let fields = catalog["fields"].as_array().unwrap();
         assert_eq!(
             fields
                 .iter()
-                .filter(|field| field["sourceId"] == "hpo")
+                .filter(|field| field["sourceId"] == "gene-profile")
                 .count(),
             2
         );
@@ -1910,14 +1927,16 @@ mod tests {
                 .all(|field| field["fieldPath"] != "legacyConditionMatches")
         );
         assert_eq!(
-            catalog["geneEvidenceFile"],
-            "phenotype-gene-evidence.parquet"
+            catalog["activeGeneQueryContractVersion"],
+            "gene-profile-live-v1"
         );
+        assert_eq!(catalog["activeGeneQueryFingerprint"], "a".repeat(64));
+        assert!(catalog.get("geneEvidenceFile").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn gene_evidence_does_not_wrap_unchanged_annotation_evidence() {
+    fn active_gene_query_does_not_wrap_unchanged_annotation_evidence() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1930,10 +1949,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let canonical_evidence = root.join("evidence.parquet");
         let canonical_catalog = root.join("field-catalog.json");
-        let gene_evidence = root.join("gene-evidence.parquet");
-        let gene_catalog = root.join("gene-field-catalog.json");
         fs::write(&canonical_evidence, b"canonical").unwrap();
-        fs::write(&gene_evidence, b"genes").unwrap();
         fs::write(
             &canonical_catalog,
             serde_json::to_vec(&json!({
@@ -1942,35 +1958,46 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        fs::write(
-            &gene_catalog,
-            serde_json::to_vec(&json!({
-                "geneEvidenceFile": "gene-evidence.parquet",
-                "fields": [{
-                    "sourceId": "hpo",
-                    "fieldPath": "geneMatch",
-                    "storageRelation": "geneEvidence"
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        let gene_catalog = json!({
+            "activeGeneQueryContractVersion": "gene-profile-live-v1",
+            "fingerprint": "b".repeat(64),
+            "fields": [{
+                "sourceId": "gene-profile",
+                "fieldPath": "geneMatches",
+                "storageRelation": "activeGeneQuery"
+            }]
+        });
 
-        prepare_query_assets_with_gene(
+        prepare_query_assets_with_active_gene(
             &canonical_evidence,
             &canonical_catalog,
-            Some((&gene_evidence, &gene_catalog)),
+            Some(&gene_catalog),
         )
         .unwrap();
 
         assert_eq!(effective_evidence(&canonical_evidence), canonical_evidence);
-        assert_eq!(fs::read(&gene_evidence).unwrap(), b"genes");
         assert!(root.join(QUERY_CATALOG_FILE).is_file());
         let catalog: Value =
             serde_json::from_slice(&fs::read(root.join(QUERY_CATALOG_FILE)).unwrap()).unwrap();
-        assert_eq!(catalog["geneEvidenceFile"], "gene-evidence.parquet");
+        assert_eq!(catalog["activeGeneQueryFingerprint"], "b".repeat(64));
+        assert!(catalog.get("geneEvidenceFile").is_none());
 
-        prepare_query_assets_with_gene(&canonical_evidence, &canonical_catalog, None).unwrap();
+        prepare_query_assets(&canonical_evidence, &canonical_catalog).unwrap();
+        let preserved: Value =
+            serde_json::from_slice(&fs::read(root.join(QUERY_CATALOG_FILE)).unwrap()).unwrap();
+        assert_eq!(preserved["activeGeneQueryFingerprint"], "b".repeat(64));
+        assert_eq!(
+            preserved["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|field| field["storageRelation"] == "activeGeneQuery")
+                .count(),
+            1
+        );
+
+        prepare_query_assets_with_active_gene(&canonical_evidence, &canonical_catalog, None)
+            .unwrap();
         assert!(!root.join(QUERY_CATALOG_FILE).exists());
         fs::remove_dir_all(root).unwrap();
     }

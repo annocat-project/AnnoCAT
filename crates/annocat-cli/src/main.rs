@@ -1604,9 +1604,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             let run_directory = variants
                 .parent()
                 .ok_or("completed result has no run directory")?;
-            favor::enrich(run_directory, &variants, &evidence, &catalog, request).and_then(
-                |summary| serde_json::to_string(&summary).map_err(|error| error.to_string()),
-            )
+            let summary = favor::enrich(run_directory, &variants, &evidence, &catalog, request)?;
+            prepare_completed_run_query_inputs(&paths.runs, run_id)?;
+            serde_json::to_string(&summary).map_err(|error| error.to_string())
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -1659,7 +1659,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 .into_iter()
                 .map(|candidate| candidate.allele_id)
                 .collect::<Vec<_>>();
-            results::page_json_with_details_for_candidates(
+            let gene_query =
+                phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
+            results::page_json_with_active_gene_query_for_candidates(
                 run_id,
                 &result,
                 evidence.as_deref(),
@@ -1668,6 +1670,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 limit,
                 &page_request?,
                 &candidate_ids,
+                gene_query.as_deref(),
             )
         });
         let (status, body) = match response {
@@ -1848,7 +1851,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             let result = completed_run_result(&paths.runs, run_id)?;
             let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
             let page_request = page_request?;
-            results::page_json_with_details(
+            let gene_query =
+                phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
+            results::page_json_with_active_gene_query(
                 run_id,
                 &result,
                 evidence.as_deref(),
@@ -1856,6 +1861,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 offset,
                 limit,
                 &page_request,
+                gene_query.as_deref(),
             )
         });
         let (status, body) = match response {
@@ -3810,15 +3816,10 @@ fn prepare_completed_run_query_inputs(
         return Ok(());
     };
     let resources = portable_paths()?.resources;
-    let phenotype_assets =
-        phenotype::active_query_assets(&resources, runs_directory, requested_id)?;
-    favor::prepare_query_assets_with_gene(
-        &evidence,
-        &catalog,
-        phenotype_assets
-            .as_ref()
-            .map(|(gene_evidence, gene_catalog)| (gene_evidence.as_path(), gene_catalog.as_path())),
-    )
+    let gene_catalog = phenotype::load_current(&resources, runs_directory, requested_id)
+        .ok()
+        .and_then(|profile| phenotype::active_query_catalog(&profile));
+    favor::prepare_query_assets_with_active_gene(&evidence, &catalog, gene_catalog.as_ref())
 }
 
 #[derive(Clone, Serialize)]
@@ -4140,6 +4141,7 @@ fn export_filtered_results_interactive(
     let paths = portable_paths()?;
     let result = completed_run_result(&paths.runs, run_id)?;
     let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
+    let gene_query = phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
     let mut filters = request.filters.clone();
     if request.candidate_only {
         filters.included_allele_ids = Some(
@@ -4172,7 +4174,7 @@ fn export_filtered_results_interactive(
     };
     match request.format.as_str() {
         "rowsCsv" => {
-            let rows = results::export_filtered_rows_with_details_and_labels(
+            let rows = results::export_filtered_rows_with_active_gene_query_and_labels(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
@@ -4180,6 +4182,7 @@ fn export_filtered_results_interactive(
                 &filters,
                 &request.columns,
                 &request.column_labels,
+                gene_query.as_deref(),
             )?;
             Ok(Some(FilteredExportSummary {
                 path: destination,
@@ -4188,22 +4191,25 @@ fn export_filtered_results_interactive(
             }))
         }
         "genesTxt" => {
-            let genes = results::export_filtered_genes_with_details(
+            let genes = results::export_filtered_genes_with_active_gene_query(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 &destination,
                 &filters,
+                gene_query.as_deref(),
             )?;
             let mut count_filters = filters.clone();
             count_filters.exact_total = true;
-            let page_json = results::page_json_with_evidence(
+            let page_json = results::page_json_with_active_gene_query(
+                run_id,
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 0,
                 1,
                 &count_filters,
+                gene_query.as_deref(),
             )?;
             let page: serde_json::Value =
                 serde_json::from_str(&page_json).map_err(|error| error.to_string())?;
