@@ -18,3 +18,4 @@
 - [Validate annotation sources in GitHub Actions](github-actions-source-validation.md)
 - [Result import security](result-import-security.md)
 - [Maintain AnnoCAT's fastVEP build](fastvep-maintenance.md)
+- [Track upstream fastVEP changes](fastvep-upstream-tracking.md)
