@@ -45,7 +45,7 @@ pub fn pinned_builder_provenance() -> super::cache_contract::BuilderProvenance {
     super::cache_contract::BuilderProvenance {
         repository: PIN.repository.clone(),
         commit: PIN.commit.clone(),
-        binary_sha256: PIN.windows_x86_64.sha256.clone(),
+        binary_sha256: pinned_sha256().to_owned(),
     }
 }
 
