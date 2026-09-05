@@ -191,12 +191,12 @@ jobs:
             fixtures/fastvep/ensembl-115-gff-gff-contract.json)
           for corpus in legacy boundary clinvar-reviewed; do
             docker run --rm \
-              --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp -e VEP_DATABASE=0 \
               -v "$work:/data" "$VEP_IMAGE" vep \
               --input_file "/data/$corpus.vcf" \
               --output_file "/data/vep-gff-$corpus.vcf" \
               --format vcf --vcf --force_overwrite --no_stats \
-              --offline --species homo_sapiens --assembly GRCh38 \
+              --species homo_sapiens --assembly GRCh38 \
               --gff /data/Ensembl \
               --fasta /data/reference.fa \
               --synonyms /data/chr_synonyms.txt \
@@ -407,7 +407,6 @@ jobs:
 
   previous-cache-windows:
     name: Windows candidate and previous-cache compatibility
-    if: ${{ always() }}
     needs: ensembl-vep-115
     runs-on: windows-2022
     timeout-minutes: 240
