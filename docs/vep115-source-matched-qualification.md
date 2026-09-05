@@ -1,10 +1,12 @@
 # Source-matched Ensembl VEP 115.2 qualification
 
-Status: Qualification contract implemented locally. The expanded GitHub
-Actions workflow has not yet been run on GitHub, so no source-matched
-qualification has been awarded.
+Status: Qualification in progress. The first source-matched GitHub Actions run
+completed on 2026-09-05 and failed closed; no source-matched qualification has
+been awarded. Its evidence identified an indexed-GFF transcript-assembly
+defect and source-adapter differences that are addressed by the next candidate
+run.
 
-Last updated: 2026-09-04
+Last updated: 2026-09-05
 
 ## Purpose
 
@@ -108,7 +110,7 @@ model from the one users receive:
 | Official implementation | Ensembl VEP `release/115.2` container, pinned by image digest |
 | Original transcript source | `Homo_sapiens.GRCh38.115.gff3.gz` |
 | GFF3 SHA-256 | `1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c` |
-| Oracle-prepared annotation | Canonical contigs only, deterministically sorted, bgzipped, and tabix-indexed by the workflow |
+| Oracle-prepared annotation | Canonical contigs only; VEP-parser-compatible aliases for semantically equivalent Ensembl GFF feature types; deterministically sorted, bgzipped, and tabix-indexed by the workflow |
 | Reference | `GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz` |
 | Reference archive SHA-256 | `fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02` |
 | Uncompressed FASTA SHA-256 | `9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7` |
@@ -123,8 +125,15 @@ Chromosome synonyms are supplied explicitly for `1`/`chr1` through
 The workflow must record a content hash of the prepared, uncompressed canonical
 GFF3 records as well as hashes of the compressed GFF3 and index. It also
 records the versions of the sorting, bgzip, tabix, and FASTA-indexing tools.
-This distinguishes semantic source identity from compression bytes that may
-vary between tool builds.
+The source adapter maps Ensembl `ncRNA_gene` to `gene`,
+`unconfirmed_transcript` to `transcript`, and `scRNA` to `ncRNA`. These are
+feature-type aliases only: coordinates, identifiers, parents, and attributes
+remain unchanged. Official VEP 115.2's custom-GFF parser otherwise ignores
+these Ensembl feature types or loses their parent relationship. The production-
+equivalence lane must prove that fastVEP produces identical complete semantic
+output from the prepared and original GFF3 before this adapter is accepted.
+This distinguishes semantic source identity from parser compatibility and from
+compression bytes that may vary between tool builds.
 
 The production-equivalence lane builds one transcript cache from the
 oracle-prepared GFF3 and a second cache through AnnoCAT's exact production path
@@ -383,7 +392,10 @@ enables the VEP options required to emit each applicable field.
 `REF_ALLELE` after minimization, `UPLOADED_ALLELE` before minimization, and
 `HGVS_OFFSET` from VEP's HGVS shifting are exact comparisons when AnnoCAT emits
 them; the input-derived disposition may additionally verify their relationship
-to the submitted VCF. `ENSP` is exact. `CCDS` is source-derived because VEP
+to the submitted VCF. The comparator treats only VEP's empty insertion
+`REF_ALLELE` and fastVEP's `-`, and VEP's `/` versus fastVEP's escaped `&`
+additional `UPLOADED_ALLELE` delimiter, as equivalent representations. It
+still compares every allele character and order. `ENSP` is exact. `CCDS` is source-derived because VEP
 115.2's GFF parser does not project the GFF3 `ccdsid` attribute into its
 internal CCDS field; an independent validator therefore compares every
 fastVEP transcript CCDS value directly with the pinned GFF3.
@@ -415,9 +427,16 @@ The following fields are source-derived only for the stated source reasons:
 - `CCDS`, because the public GFF3 contains `ccdsid` but official VEP 115.2 GFF
   mode does not project it.
 
-`SOURCE` remains exact. The workflow stages the oracle GFF under the basename
-`Ensembl` and invokes fastVEP with the same explicit source label, making the
-invocation-derived values directly comparable.
+`SOURCE` is source-derived. Official VEP emits the mounted GFF filename as this
+value, while fastVEP emits its explicit logical source label. The workflow
+therefore verifies the immutable GFF SHA-256 and source projection instead of
+equating two invocation-specific labels.
+
+`HGVSp` remains exact for the protein stable identifier and `p.` payload. The
+comparator ignores only the protein accession version because official VEP
+115.2's custom-GFF parser assigns translation version 1, whereas the shared
+Ensembl GFF3 provides the actual version retained by fastVEP. A stable-ID or
+protein-HGVS payload difference remains a qualification failure.
 
 `FLAGS` is not excluded from the source-matched lane. If the shared GFF3
 provides `cds_start_NF` or `cds_end_NF`, both implementations must interpret
@@ -725,13 +744,47 @@ same artifact or a rerun of the packaged-binary qualification lane.
     they identify source-matched official VEP as the primary implementation
     oracle and archived REST as the compatibility oracle.
 
+## First source-matched execution
+
+[GitHub Actions run 33942720015](https://github.com/annocat-project/AnnoCAT/actions/runs/33942720015)
+executed official Ensembl VEP 115.2 against fastVEP `0863825` and the pinned
+GFF3, FASTA, options, and three corpora. The run failed release qualification,
+as required, because direct-GFF/cache parity and source-matched comparison did
+not pass. The Windows lane was consequently skipped.
+
+The run established all of the following:
+
+- input validation, immutable downloads, official VEP execution, supplementary
+  synthetic cache parity, GFF field projection, and production-source
+  equivalence completed successfully;
+- the full-cache and production-cache annotation paths were semantically
+  identical, but the regional indexed-GFF path assembled some transcripts from
+  only the tabix chunk near the queried variant. For example, CTNND2
+  `ENST00000356264` was reported as exon `7/10` by the incomplete direct path,
+  while the full cache and official VEP correctly reported `7/22`;
+- official VEP's custom-GFF parser omitted many valid noncoding transcripts
+  because its recognized feature list does not include several feature types
+  used by the Ensembl 115 GFF3. Those annotations are retained in AnnoCAT; the
+  oracle input now uses the narrowly defined feature-type aliases above; and
+- `SOURCE`, synthetic GFF protein versions, empty insertion reference alleles,
+  and multiallelic delimiter escaping were representation differences rather
+  than biological annotation differences. The field contract now handles only
+  those exact cases and keeps all semantic values fail-closed.
+
+The next candidate makes indexed parsing a two-stage operation: discover the
+overlapping transcript IDs, fetch each complete transcript span, assemble the
+complete records, and retain only the originally selected transcripts. This
+does not change the transcript-cache schema or the VCF output schema. A new
+official run is required to verify the correction and enumerate the remaining
+algorithmic differences; this document does not predict that result.
+
 ## Current implementation status
 
-As of 2026-09-04:
+As of 2026-09-05:
 
 - the local fastVEP branch is named `codex/vep115-concordance`;
-- the reviewed consequence and HGVS corrections are committed locally as
-  fastVEP `0863825`; the branch has not been pushed or pinned by AnnoCAT;
+- the reviewed consequence and HGVS corrections are committed and pushed as
+  fastVEP `0863825`; AnnoCAT has not pinned that candidate;
 - the expanded Annotation concordance workflow, three compact frozen VCF
   inputs, their generators and manifests, and the verification helpers are
   implemented locally;
@@ -773,11 +826,14 @@ As of 2026-09-04:
 - third-party Actions are pinned to immutable commits and ordinary evidence is
   retained for 90 days; the durable compact release evidence record is not yet
   published;
-- the expanded workflow has not been pushed or run on GitHub;
+- the expanded workflow is pushed and its first source-matched run failed
+  closed as described above;
 - the supplementary-source workflow currently proves synthetic OSA1/OSA2 and
   AnnoCAT projection parity; independently pinned real-source subsets are not
   yet implemented;
-- no source-matched official VEP results exist yet; and
+- complete source-matched official VEP results from run `33942720015` are
+  retained in its GitHub artifact and in the local analysis directory
+  `target/annotation-concordance-33942720015`; and
 - no AnnoCAT pin, packaged executable, or release has changed.
 
 ## Scientific and technical references

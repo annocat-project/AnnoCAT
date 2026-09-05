@@ -126,6 +126,11 @@ REST_FIELDS = (
     "ENSP",
 )
 ALL_FIELDS = PRODUCTION_FIELDS
+NORMALIZERS = {
+    "empty-allele-dash",
+    "hgvsp-gff-protein-version",
+    "uploaded-allele-delimiter",
+}
 
 
 def sha256(path):
@@ -172,7 +177,18 @@ def parse_input_vcf(path):
     return records, samples
 
 
-def parse_vcf(path, fields=FIELDS):
+def normalize_field(value, normalizer):
+    if normalizer == "empty-allele-dash":
+        return "" if value == "-" else value
+    if normalizer == "hgvsp-gff-protein-version":
+        return re.sub(r"^([^:]+?)\.\d+(:p\.)", r"\1\2", value)
+    if normalizer == "uploaded-allele-delimiter":
+        return value.replace("&", "/")
+    raise ValueError(f"unsupported field normalizer {normalizer!r}")
+
+
+def parse_vcf(path, fields=FIELDS, normalizers=None):
+    normalizers = normalizers or {}
     csq_fields = None
     variants = Counter()
     annotations = Counter()
@@ -218,6 +234,9 @@ def parse_vcf(path, fields=FIELDS):
                         f"header declares {len(csq_fields)}"
                     )
                 row = dict(zip(csq_fields, values))
+                for field, normalizer in normalizers.items():
+                    if field in row:
+                        row[field] = normalize_field(row[field], normalizer)
                 annotations[(key, tuple(row.get(field, "") for field in fields))] += 1
     if csq_fields is None:
         raise ValueError(f"{path}: CSQ header is missing")
@@ -341,6 +360,7 @@ def load_contract(path, default_fields):
             "candidateFields": set(default_fields),
             "oracleFields": set(default_fields),
             "candidateEmptyFields": set(),
+            "normalizers": {},
             "allowedExtras": {},
             "report": None,
         }
@@ -363,6 +383,7 @@ def load_contract(path, default_fields):
         candidate_fields = set(fields)
         oracle_fields = set(fields)
         empty_fields = set()
+        normalizers = {}
     elif schema == 2:
         entries = document.get("fields")
         if not isinstance(entries, list) or not entries:
@@ -370,6 +391,7 @@ def load_contract(path, default_fields):
         names = []
         dispositions = {}
         empty_fields = set()
+        normalizers = {}
         for item in entries:
             name = item.get("name", "") if isinstance(item, dict) else ""
             disposition = item.get("disposition", "") if isinstance(item, dict) else ""
@@ -381,6 +403,16 @@ def load_contract(path, default_fields):
                 raise ValueError(f"{path}: {name!r} requires a disposition reason")
             if item.get("requireCandidateEmpty"):
                 empty_fields.add(name)
+            normalizer = item.get("normalizer")
+            if normalizer:
+                if normalizer not in NORMALIZERS or disposition not in {
+                    "exact",
+                    "input-derived",
+                }:
+                    raise ValueError(f"{path}: invalid normalizer for {name!r}")
+                if not item.get("reason"):
+                    raise ValueError(f"{path}: normalized field {name!r} requires a reason")
+                normalizers[name] = normalizer
             names.append(name)
             dispositions[name] = disposition
         if tuple(names) != PRODUCTION_FIELDS:
@@ -399,6 +431,7 @@ def load_contract(path, default_fields):
             "sha256": sha256(path),
             "schemaVersion": schema,
             "fieldDispositions": dispositions,
+            "fieldNormalizers": normalizers,
         }
     else:
         raise ValueError(f"{path}: unsupported contract schema")
@@ -410,6 +443,7 @@ def load_contract(path, default_fields):
         "candidateFields": candidate_fields,
         "oracleFields": oracle_fields,
         "candidateEmptyFields": empty_fields,
+        "normalizers": normalizers,
         "allowedExtras": allowed,
         "report": report,
     }
@@ -579,7 +613,7 @@ def compare(candidate, oracle, oracle_format="auto", contract=None, input_path=N
         candidate_fields,
         candidate_records,
         candidate_samples,
-    ) = parse_vcf(candidate, fields)
+    ) = parse_vcf(candidate, fields, contract_data["normalizers"])
     if oracle_format == "rest-json":
         oracle_variants, oracle_annotations = parse_rest(oracle, fields)
         oracle_fields = set(fields)
@@ -592,7 +626,7 @@ def compare(candidate, oracle, oracle_format="auto", contract=None, input_path=N
             oracle_fields,
             oracle_records,
             oracle_samples,
-        ) = parse_vcf(oracle, fields)
+        ) = parse_vcf(oracle, fields, contract_data["normalizers"])
     candidate_annotations, applied_extras, unused_extras = apply_allowed_extras(
         candidate_annotations,
         oracle_annotations,
@@ -866,6 +900,53 @@ def self_test():
         left.write_text(text, encoding="utf-8")
         right.write_text(text, encoding="utf-8")
         assert compare(left, right, contract=v2_contract)["passed"]
+
+        normalized_contract = json.loads(v2_contract.read_text(encoding="utf-8"))
+        normalizers = {
+            "HGVSp": "hgvsp-gff-protein-version",
+            "REF_ALLELE": "empty-allele-dash",
+            "UPLOADED_ALLELE": "uploaded-allele-delimiter",
+        }
+        for field in normalized_contract["fields"]:
+            if field["name"] in normalizers:
+                field["normalizer"] = normalizers[field["name"]]
+                field["reason"] = "equivalent source-specific serialization"
+        v2_contract.write_text(json.dumps(normalized_contract), encoding="utf-8")
+        candidate_values = values.copy()
+        candidate_values.update(
+            HGVSp="ENSP00000001.8:p.Arg1Gly",
+            REF_ALLELE="-",
+            UPLOADED_ALLELE="A/G&T",
+        )
+        oracle_values = values.copy()
+        oracle_values.update(
+            HGVSp="ENSP00000001.1:p.Arg1Gly",
+            REF_ALLELE="",
+            UPLOADED_ALLELE="A/G/T",
+        )
+        left.write_text(
+            header
+            + "1\t10\t.\tA\tG\t.\tPASS\tCSQ="
+            + "|".join(candidate_values[field] for field in ALL_FIELDS)
+            + "\n",
+            encoding="utf-8",
+        )
+        right.write_text(
+            header
+            + "1\t10\t.\tA\tG\t.\tPASS\tCSQ="
+            + "|".join(oracle_values[field] for field in ALL_FIELDS)
+            + "\n",
+            encoding="utf-8",
+        )
+        assert compare(left, right, contract=v2_contract)["passed"]
+        right.write_text(
+            right.read_text(encoding="utf-8").replace("p.Arg1Gly", "p.Arg1Val"),
+            encoding="utf-8",
+        )
+        assert not compare(left, right, contract=v2_contract)["passed"]
+
+        left.write_text(text, encoding="utf-8")
+        right.write_text(text, encoding="utf-8")
         populated = values.copy()
         populated["Existing_variation"] = "rs1"
         populated_row = "|".join(populated[field] for field in ALL_FIELDS)

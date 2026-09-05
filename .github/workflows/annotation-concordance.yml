@@ -118,7 +118,13 @@ jobs:
             | grep '^#' > "$work/annotations.gff3"
           gzip -dc "$downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
             | grep -v '^#' \
-            | awk -F '\t' '($1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 22) || $1 == "X" || $1 == "Y" || $1 == "MT"' \
+            | awk -F '\t' 'BEGIN { OFS = "\t" }
+                (($1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 22) || $1 == "X" || $1 == "Y" || $1 == "MT") {
+                  if ($3 == "ncRNA_gene") $3 = "gene"
+                  else if ($3 == "unconfirmed_transcript") $3 = "transcript"
+                  else if ($3 == "scRNA") $3 = "ncRNA"
+                  print
+                }' \
             | LC_ALL=C sort -t $'\t' -k1,1V -k4,4n -k5,5n \
             > "$work/annotations.records.gff3"
           sha256sum "$work/annotations.records.gff3" \

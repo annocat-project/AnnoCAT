@@ -1,8 +1,9 @@
 # fastVEP and Ensembl VEP 115 correctness work, 2026-09-04
 
-Status: Implemented, locally verified, and committed as fastVEP `0863825` on
-`codex/vep115-concordance`. Not yet pushed, source-matched qualified, pinned in
-AnnoCAT, packaged, or released.
+Status: Implemented, locally verified, committed, and pushed as fastVEP
+`0863825` on `codex/vep115-concordance`. The first source-matched run failed
+closed and produced follow-up corrections; the candidate is not qualified,
+pinned in AnnoCAT, packaged, or released.
 
 This record documents the consequence, coordinate, and HGVS corrections made
 on 2026-09-04. It records what changed, why it changed, what was compared, and
@@ -18,7 +19,7 @@ reviewed exception is approved.
 | fastVEP repository | `tools/fastVEP-concordance` |
 | Branch | `codex/vep115-concordance` |
 | Base commit | `78c870be81762f8cec0a020a76a0515cfdd1449c` |
-| Qualification oracle | Source-matched Ensembl VEP 115.2; GitHub run pending |
+| Qualification oracle | Source-matched Ensembl VEP 115.2; first GitHub run `33942720015` failed closed |
 | Original diagnostic oracle | Ensembl VEP release 115 frozen REST responses |
 | Transcript source | Ensembl release 115 GRCh38 GFF3 |
 | Reference | GRCh38 no-alt analysis-set FASTA |
@@ -31,10 +32,10 @@ pin and distributed binary were not changed.
 
 The follow-up release strategy is specified in
 [Source-matched Ensembl VEP 115.2 qualification](vep115-source-matched-qualification.md).
-The locally implemented workflow makes official VEP 115.2 with the same GFF3
-and FASTA the primary implementation oracle and retains archived REST as a
-separate compatibility diagnostic. It has not yet been run on GitHub, so this
-record does not claim source-matched qualification.
+The workflow makes official VEP 115.2 with the same GFF3 and FASTA the primary
+implementation oracle and retains archived REST as a separate compatibility
+diagnostic. Its first GitHub execution failed qualification and this record
+does not claim source-matched qualification.
 
 ## Problems found
 
@@ -249,8 +250,10 @@ changed as part of the VEP-concordance work.
 
 This working tree is not yet fully VEP-qualified.
 
-1. The source-matched official VEP 115.2 and Windows compatibility jobs have
-   not run on GitHub. Local checks cannot award the qualification.
+1. Source-matched GitHub run `33942720015` found incomplete transcript assembly
+   in the regional indexed-GFF path and source-adapter differences. The
+   working-tree fix fetches each selected transcript's complete span; a new
+   official run and the gated Windows compatibility job remain required.
 2. The exact MANE fields still require oracle review. A proposed serialization
    change was reverted because it altered AnnoCAT's public VCF/JSON contract;
    the committed candidate retains the existing AnnoCAT-compatible output.

@@ -54,10 +54,11 @@ def candidate_projection(path):
                         row.get("MANE", ""),
                         bool(row.get("MANE_SELECT")),
                         bool(row.get("MANE_PLUS_CLINICAL")),
+                        row.get("SOURCE", ""),
                     )
                 ] += 1
                 rows += 1
-    required = {"CCDS", "MANE", "MANE_SELECT", "MANE_PLUS_CLINICAL"}
+    required = {"CCDS", "MANE", "MANE_SELECT", "MANE_PLUS_CLINICAL", "SOURCE"}
     if fields is None or not required.issubset(fields) or rows == 0:
         raise ValueError(f"{path}: transcript GFF field projection is unavailable")
     return observed, rows
@@ -92,13 +93,20 @@ def gff_projection(path, wanted):
     return expected
 
 
-def verify(gff, candidate):
+def verify(gff, candidate, expected_source):
     observed, rows = candidate_projection(candidate)
     features = {item[0] for item in observed}
     expected = gff_projection(gff, features)
     mismatches = []
     for values, count in sorted(observed.items()):
-        feature, ccds, mane, mane_select_present, mane_plus_clinical_present = values
+        (
+            feature,
+            ccds,
+            mane,
+            mane_select_present,
+            mane_plus_clinical_present,
+            source,
+        ) = values
         if feature not in expected:
             mismatches.append(
                 {
@@ -115,15 +123,17 @@ def verify(gff, candidate):
             "MANE": mane,
             "MANE_SELECT_PRESENT": mane_select_present,
             "MANE_PLUS_CLINICAL_PRESENT": mane_plus_clinical_present,
+            "SOURCE": source,
         }
+        expected_values = {**expected[feature], "SOURCE": expected_source}
         for field, value in candidate_values.items():
-            if value != expected[feature][field]:
+            if value != expected_values[field]:
                 mismatches.append(
                     {
                         "feature": feature,
                         "field": field,
                         "candidate": value,
-                        "expected": expected[feature][field],
+                        "expected": expected_values[field],
                         "rows": count,
                     }
                 )
@@ -136,6 +146,7 @@ def verify(gff, candidate):
             "MANE",
             "MANE_SELECT presence",
             "MANE_PLUS_CLINICAL presence",
+            "SOURCE logical label",
         ],
         "unresolvedTranscripts": len(features - expected.keys()),
         "mismatches": mismatches,
@@ -156,21 +167,21 @@ def self_test():
         vcf = root / "test.vcf"
         header = (
             "##fileformat=VCFv4.2\n"
-            '##INFO=<ID=CSQ,Number=.,Type=String,Description="Format: Feature_type|Feature|CCDS|MANE|MANE_SELECT|MANE_PLUS_CLINICAL">\n'
+            '##INFO=<ID=CSQ,Number=.,Type=String,Description="Format: Feature_type|Feature|CCDS|MANE|MANE_SELECT|MANE_PLUS_CLINICAL|SOURCE">\n'
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
         )
         vcf.write_text(
             header
-            + "1\t2\t.\tA\tG\t.\tPASS\tCSQ=Transcript|ENST1|CCDS1.1|MANE_Select|ENST1.1|,Transcript|ENST2||MANE_Plus_Clinical||ENST2.1\n",
+            + "1\t2\t.\tA\tG\t.\tPASS\tCSQ=Transcript|ENST1|CCDS1.1|MANE_Select|ENST1.1||Ensembl,Transcript|ENST2||MANE_Plus_Clinical||ENST2.1|Ensembl\n",
             encoding="utf-8",
         )
-        assert verify(gff, vcf)["passed"]
+        assert verify(gff, vcf, "Ensembl")["passed"]
         vcf.write_text(
             header
-            + "1\t2\t.\tA\tG\t.\tPASS\tCSQ=Transcript|ENST1|CCDS1.1|MANE_Plus_Clinical|ENST1.1|\n",
+            + "1\t2\t.\tA\tG\t.\tPASS\tCSQ=Transcript|ENST1|CCDS1.1|MANE_Plus_Clinical|ENST1.1||Wrong\n",
             encoding="utf-8",
         )
-        assert not verify(gff, vcf)["passed"]
+        assert not verify(gff, vcf, "Ensembl")["passed"]
     print("VEP GFF projection validator self-test passed")
 
 
@@ -179,6 +190,7 @@ def main():
     parser.add_argument("candidate", nargs="*", type=Path)
     parser.add_argument("--gff", type=Path)
     parser.add_argument("--json", type=Path)
+    parser.add_argument("--expected-source", default="Ensembl")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -186,7 +198,7 @@ def main():
         return
     if not args.candidate or args.gff is None or args.json is None:
         parser.error("candidate VCF files, --gff, and --json are required")
-    reports = [verify(args.gff, path) for path in args.candidate]
+    reports = [verify(args.gff, path, args.expected_source) for path in args.candidate]
     report = {"schemaVersion": 1, "gff": str(args.gff), "outputs": reports}
     report["passed"] = all(item["passed"] for item in reports)
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
