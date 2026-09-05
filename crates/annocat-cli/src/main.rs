@@ -1340,8 +1340,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             }
             let search_query = query_parameter(query, "q").transpose()?.unwrap_or_default();
             let limit = query_parameter_u64(query, "limit").unwrap_or(20) as usize;
+            let include_polygenic = query_parameter_bool(query, "includePolygenic")?;
             let run_id = query_parameter(query, "runId").transpose()?;
-            let mut terms = match phenotype::search_terms(&paths.resources, &search_query, limit) {
+            let mut terms = match phenotype::search_terms(
+                &paths.resources,
+                &search_query,
+                limit,
+                include_polygenic,
+            ) {
                 Ok(terms) => terms,
                 Err(_) if run_id.is_some() => Vec::new(),
                 Err(error) => return Err(error),
@@ -2331,6 +2337,17 @@ fn query_parameter(query: &str, name: &str) -> Option<Result<String, String>> {
         let (key, value) = pair.split_once('=')?;
         (key == name).then(|| percent_decode(value))
     })
+}
+
+fn query_parameter_bool(query: &str, name: &str) -> Result<bool, String> {
+    let Some(value) = query_parameter(query, name).transpose()? else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("{name} must be true or false")),
+    }
 }
 
 fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
@@ -4504,6 +4521,33 @@ fn pick_result_file() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod profile_status_tests {
     use super::*;
+
+    #[test]
+    fn boolean_query_parameters_are_strict_and_default_off() {
+        assert!(!query_parameter_bool("q=seizure", "includePolygenic").unwrap());
+        for value in ["true", "TRUE", "1"] {
+            assert!(
+                query_parameter_bool(
+                    &format!("q=seizure&includePolygenic={value}"),
+                    "includePolygenic"
+                )
+                .unwrap()
+            );
+        }
+        for value in ["false", "FALSE", "0"] {
+            assert!(
+                !query_parameter_bool(
+                    &format!("q=seizure&includePolygenic={value}"),
+                    "includePolygenic"
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            query_parameter_bool("includePolygenic=yes", "includePolygenic").unwrap_err(),
+            "includePolygenic must be true or false"
+        );
+    }
 
     fn web_app_source() -> String {
         [

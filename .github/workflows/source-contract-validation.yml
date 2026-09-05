@@ -8,12 +8,17 @@ on:
       - ".github/workflows/source-contract-validation.yml"
       - "config/**"
       - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/gene_identity.rs"
       - "crates/annocat-cli/src/mondo.rs"
       - "crates/annocat-cli/src/phenotype.rs"
+      - "crates/annocat-cli/src/phenotype_patient_validation.rs"
+      - "crates/annocat-cli/src/reactome.rs"
       - "crates/annocat-cli/src/results.rs"
       - "crates/annocat-core/src/source_catalog.rs"
       - "fixtures/source-cache-parity/**"
       - "scripts/verify-configured-urls.py"
+      - "scripts/verify-fastvep-distance-default.py"
+      - "scripts/verify-phenotype-known-cases.ps1"
       - "scripts/verify-supplementary-cache-parity.py"
   push:
     branches:
@@ -22,12 +27,17 @@ on:
       - ".github/workflows/source-contract-validation.yml"
       - "config/**"
       - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/gene_identity.rs"
       - "crates/annocat-cli/src/mondo.rs"
       - "crates/annocat-cli/src/phenotype.rs"
+      - "crates/annocat-cli/src/phenotype_patient_validation.rs"
+      - "crates/annocat-cli/src/reactome.rs"
       - "crates/annocat-cli/src/results.rs"
       - "crates/annocat-core/src/source_catalog.rs"
       - "fixtures/source-cache-parity/**"
       - "scripts/verify-configured-urls.py"
+      - "scripts/verify-fastvep-distance-default.py"
+      - "scripts/verify-phenotype-known-cases.ps1"
       - "scripts/verify-supplementary-cache-parity.py"
 
 permissions:
@@ -57,7 +67,7 @@ jobs:
 
   fastvep:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Linux build dependencies
@@ -84,6 +94,10 @@ jobs:
             tail -n 1)
           test -n "$test_binary"
           cp "$test_binary" "$RUNNER_TEMP/binary/annocat-source-contract-tests"
+      - name: Validate implicit fastVEP 5 kb distance boundary
+        run: >-
+          python scripts/verify-fastvep-distance-default.py
+          --fastvep "$RUNNER_TEMP/binary/fastvep"
       - name: Validate official rolling source resolvers
         run: |
           test_binary="$RUNNER_TEMP/binary/annocat-source-contract-tests"
@@ -92,6 +106,26 @@ jobs:
             awk -v expected="$test_name: test" '$0 == expected { count++ } END { print count + 0 }')
           test "$matches" -eq 1
           "$test_binary" --ignored --exact "$test_name" --test-threads=1
+      - name: Validate HPO, MONDO, HGNC, Reactome, and frozen known cases
+        shell: pwsh
+        env:
+          PATIENT_VALIDATION_MODE: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch') && 'full' || 'manifest' }}
+        run: |
+          ./scripts/verify-phenotype-known-cases.ps1 `
+            -TestBinary "$env:RUNNER_TEMP/binary/annocat-source-contract-tests" `
+            -PatientValidation "$env:PATIENT_VALIDATION_MODE" `
+            -ReportPath "$env:RUNNER_TEMP/phenotype-patient-validation.json" `
+            -GeneRanksPath "$env:RUNNER_TEMP/phenotype-gene-ranks.tsv"
+      - name: Upload phenotype patient validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phenotype-patient-validation
+          path: |
+            ${{ runner.temp }}/phenotype-patient-validation.json
+            ${{ runner.temp }}/phenotype-gene-ranks.tsv
+          if-no-files-found: warn
+          retention-days: 90
       - uses: actions/upload-artifact@v4
         with:
           name: source-contract-binaries

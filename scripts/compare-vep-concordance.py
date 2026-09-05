@@ -321,6 +321,35 @@ def field_mismatches(candidate, oracle, fields):
     }
 
 
+def identity_differences(candidate, oracle, fields):
+    indexes = tuple(fields.index(field) for field in ("Allele", "Feature_type", "Feature"))
+
+    def indexed(rows):
+        result = Counter()
+        for (key, values), count in rows.items():
+            result[(key, *(values[index] for index in indexes))] += count
+        return result
+
+    def rendered(identities, rows):
+        return [
+            {
+                "variant": list(identity[0]),
+                "allele": identity[1],
+                "featureType": identity[2],
+                "feature": identity[3],
+                "rows": rows[identity],
+            }
+            for identity in sorted(identities)
+        ]
+
+    candidate_rows = indexed(candidate)
+    oracle_rows = indexed(oracle)
+    return {
+        "missing": rendered(oracle_rows.keys() - candidate_rows.keys(), oracle_rows),
+        "extra": rendered(candidate_rows.keys() - oracle_rows.keys(), candidate_rows),
+    }
+
+
 def compare(candidate, oracle, oracle_format="auto", contract=None):
     if oracle_format == "auto":
         oracle_format = "rest-json" if oracle.suffix.lower() == ".json" else "vcf"
@@ -354,7 +383,7 @@ def compare(candidate, oracle, oracle_format="auto", contract=None):
         )
     ) and bool(candidate_variants and candidate_annotations)
     report = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "oracleFormat": oracle_format,
         "candidate": {"path": str(candidate), "sha256": sha256(candidate)},
         "oracle": {"path": str(oracle), "sha256": sha256(oracle)},
@@ -376,6 +405,9 @@ def compare(candidate, oracle, oracle_format="auto", contract=None):
         "missingAnnotationExamples": examples(missing_annotations, fields),
         "extraAnnotationExamples": examples(extra_annotations, fields),
         "identityComparison": field_mismatches(
+            candidate_annotations, oracle_annotations, fields
+        ),
+        "identityDifferences": identity_differences(
             candidate_annotations, oracle_annotations, fields
         ),
         "passed": passed,
@@ -419,6 +451,7 @@ def self_test():
         assert not failed["passed"]
         assert failed["annotationRows"]["missing"] == 1
         assert failed["annotationRows"]["extra"] == 1
+        assert failed["identityDifferences"] == {"missing": [], "extra": []}
 
         rest = Path(directory) / "oracle.json"
         rest.write_text(
@@ -467,9 +500,12 @@ def self_test():
         extra_values["Feature"] = "ENST2"
         extra_row = "|".join(extra_values[field] for field in ALL_FIELDS)
         left.write_text(text.rstrip() + f",{extra_row}\n", encoding="utf-8")
+        uncontracted = compare(left, rest)
+        assert uncontracted["identityDifferences"]["extra"][0]["feature"] == "ENST2"
         contracted = compare(left, rest, contract=contract)
         assert contracted["passed"]
         assert contracted["contract"]["appliedExtraRows"] == 1
+        assert contracted["identityDifferences"] == {"missing": [], "extra": []}
         contract_document = json.loads(contract.read_text(encoding="utf-8"))
         contract_document["allowedExtraIdentities"][0]["feature"] = "ENST3"
         contract.write_text(json.dumps(contract_document), encoding="utf-8")

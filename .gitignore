@@ -20,7 +20,9 @@ __pycache__/
 /.tmp/
 /tools/
 /dist/
+/dist-test/
 /dist-portability/
+/.impeccable/
 /.pnpm-store/
 /web/assets/annocat-logo-concept*.png
 /resources/*
@@ -35,7 +37,10 @@ __pycache__/
 !/config/dbnsfp-4.9a-curated-fields.json
 !/config/evidence-calibrations.json
 !/config/hpo-assets.json
+!/config/phenotype-validation-assets.json
+!/config/phenotype-patient-validation.json
 !/config/mondo-assets.json
+!/config/reactome-validation-assets.json
 !/config/wgs-streams.json
 !/config/source-catalog.json
 !/config/source-overrides.example.json

@@ -14,7 +14,7 @@ the authoritative source for the fastVEP commit included in an AnnoCAT build.
 | AnnoCAT fork | [annocat-project/fastVEP](https://github.com/annocat-project/fastVEP) |
 | Current AnnoCAT pin | `78c870be81762f8cec0a020a76a0515cfdd1449c` |
 | Latest upstream revision reviewed | [`8c6b179`](https://github.com/Huang-lab/fastVEP/commit/8c6b179f196a6dbfd60eb3773c1d7d69950db355) |
-| Review date | 2026-09-03 |
+| Review date | 2026-09-04 |
 
 Every upstream commit through the baseline is inherited. The tables below cover
 every later upstream commit through the reviewed revision.
@@ -118,13 +118,20 @@ not change. Existing results remain readable and are not rewritten in place.
 
 ## Validation before changing the pin
 
-The candidate at `78c870b` passed the complete fastVEP workspace suite, exact
-comparison with archived Ensembl VEP 115 over 197 public variants and 3,417
-consequence identities, direct-GFF versus transcript-cache byte parity, all
-eight managed supplementary-source parity contracts, and AnnoCAT result
-projection. An interleaved 103,800-record regression benchmark was 27% faster
-than `a3fa8d8`, with identical output size. A packaged WGS smoke run remains a
-release gate rather than a code-port gate.
+The committed candidate at `78c870b` passed the complete fastVEP workspace
+suite, exact comparison with archived Ensembl VEP 115 over 197 public variants
+and 3,417 consequence identities, direct-GFF versus transcript-cache byte
+parity, all eight managed supplementary-source parity contracts, and AnnoCAT
+result projection. An interleaved 103,800-record regression benchmark was 27%
+faster than `a3fa8d8`, with identical output size.
+
+The uncommitted 2026-09-04 correctness work based on `78c870b` also reduced all
+non-`FLAGS` field-value mismatches to zero on the shared identities in the
+1,262-record boundary and 400-record reviewed-ClinVar corpora. It is not yet a
+pin candidate because `FLAGS`, candidate-only REST identities, direct-GFF
+parity, and the packaged release gates remain. See
+[fastVEP and Ensembl VEP 115 correctness work, 2026-09-04](fastvep-vep115-correctness-2026-09-04.md)
+for the exact changes, counts, artifacts, and remaining limitations.
 
 The integration is complete only after all of these checks pass:
 

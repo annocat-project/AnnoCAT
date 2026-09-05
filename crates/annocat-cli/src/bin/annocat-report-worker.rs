@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[path = "../report_import.rs"]
 mod report_import;
 

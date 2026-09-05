@@ -51,14 +51,32 @@ These changes must preserve the declared source field, allele, gene,
 transcript, and missing-value contracts. A cache that can be opened is not
 necessarily semantically compatible.
 
+## VEP compatibility policy
+
+[Annotation validation](annotation-validation.md) defines the normative
+qualification process. Ensembl VEP 115, run with the pinned assembly,
+reference, transcript release, input representation, and options, is the
+primary compatibility reference for fastVEP-generated annotations. Agreement
+with an upstream fastVEP revision does not by itself qualify an AnnoCAT build.
+
+Every VEP 115 field difference must be fixed or covered by an exact, reviewed
+compatibility-contract entry. Independent HGVS or sequence analysis is
+diagnostic and may justify a deliberately accepted VEP divergence, but it does
+not silently replace VEP 115 as the release target. Aggregate agreement
+percentages and broad suppressions are not release criteria.
+
+The detailed local correction and verification record for the expanded
+boundary and reviewed-ClinVar corpora is
+[fastVEP and Ensembl VEP 115 correctness work, 2026-09-04](fastvep-vep115-correctness-2026-09-04.md).
+
 ## Update procedure
 
 1. Select and record the new upstream base.
 2. Reapply or replace each maintained change without rewriting released
    history.
 3. Run the locked fastVEP workspace tests.
-4. Run AnnoCAT unit, integration, source-parity, and consequence-concordance
-   tests.
+4. Run AnnoCAT unit, integration, source-parity, and the complete VEP 115
+   compatibility qualification described in `docs/annotation-validation.md`.
 5. Build the Windows artifact and record its SHA-256 and size.
 6. Update every identity and ordered change in `config/fastvep-pin.json`.
 7. Run the packaged end-to-end annotation gate before changing the release

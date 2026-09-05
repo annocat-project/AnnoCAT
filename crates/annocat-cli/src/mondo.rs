@@ -349,6 +349,11 @@ fn load(path: &Path) -> Result<MondoKnowledge, String> {
     build_knowledge(graph)
 }
 
+#[cfg(test)]
+pub(crate) fn load_fixture(path: &Path) -> Result<MondoKnowledge, String> {
+    load(path)
+}
+
 fn build_knowledge(graph: MondoGraph) -> Result<MondoKnowledge, String> {
     let mondo_nodes = graph
         .nodes
@@ -693,6 +698,54 @@ impl MondoKnowledge {
             })
             .collect()
     }
+
+    pub(crate) fn condition_ancestor_indices(&self, disease_id: &str) -> Vec<usize> {
+        let Some(&disease_index) = self
+            .exact_external_index
+            .get(&normalize_query(disease_id))
+            .or_else(|| self.term_index.get(disease_id))
+        else {
+            return Vec::new();
+        };
+        let mut disease_index = disease_index;
+        let mut visited = HashSet::new();
+        while self.terms[disease_index].deprecated {
+            if !visited.insert(disease_index) {
+                return Vec::new();
+            }
+            let Some(replacement) = self.terms[disease_index].replacement else {
+                return Vec::new();
+            };
+            disease_index = replacement;
+        }
+        if self.active_terms.binary_search(&disease_index).is_err() {
+            return Vec::new();
+        }
+        self.terms[disease_index]
+            .ancestors
+            .iter()
+            .filter(|index| self.active_terms.binary_search(index).is_ok())
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn term_index(&self, id: &str) -> Option<usize> {
+        self.term_index.get(id).copied()
+    }
+
+    pub(crate) fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn term_id(&self, index: usize) -> &str {
+        &self.terms[index].id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_term_indices(&self) -> &[usize] {
+        &self.active_terms
+    }
 }
 
 fn canonical_mondo_id(value: &str) -> Option<String> {
@@ -743,6 +796,44 @@ fn normalize_query(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Debug)]
+    struct OracleNode {
+        label: String,
+        deprecated: bool,
+        replacement: Option<String>,
+        exact_external_ids: BTreeSet<String>,
+    }
+
+    fn oracle_mondo_id(value: &str) -> Option<String> {
+        let digits = value
+            .strip_prefix("http://purl.obolibrary.org/obo/MONDO_")
+            .or_else(|| value.strip_prefix("MONDO:"))?;
+        (digits.len() == 7 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| format!("MONDO:{digits}"))
+    }
+
+    fn oracle_external_id(value: &str) -> Option<String> {
+        for (prefix, namespace) in [
+            ("https://omim.org/entry/", "omim:"),
+            ("http://omim.org/entry/", "omim:"),
+            ("https://omim.org/phenotypicSeries/PS", "omimps:"),
+            ("http://omim.org/phenotypicSeries/PS", "omimps:"),
+            ("http://www.orpha.net/ORDO/Orphanet_", "orpha:"),
+            ("https://www.orpha.net/ORDO/Orphanet_", "orpha:"),
+            ("https://www.deciphergenomics.org/syndrome/", "decipher:"),
+            ("http://www.deciphergenomics.org/syndrome/", "decipher:"),
+            ("http://purl.obolibrary.org/obo/OMIM_", "omim:"),
+        ] {
+            if let Some(identifier) = value.strip_prefix(prefix)
+                && !identifier.is_empty()
+            {
+                return Some(format!("{namespace}{identifier}").to_ascii_lowercase());
+            }
+        }
+        None
+    }
 
     #[test]
     fn bootstrap_manifest_is_verified() {
@@ -843,6 +934,13 @@ mod tests {
             knowledge.disease_matches(&selected, "MONDO:0000003")[0].matched_id,
             "MONDO:0000002"
         );
+        let ancestor_ids = knowledge
+            .condition_ancestor_indices("ORPHA:42")
+            .into_iter()
+            .map(|index| knowledge.terms[index].id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ancestor_ids.contains(&"MONDO:0000001"));
+        assert!(ancestor_ids.contains(&"MONDO:0000002"));
         assert_eq!(knowledge.subtype_count("MONDO:0000001"), Some(1));
         assert!(
             knowledge
@@ -880,6 +978,183 @@ mod tests {
                 .search("migraine", 10)
                 .iter()
                 .any(|item| item.label.to_ascii_lowercase().contains("migraine"))
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_MONDO_FIXTURE to an official mondo.json release"]
+    fn official_mondo_graph_matches_independent_mapping_oracle() {
+        fn ancestors(
+            id: &str,
+            parents: &BTreeMap<String, BTreeSet<String>>,
+            memo: &mut BTreeMap<String, BTreeSet<String>>,
+            visiting: &mut BTreeSet<String>,
+        ) -> BTreeSet<String> {
+            if let Some(known) = memo.get(id) {
+                return known.clone();
+            }
+            assert!(visiting.insert(id.to_owned()), "MONDO parent cycle at {id}");
+            let mut result = BTreeSet::from([id.to_owned()]);
+            for parent in parents.get(id).into_iter().flatten() {
+                result.extend(ancestors(parent, parents, memo, visiting));
+            }
+            visiting.remove(id);
+            memo.insert(id.to_owned(), result.clone());
+            result
+        }
+
+        let path = PathBuf::from(std::env::var("ANNOCAT_MONDO_FIXTURE").unwrap());
+        let production = load(&path).unwrap();
+        let document: MondoDocument =
+            serde_json::from_reader(BufReader::new(File::open(&path).unwrap())).unwrap();
+        let graph = document
+            .graphs
+            .into_iter()
+            .find(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .any(|node| oracle_mondo_id(&node.id).is_some())
+            })
+            .unwrap();
+        let mut nodes = BTreeMap::<String, OracleNode>::new();
+        for node in graph.nodes {
+            let Some(id) = oracle_mondo_id(&node.id) else {
+                continue;
+            };
+            let mut replacement = None;
+            let mut exact_external_ids = BTreeSet::new();
+            for property in node.meta.basic_property_values {
+                if property.pred == "http://purl.obolibrary.org/obo/IAO_0100001" {
+                    replacement = oracle_mondo_id(&property.val);
+                } else if property.pred == "http://www.w3.org/2004/02/skos/core#exactMatch"
+                    && let Some(external) = oracle_external_id(&property.val)
+                {
+                    exact_external_ids.insert(external);
+                }
+            }
+            assert!(
+                nodes
+                    .insert(
+                        id,
+                        OracleNode {
+                            label: node.lbl,
+                            deprecated: node.meta.deprecated,
+                            replacement,
+                            exact_external_ids,
+                        },
+                    )
+                    .is_none(),
+                "MONDO source repeats a condition identifier"
+            );
+        }
+        let mut parents = BTreeMap::<String, BTreeSet<String>>::new();
+        for edge in graph.edges {
+            if edge.pred != "is_a" {
+                continue;
+            }
+            if let (Some(child), Some(parent)) =
+                (oracle_mondo_id(&edge.sub), oracle_mondo_id(&edge.obj))
+                && nodes.contains_key(&child)
+                && nodes.contains_key(&parent)
+            {
+                parents.entry(child).or_default().insert(parent);
+            }
+        }
+        let mut memo = BTreeMap::new();
+        for id in nodes.keys() {
+            ancestors(id, &parents, &mut memo, &mut BTreeSet::new());
+        }
+        let roots = BTreeSet::from(["MONDO:0700096".to_owned(), "MONDO:0042489".to_owned()]);
+        let active = nodes
+            .iter()
+            .filter_map(|(id, node)| {
+                (!node.deprecated
+                    && !node.label.trim().is_empty()
+                    && !roots.contains(id)
+                    && memo[id].iter().any(|ancestor| roots.contains(ancestor)))
+                .then_some(id.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        let production_active = production
+            .active_terms
+            .iter()
+            .map(|index| production.terms[*index].id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(production_active, active);
+
+        let resolve_active = |start: &str| {
+            let mut current = start;
+            let mut visited = BTreeSet::new();
+            loop {
+                if active.contains(current) {
+                    return Some(current.to_owned());
+                }
+                let node = &nodes[current];
+                if !node.deprecated || !visited.insert(current.to_owned()) {
+                    return None;
+                }
+                current = node.replacement.as_deref()?;
+            }
+        };
+        let mut external_candidates = BTreeMap::<String, BTreeSet<String>>::new();
+        for (id, node) in &nodes {
+            let Some(target) = resolve_active(id) else {
+                continue;
+            };
+            for external in &node.exact_external_ids {
+                external_candidates
+                    .entry(external.clone())
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
+        let expected_external = external_candidates
+            .into_iter()
+            .filter_map(|(external, targets)| {
+                (targets.len() == 1).then(|| (external, targets.into_iter().next().unwrap()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let production_external = production
+            .exact_external_index
+            .iter()
+            .map(|(external, index)| (external.clone(), production.terms[*index].id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(production_external, expected_external);
+
+        for id in &active {
+            let expected = memo[id]
+                .iter()
+                .filter(|ancestor| active.contains(*ancestor))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let actual = production
+                .condition_ancestor_indices(id)
+                .into_iter()
+                .map(|index| production.term_id(index).to_owned())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, expected, "MONDO ancestor set differs for {id}");
+        }
+
+        let mut subtype_counts = BTreeMap::<String, usize>::new();
+        for candidate in &active {
+            for ancestor in &memo[candidate] {
+                if ancestor != candidate {
+                    *subtype_counts.entry(ancestor.clone()).or_default() += 1;
+                }
+            }
+        }
+        for id in &active {
+            assert_eq!(
+                production.subtype_count(id),
+                Some(subtype_counts.get(id).copied().unwrap_or_default()),
+                "MONDO subtype count differs for {id}"
+            );
+        }
+        eprintln!(
+            "validated {} active MONDO conditions, {} unambiguous exact external mappings, and all ancestor sets and subtype counts",
+            active.len(),
+            expected_external.len()
         );
     }
 }

@@ -17,8 +17,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 const PROFILE_SCHEMA_VERSION: u16 = 6;
 const ACTIVE_QUERY_CONTRACT_VERSION: &str = "gene-profile-live-v1";
-const GENE_SET_ALGORITHM_VERSION: &str = "hpo-association-query-v5";
+const GENE_SET_ALGORITHM_VERSION: &str = "hpo-association-query-v6";
 const PHENOTYPE_RANKING_ALGORITHM_VERSION: &str = "resnik-query-disease-v1";
+const PHENOTYPE_RANK_RELEASE_QUALIFIED: bool = true;
 const INSTALL_SCHEMA_VERSION: u16 = 1;
 const PHENOTYPIC_ABNORMALITY_ROOT: &str = "HP:0000118";
 const MAX_PROFILE_TERMS: usize = 500;
@@ -38,6 +39,10 @@ pub struct PhenotypeTerm {
     pub label: String,
 }
 
+#[cfg(test)]
+#[path = "phenotype_patient_validation.rs"]
+mod patient_validation;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PhenotypeProfile {
@@ -48,6 +53,10 @@ pub struct PhenotypeProfile {
     pub conditions: Vec<PhenotypeTerm>,
     pub pathways: Vec<PhenotypeTerm>,
     pub genes: Vec<super::gene_identity::ResolvedGene>,
+    #[serde(default)]
+    pub include_polygenic: bool,
+    #[serde(default)]
+    pub include_upstream_downstream: bool,
     pub show_matches_only: bool,
     pub active_generation: Option<PhenotypeGeneration>,
 }
@@ -137,6 +146,10 @@ pub struct ProfileUpdate {
     #[serde(default)]
     pub genes: Vec<super::gene_identity::ResolvedGene>,
     #[serde(default)]
+    pub include_polygenic: bool,
+    #[serde(default)]
+    pub include_upstream_downstream: bool,
+    #[serde(default)]
     pub show_matches_only: bool,
     #[serde(default)]
     pub preview_fingerprint: Option<String>,
@@ -167,6 +180,15 @@ pub struct GenePreviewResponse {
     pub rows: Vec<GenePreviewRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub all_included_genes: Option<Vec<super::gene_identity::ResolvedGene>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene_sections: Option<Vec<GenePreviewSection>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenePreviewSection {
+    pub label: String,
+    pub genes: Vec<super::gene_identity::ResolvedGene>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,6 +542,14 @@ struct HpoKnowledge {
     disease_gene_association_count: usize,
 }
 
+#[derive(Debug)]
+struct AssociationGeneCounts {
+    hpo_mendelian: Vec<u32>,
+    hpo_with_polygenic: Vec<u32>,
+    mondo_mendelian: Vec<u32>,
+    mondo_with_polygenic: Vec<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AssetIntegrityStamp {
     filename: String,
@@ -529,6 +559,11 @@ struct AssetIntegrityStamp {
 
 fn knowledge_cache() -> &'static Mutex<HashMap<PathBuf, Arc<HpoKnowledge>>> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<HpoKnowledge>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn association_count_cache() -> &'static Mutex<HashMap<PathBuf, Arc<AssociationGeneCounts>>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<AssociationGeneCounts>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -843,6 +878,10 @@ pub fn install_hpo(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(resource_root.to_path_buf(), knowledge);
+    association_count_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(resource_root);
     progress(InstallProgress {
         phase: "ready".into(),
         detail: if let Some(hgnc_gene_count) = hgnc_gene_count {
@@ -864,16 +903,154 @@ pub fn install_hpo(
     Ok(ready)
 }
 
+fn association_gene_counts(
+    resources: &Path,
+    knowledge: &HpoKnowledge,
+) -> Result<Arc<AssociationGeneCounts>, String> {
+    let root = release_root(resources)?;
+    if let Some(cached) = association_count_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&root)
+        .cloned()
+    {
+        return Ok(cached);
+    }
+    let identity = super::gene_identity::Resolver::new(resources, &[]);
+    let (hpo_mendelian, hpo_with_polygenic) = hpo_association_gene_counts(knowledge, &identity);
+
+    let (mondo_mendelian, mondo_with_polygenic) = crate::mondo::knowledge(&root)
+        .map(|mondo| mondo_association_gene_counts(knowledge, &identity, &mondo))
+        .unwrap_or_default();
+    let counts = Arc::new(AssociationGeneCounts {
+        hpo_mendelian,
+        hpo_with_polygenic,
+        mondo_mendelian,
+        mondo_with_polygenic,
+    });
+    association_count_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(root, counts.clone());
+    Ok(counts)
+}
+
+fn mondo_association_gene_counts(
+    knowledge: &HpoKnowledge,
+    identity: &super::gene_identity::Resolver,
+    mondo: &crate::mondo::MondoKnowledge,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut by_gene = HashMap::<String, (HashSet<usize>, HashSet<usize>)>::new();
+    for disease in &knowledge.condition_associations {
+        let condition_indices = mondo.condition_ancestor_indices(&disease.id);
+        if condition_indices.is_empty() {
+            continue;
+        }
+        for association in &disease.genes {
+            let polygenic = if association
+                .association_type
+                .eq_ignore_ascii_case("MENDELIAN")
+            {
+                false
+            } else if association
+                .association_type
+                .eq_ignore_ascii_case("POLYGENIC")
+            {
+                true
+            } else {
+                continue;
+            };
+            let Some(gene) = resolved_association_gene(identity, association) else {
+                continue;
+            };
+            let entry = by_gene.entry(gene.comparison_key()).or_default();
+            if polygenic {
+                entry.1.extend(condition_indices.iter().copied());
+            } else {
+                entry.0.extend(condition_indices.iter().copied());
+            }
+        }
+    }
+    let mut mendelian_counts = vec![0_u32; mondo.term_count()];
+    let mut with_polygenic_counts = vec![0_u32; mondo.term_count()];
+    for (mendelian, polygenic) in by_gene.into_values() {
+        for index in &mendelian {
+            mendelian_counts[*index] = mendelian_counts[*index].saturating_add(1);
+            with_polygenic_counts[*index] = with_polygenic_counts[*index].saturating_add(1);
+        }
+        for index in polygenic {
+            if !mendelian.contains(&index) {
+                with_polygenic_counts[index] = with_polygenic_counts[index].saturating_add(1);
+            }
+        }
+    }
+    (mendelian_counts, with_polygenic_counts)
+}
+
+fn hpo_association_gene_counts(
+    knowledge: &HpoKnowledge,
+    identity: &super::gene_identity::Resolver,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut hpo_by_gene = HashMap::<String, (HashSet<usize>, HashSet<usize>)>::new();
+    for disease in &knowledge.diseases {
+        let propagated = disease
+            .positive
+            .iter()
+            .flat_map(|&index| knowledge.terms[index].ancestors.iter().copied())
+            .collect::<HashSet<_>>();
+        for association in &disease.genes {
+            let polygenic = if association
+                .association_type
+                .eq_ignore_ascii_case("MENDELIAN")
+            {
+                false
+            } else if association
+                .association_type
+                .eq_ignore_ascii_case("POLYGENIC")
+            {
+                true
+            } else {
+                continue;
+            };
+            let Some(gene) = resolved_association_gene(identity, association) else {
+                continue;
+            };
+            let entry = hpo_by_gene.entry(gene.comparison_key()).or_default();
+            if polygenic {
+                entry.1.extend(propagated.iter().copied());
+            } else {
+                entry.0.extend(propagated.iter().copied());
+            }
+        }
+    }
+    let mut hpo_mendelian = vec![0_u32; knowledge.terms.len()];
+    let mut hpo_with_polygenic = vec![0_u32; knowledge.terms.len()];
+    for (mendelian, polygenic) in hpo_by_gene.into_values() {
+        for &index in &mendelian {
+            hpo_mendelian[index] = hpo_mendelian[index].saturating_add(1);
+            hpo_with_polygenic[index] = hpo_with_polygenic[index].saturating_add(1);
+        }
+        for index in polygenic {
+            if !mendelian.contains(&index) {
+                hpo_with_polygenic[index] = hpo_with_polygenic[index].saturating_add(1);
+            }
+        }
+    }
+    (hpo_mendelian, hpo_with_polygenic)
+}
+
 pub fn search_terms(
     resources: &Path,
     query: &str,
     limit: usize,
+    include_polygenic: bool,
 ) -> Result<Vec<TermSearchResult>, String> {
     let query = normalize_search(query);
     if query.len() < 2 {
         return Ok(Vec::new());
     }
     let knowledge = knowledge(resources)?;
+    let counts = association_gene_counts(resources, &knowledge)?;
     let mut matches = knowledge
         .active_terms
         .iter()
@@ -917,7 +1094,11 @@ pub fn search_terms(
                     match_kind: match_kind.into(),
                     synonym_scope: None,
                     subtype_count: None,
-                    gene_count: None,
+                    gene_count: Some(if include_polygenic {
+                        counts.hpo_with_polygenic[index] as usize
+                    } else {
+                        counts.hpo_mendelian[index] as usize
+                    }),
                     synonyms: term
                         .synonyms
                         .iter()
@@ -935,6 +1116,17 @@ pub fn search_terms(
         .collect::<Vec<_>>();
     if let Ok(mondo) = crate::mondo::knowledge(&release_root(resources)?) {
         matches.extend(mondo.search(&query, limit).into_iter().map(|item| {
+            let gene_count = mondo
+                .term_index(&item.id)
+                .and_then(|index| {
+                    if include_polygenic {
+                        counts.mondo_with_polygenic.get(index)
+                    } else {
+                        counts.mondo_mendelian.get(index)
+                    }
+                })
+                .copied()
+                .unwrap_or_default() as usize;
             (
                 item.score,
                 item.label.len(),
@@ -946,7 +1138,7 @@ pub fn search_terms(
                     match_kind: item.match_kind,
                     synonym_scope: item.synonym_scope,
                     subtype_count: Some(item.subtype_count),
-                    gene_count: None,
+                    gene_count: Some(gene_count),
                     synonyms: Vec::new(),
                     symbol: None,
                     canonical_gene_id: None,
@@ -1106,6 +1298,8 @@ pub fn empty_profile(run_id: &str) -> PhenotypeProfile {
         conditions: Vec::new(),
         pathways: Vec::new(),
         genes: Vec::new(),
+        include_polygenic: false,
+        include_upstream_downstream: false,
         show_matches_only: false,
         active_generation: None,
     }
@@ -1153,6 +1347,8 @@ fn current_profile_fingerprint(
         &profile.conditions,
         &profile.pathways,
         &profile.genes,
+        profile.include_polygenic,
+        profile.include_upstream_downstream,
         &source_assets,
     ))
 }
@@ -1253,13 +1449,7 @@ pub fn update(
             let hpo = needs_hpo.then(|| knowledge(resources)).transpose()?;
             let observed = hpo
                 .as_ref()
-                .map(|knowledge| {
-                    normalize_terms(
-                        knowledge,
-                        canonical_terms(knowledge, &request.observed, true)?,
-                        true,
-                    )
-                })
+                .map(|knowledge| canonical_terms(knowledge, &request.observed, true))
                 .transpose()?
                 .unwrap_or_default();
             let root = needs_hpo.then(|| release_root(resources)).transpose()?;
@@ -1294,6 +1484,8 @@ pub fn update(
                 && existing.conditions == conditions
                 && existing.pathways == pathways
                 && existing.genes == genes
+                && existing.include_polygenic == request.include_polygenic
+                && existing.include_upstream_downstream == request.include_upstream_downstream
                 && existing.show_matches_only == request.show_matches_only;
             let profile = PhenotypeProfile {
                 schema_version: PROFILE_SCHEMA_VERSION,
@@ -1303,6 +1495,8 @@ pub fn update(
                 conditions,
                 pathways,
                 genes,
+                include_polygenic: request.include_polygenic,
+                include_upstream_downstream: request.include_upstream_downstream,
                 show_matches_only: request.show_matches_only,
                 active_generation: same_profile.then_some(existing.active_generation).flatten(),
             };
@@ -1345,6 +1539,8 @@ pub fn apply(
         &prepared.conditions,
         &prepared.pathways,
         &prepared.genes,
+        request.include_polygenic,
+        request.include_upstream_downstream,
         &prepared.source_assets,
     );
     if request.preview_fingerprint.as_deref() != Some(expected_fingerprint.as_str()) {
@@ -1356,8 +1552,8 @@ pub fn apply(
         .iter()
         .filter(|key| resolved.result_identities.contains(*key))
         .count();
-    require_result_overlap(matched_gene_count)?;
-    let query = build_active_gene_query(parquet, &prepared, expected_fingerprint.clone())?;
+    require_result_overlap(resolved.included.len(), matched_gene_count)?;
+    let query = build_active_gene_query(&prepared, expected_fingerprint.clone())?;
     let profile = PhenotypeProfile {
         schema_version: PROFILE_SCHEMA_VERSION,
         run_id: run_id.to_owned(),
@@ -1366,6 +1562,8 @@ pub fn apply(
         conditions: prepared.conditions,
         pathways: prepared.pathways,
         genes: prepared.genes,
+        include_polygenic: request.include_polygenic,
+        include_upstream_downstream: request.include_upstream_downstream,
         show_matches_only: true,
         active_generation: Some(PhenotypeGeneration {
             fingerprint: expected_fingerprint,
@@ -1382,10 +1580,19 @@ pub fn apply(
     Ok(profile)
 }
 
-fn require_result_overlap(count: usize) -> Result<(), String> {
-    (count > 0)
-        .then_some(())
-        .ok_or_else(|| "No resolved genes have variants in this result.".into())
+fn require_result_overlap(resolved_count: usize, matched_count: usize) -> Result<(), String> {
+    if resolved_count == 0 {
+        return Err(
+            "No associated genes were found for this selection in the installed HPO/MONDO data."
+                .into(),
+        );
+    }
+    (matched_count > 0).then_some(()).ok_or_else(|| {
+        format!(
+            "None of the {resolved_count} associated {} have variants in this result.",
+            if resolved_count == 1 { "gene" } else { "genes" }
+        )
+    })
 }
 
 struct PreparedGeneProfile {
@@ -1397,6 +1604,9 @@ struct PreparedGeneProfile {
     source_assets: Vec<SourceAsset>,
     resolved: ResolvedGeneSet,
     identity: super::gene_identity::Resolver,
+    report_identities: Vec<(String, String)>,
+    include_polygenic: bool,
+    include_upstream_downstream: bool,
 }
 
 fn prepare_gene_profile(
@@ -1408,11 +1618,7 @@ fn prepare_gene_profile(
     let needs_hpo = !request.observed.is_empty() || !request.conditions.is_empty();
     let knowledge = needs_hpo.then(|| knowledge(resources)).transpose()?;
     let observed = if let Some(knowledge) = &knowledge {
-        normalize_terms(
-            knowledge,
-            canonical_terms(knowledge, &request.observed, true)?,
-            true,
-        )?
+        canonical_terms(knowledge, &request.observed, true)?
     } else {
         Vec::new()
     };
@@ -1432,12 +1638,15 @@ fn prepare_gene_profile(
             label: condition.label.clone(),
         })
         .collect::<Vec<_>>();
-    let report_identities = super::results::report_gene_identities(parquet)?;
+    let report_identities = super::results::report_gene_identities_for_scope(
+        parquet,
+        request.include_upstream_downstream,
+    )?;
     let identity = super::gene_identity::Resolver::new(resources, &report_identities);
     let report_genes = report_identities
-        .into_iter()
+        .iter()
         .map(|(gene_symbol, gene_id)| {
-            let gene = identity.canonicalize(&gene_symbol, &gene_id);
+            let gene = identity.canonicalize(gene_symbol, gene_id);
             let gene_id = gene.result_id();
             super::results::ReportGeneOccurrence {
                 allele_id: String::new(),
@@ -1464,7 +1673,8 @@ fn prepare_gene_profile(
     }
     let observed_indexes = knowledge
         .as_ref()
-        .map(|knowledge| term_indexes(knowledge, &observed))
+        .filter(|_| compute_ranking && PHENOTYPE_RANK_RELEASE_QUALIFIED)
+        .map(|knowledge| ranking_term_indexes(knowledge, &observed))
         .transpose()?
         .unwrap_or_default();
     let condition_matches = if let Some(mondo) = &mondo {
@@ -1488,18 +1698,26 @@ fn prepare_gene_profile(
         .as_ref()
         .map(|manifest| manifest.release.clone())
         .unwrap_or_default();
-    let ranking = knowledge.as_ref().filter(|_| compute_ranking).map_or_else(
-        || PhenotypeRanking {
-            hpo_release: String::new(),
-            query_count: 0,
-            disease_profile_count: 0,
-            denominator: 0,
-            genes: BTreeMap::new(),
-        },
-        |knowledge| {
-            build_phenotype_ranking(knowledge, &identity, &observed_indexes, hpo_release.clone())
-        },
-    );
+    let ranking = knowledge
+        .as_ref()
+        .filter(|_| compute_ranking && PHENOTYPE_RANK_RELEASE_QUALIFIED)
+        .map_or_else(
+            || PhenotypeRanking {
+                hpo_release: String::new(),
+                query_count: 0,
+                disease_profile_count: 0,
+                denominator: 0,
+                genes: BTreeMap::new(),
+            },
+            |knowledge| {
+                build_phenotype_ranking(
+                    knowledge,
+                    &identity,
+                    &observed_indexes,
+                    hpo_release.clone(),
+                )
+            },
+        );
     let source_assets = profile_source_assets(
         resources,
         !observed.is_empty(),
@@ -1517,6 +1735,7 @@ fn prepare_gene_profile(
         &genes,
         &condition_matches,
         &ranking,
+        request.include_polygenic,
     )?;
     Ok(PreparedGeneProfile {
         observed,
@@ -1527,7 +1746,88 @@ fn prepare_gene_profile(
         source_assets,
         resolved,
         identity,
+        report_identities,
+        include_polygenic: request.include_polygenic,
+        include_upstream_downstream: request.include_upstream_downstream,
     })
+}
+
+fn preview_section_genes(
+    resolved: &ResolvedGeneSet,
+    predicate: impl Fn(&GenePhenotypeSummary) -> bool,
+) -> Vec<super::gene_identity::ResolvedGene> {
+    let mut genes = resolved
+        .genes
+        .values()
+        .filter(|gene| {
+            resolved.included.contains(&gene.identity.comparison_key()) && predicate(gene)
+        })
+        .map(|gene| gene.identity.clone())
+        .collect::<Vec<_>>();
+    genes.sort_by(|left, right| {
+        left.symbol
+            .cmp(&right.symbol)
+            .then(left.comparison_key().cmp(&right.comparison_key()))
+    });
+    genes
+}
+
+fn preview_gene_sections(prepared: &PreparedGeneProfile) -> Vec<GenePreviewSection> {
+    let mut sections = Vec::new();
+    let association_types = if prepared.include_polygenic {
+        &["MENDELIAN", "POLYGENIC"][..]
+    } else {
+        &["MENDELIAN"][..]
+    };
+    for term in &prepared.observed {
+        for association_type in association_types {
+            sections.push(GenePreviewSection {
+                label: format!("Feature: {} ({}) · {association_type}", term.label, term.id),
+                genes: preview_section_genes(&prepared.resolved, |gene| {
+                    gene.hpo_links.iter().any(|link| {
+                        link.selected_id == term.id
+                            && link.association_type.eq_ignore_ascii_case(association_type)
+                    })
+                }),
+            });
+        }
+    }
+    for term in &prepared.conditions {
+        for association_type in association_types {
+            sections.push(GenePreviewSection {
+                label: format!(
+                    "Condition: {} ({}) · {association_type}",
+                    term.label, term.id
+                ),
+                genes: preview_section_genes(&prepared.resolved, |gene| {
+                    gene.condition_evidence_links.iter().any(|link| {
+                        link.selected_id == term.id
+                            && link.association_type.eq_ignore_ascii_case(association_type)
+                    })
+                }),
+            });
+        }
+    }
+    for term in &prepared.pathways {
+        let selected_key = format!("Pathway:{}", term.id);
+        sections.push(GenePreviewSection {
+            label: format!("Pathway: {} ({})", term.label, term.id),
+            genes: preview_section_genes(&prepared.resolved, |gene| {
+                gene.selected_matches.contains_key(&selected_key)
+            }),
+        });
+    }
+    if !prepared.genes.is_empty() {
+        sections.push(GenePreviewSection {
+            label: "Entered genes".into(),
+            genes: preview_section_genes(&prepared.resolved, |gene| {
+                gene.selected_matches
+                    .keys()
+                    .any(|key| key.starts_with("Gene:"))
+            }),
+        });
+    }
+    sections
 }
 
 pub fn preview(
@@ -1549,6 +1849,8 @@ pub fn preview(
         &prepared.conditions,
         &prepared.pathways,
         &prepared.genes,
+        request.include_polygenic,
+        request.include_upstream_downstream,
         &prepared.source_assets,
     );
     let resolved = &prepared.resolved;
@@ -1578,6 +1880,7 @@ pub fn preview(
         });
         genes
     });
+    let gene_sections = include_all_symbols.then(|| preview_gene_sections(&prepared));
     let query = query.trim().to_ascii_uppercase();
     let mut rows = resolved
         .genes
@@ -1646,6 +1949,7 @@ pub fn preview(
         has_more,
         rows,
         all_included_genes,
+        gene_sections,
     })
 }
 
@@ -1763,6 +2067,7 @@ struct ActiveGeneMatch {
 #[derive(Clone)]
 pub(crate) struct ActiveGeneQuery {
     fingerprint: String,
+    include_upstream_downstream: bool,
     fields: Vec<ActiveGeneField>,
     genes: Vec<ActiveGeneSummary>,
     aliases: Vec<ActiveGeneAlias>,
@@ -2095,6 +2400,11 @@ fn new_gene_summary(
     }
 }
 
+fn eligible_association_type(value: &str, include_polygenic: bool) -> bool {
+    value.eq_ignore_ascii_case("MENDELIAN")
+        || include_polygenic && value.eq_ignore_ascii_case("POLYGENIC")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_gene_set(
     identity: &super::gene_identity::Resolver,
@@ -2106,6 +2416,7 @@ fn resolve_gene_set(
     manual_genes: &[super::gene_identity::ResolvedGene],
     condition_matches: &HashMap<String, Vec<crate::mondo::DiseaseConditionMatch>>,
     ranking: &PhenotypeRanking,
+    include_polygenic: bool,
 ) -> Result<ResolvedGeneSet, String> {
     let result_identities = report_genes
         .iter()
@@ -2137,10 +2448,10 @@ fn resolve_gene_set(
                         continue;
                     };
                     for association in &disease.genes {
-                        if !association
-                            .association_type
-                            .eq_ignore_ascii_case("MENDELIAN")
-                        {
+                        if !eligible_association_type(
+                            &association.association_type,
+                            include_polygenic,
+                        ) {
                             continue;
                         }
                         let Some(resolved) = resolved_association_gene(identity, association)
@@ -2152,21 +2463,35 @@ fn resolve_gene_set(
                             .entry(key)
                             .or_insert_with(|| new_gene_summary(resolved, ranking));
                         summary.observed_feature_linked |= annotated_index == selected_index;
+                        let selected_relation = format!(
+                            "{relation} · {}",
+                            association.association_type.to_ascii_uppercase()
+                        );
                         summary
                             .selected_matches
                             .entry(format!("Feature:{}", selected.id))
                             .and_modify(|current| {
-                                if current.relation != "HPO link via exact disease annotation"
-                                    && relation == "HPO link via exact disease annotation"
+                                let current_exact = current
+                                    .relation
+                                    .starts_with("HPO link via exact disease annotation");
+                                let candidate_exact =
+                                    relation == "HPO link via exact disease annotation";
+                                let current_mendelian = current.relation.ends_with(" · MENDELIAN");
+                                let candidate_mendelian =
+                                    selected_relation.ends_with(" · MENDELIAN");
+                                if (!current_exact && candidate_exact)
+                                    || (current_exact == candidate_exact
+                                        && !current_mendelian
+                                        && candidate_mendelian)
                                 {
-                                    current.relation = relation.into();
+                                    current.relation = selected_relation.clone();
                                 }
                             })
                             .or_insert(GeneSelectedMatch {
                                 id: selected.id.clone(),
                                 label: selected.label.clone(),
                                 item_type: "Feature",
-                                relation: relation.into(),
+                                relation: selected_relation,
                                 order,
                             });
                         let link = HpoAssociationLink {
@@ -2189,6 +2514,7 @@ fn resolve_gene_set(
                             current.selected_id == link.selected_id
                                 && current.annotated_id == link.annotated_id
                                 && current.disease_id == link.disease_id
+                                && current.association_type == link.association_type
                                 && current.association_source == link.association_source
                         }) {
                             summary.hpo_links.push(link);
@@ -2202,13 +2528,8 @@ fn resolve_gene_set(
                 continue;
             };
             for gene_association in &association.genes {
-                if !matches!(
-                    gene_association
-                        .association_type
-                        .to_ascii_uppercase()
-                        .as_str(),
-                    "MENDELIAN" | "POLYGENIC"
-                ) {
+                if !eligible_association_type(&gene_association.association_type, include_polygenic)
+                {
                     continue;
                 }
                 let Some(resolved) = resolved_association_gene(identity, gene_association) else {
@@ -2237,8 +2558,16 @@ fn resolve_gene_set(
                         .condition_links
                         .entry(matched.selected_id.clone())
                         .and_modify(|current| {
-                            if current.relation != "Exact condition"
-                                && candidate.relation == "Exact condition"
+                            let current_exact = current.relation == "Exact condition";
+                            let candidate_exact = candidate.relation == "Exact condition";
+                            let current_mendelian =
+                                current.association_type.eq_ignore_ascii_case("MENDELIAN");
+                            let candidate_mendelian =
+                                candidate.association_type.eq_ignore_ascii_case("MENDELIAN");
+                            if (!current_exact && candidate_exact)
+                                || (current_exact == candidate_exact
+                                    && !current_mendelian
+                                    && candidate_mendelian)
                             {
                                 *current = candidate.clone();
                             }
@@ -2326,6 +2655,8 @@ fn active_query_fingerprint(
     conditions: &[PhenotypeTerm],
     pathways: &[PhenotypeTerm],
     genes: &[super::gene_identity::ResolvedGene],
+    include_polygenic: bool,
+    include_upstream_downstream: bool,
     source_assets: &[SourceAsset],
 ) -> String {
     let value = json!({
@@ -2338,6 +2669,8 @@ fn active_query_fingerprint(
         "conditions": conditions.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
         "pathways": pathways.iter().map(|term| term.id.as_str()).collect::<Vec<_>>(),
         "genes": genes,
+        "includePolygenic": include_polygenic,
+        "includeUpstreamDownstream": include_upstream_downstream,
         "sourceAssets": source_assets,
     });
     format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()))
@@ -2371,7 +2704,6 @@ fn phenotype_rank_details(
 }
 
 fn build_active_gene_query(
-    parquet: &Path,
     prepared: &PreparedGeneProfile,
     fingerprint: String,
 ) -> Result<ActiveGeneQuery, String> {
@@ -2546,8 +2878,8 @@ fn build_active_gene_query(
     }
 
     let mut aliases = BTreeSet::new();
-    for (gene_symbol, gene_id) in super::results::report_gene_identities(parquet)? {
-        let canonical = prepared.identity.canonicalize(&gene_symbol, &gene_id);
+    for (gene_symbol, gene_id) in &prepared.report_identities {
+        let canonical = prepared.identity.canonicalize(gene_symbol, gene_id);
         let key = canonical.comparison_key();
         if resolved.included.contains(&key) {
             aliases.insert((
@@ -2567,6 +2899,7 @@ fn build_active_gene_query(
         .collect::<Vec<_>>();
     Ok(ActiveGeneQuery {
         fingerprint,
+        include_upstream_downstream: prepared.include_upstream_downstream,
         fields,
         genes,
         aliases,
@@ -2627,6 +2960,8 @@ pub(crate) fn active_query(
         conditions: profile.conditions.clone(),
         pathways: profile.pathways.clone(),
         genes: profile.genes.clone(),
+        include_polygenic: profile.include_polygenic,
+        include_upstream_downstream: profile.include_upstream_downstream,
         show_matches_only: true,
         preview_fingerprint: None,
     };
@@ -2636,12 +2971,14 @@ pub(crate) fn active_query(
         &prepared.conditions,
         &prepared.pathways,
         &prepared.genes,
+        request.include_polygenic,
+        request.include_upstream_downstream,
         &prepared.source_assets,
     );
     if fingerprint != active.fingerprint {
         return Ok(None);
     }
-    let query = build_active_gene_query(parquet, &prepared, fingerprint)?;
+    let query = build_active_gene_query(&prepared, fingerprint)?;
     Ok(Some(cache_active_query(run_id, query)))
 }
 
@@ -2650,7 +2987,10 @@ pub(crate) fn active_query_catalog(profile: &PhenotypeProfile) -> Option<serde_j
     Some(json!({
         "activeGeneQueryContractVersion": ACTIVE_QUERY_CONTRACT_VERSION,
         "fingerprint": active.fingerprint,
-        "fields": super::report_import::gene_catalog_fields(profile.observed.len()),
+        "fields": super::report_import::gene_catalog_fields(
+            profile.observed.len(),
+            PHENOTYPE_RANK_RELEASE_QUALIFIED,
+        ),
     }))
 }
 
@@ -2813,15 +3153,26 @@ pub(crate) fn register_active_query(
         return Err("Genes queries require the result consequence table".into());
     }
     let path = consequences.to_string_lossy().replace('\'', "''");
+    let consequence_scope = if query.include_upstream_downstream {
+        ""
+    } else {
+        "\n               AND coalesce(c.primary_consequence, '') NOT IN\n                   ('upstream_gene_variant', 'downstream_gene_variant')"
+    };
     connection
         .execute_batch(&format!(
             "CREATE TEMP VIEW annocat_active_allele_genes AS
-             SELECT DISTINCT c.allele_id, alias.gene_key
+             SELECT c.allele_id, alias.gene_key,
+                    first(coalesce(c.primary_consequence, '') ORDER BY
+                          CASE WHEN coalesce(c.primary_consequence, '') IN
+                               ('upstream_gene_variant', 'downstream_gene_variant')
+                               THEN 1 ELSE 0 END,
+                          coalesce(c.primary_consequence, '')) AS matched_consequence
              FROM read_parquet('{path}') c
              JOIN annocat_active_gene_aliases alias
                ON alias.gene_symbol=upper(trim(c.gene_symbol))
               AND alias.gene_id=upper(trim(coalesce(c.gene_id, '')))
-             WHERE c.allele_id IS NOT NULL AND trim(c.allele_id) <> ''"
+             WHERE c.allele_id IS NOT NULL AND trim(c.allele_id) <> ''{consequence_scope}
+             GROUP BY c.allele_id, alias.gene_key"
         ))
         .map_err(|error| format!("cannot prepare active allele genes: {error}"))?;
     Ok(())
@@ -3073,6 +3424,10 @@ fn phenotype_frequency(raw: &str) -> (Option<f64>, Option<String>) {
     (None, (!raw.is_empty()).then(|| raw.to_owned()))
 }
 
+fn phenotype_frequency_is_excluded(raw: &str) -> bool {
+    phenotype_frequency(raw).0 == Some(0.0)
+}
+
 fn append_unique(values: &mut Vec<String>, value: &str) {
     let value = value.trim();
     if !value.is_empty() && !values.iter().any(|existing| existing == value) {
@@ -3168,7 +3523,7 @@ fn parse_diseases(
                 annotations: HashMap::new(),
                 genes: Vec::new(),
             });
-        if value("qualifier") == "NOT" || value("frequency") == "HP:0040285" {
+        if value("qualifier") == "NOT" || phenotype_frequency_is_excluded(value("frequency")) {
             continue;
         } else {
             disease.positive.push(index);
@@ -3341,6 +3696,14 @@ fn normalize_terms(
         .collect())
 }
 
+fn ranking_term_indexes(
+    knowledge: &HpoKnowledge,
+    observed: &[PhenotypeTerm],
+) -> Result<Vec<usize>, String> {
+    let nonredundant = normalize_terms(knowledge, observed.to_vec(), true)?;
+    term_indexes(knowledge, &nonredundant)
+}
+
 fn term_indexes(knowledge: &HpoKnowledge, terms: &[PhenotypeTerm]) -> Result<Vec<usize>, String> {
     terms
         .iter()
@@ -3485,6 +3848,7 @@ fn valid_gene_symbol(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
         && value.len() <= 100
+        && value.bytes().any(|byte| byte.is_ascii_alphanumeric())
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
@@ -4191,11 +4555,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn apply_requires_at_least_one_gene_in_the_result() {
-        assert!(require_result_overlap(1).is_ok());
+    fn apply_distinguishes_empty_resolution_from_empty_result_overlap() {
+        assert!(require_result_overlap(1, 1).is_ok());
         assert_eq!(
-            require_result_overlap(0).unwrap_err(),
-            "No resolved genes have variants in this result."
+            require_result_overlap(0, 0).unwrap_err(),
+            "No associated genes were found for this selection in the installed HPO/MONDO data."
+        );
+        assert_eq!(
+            require_result_overlap(3, 0).unwrap_err(),
+            "None of the 3 associated genes have variants in this result."
         );
     }
 
@@ -4215,9 +4583,33 @@ mod tests {
             release: "same-release".into(),
             sha256,
         };
-        let first = active_query_fingerprint(&[], &[], &[], &[], &[source("a".repeat(64))]);
-        let second = active_query_fingerprint(&[], &[], &[], &[], &[source("b".repeat(64))]);
+        let first =
+            active_query_fingerprint(&[], &[], &[], &[], false, false, &[source("a".repeat(64))]);
+        let second =
+            active_query_fingerprint(&[], &[], &[], &[], false, false, &[source("b".repeat(64))]);
         assert_ne!(first, second);
+        let polygenic =
+            active_query_fingerprint(&[], &[], &[], &[], true, false, &[source("a".repeat(64))]);
+        let proximity =
+            active_query_fingerprint(&[], &[], &[], &[], false, true, &[source("a".repeat(64))]);
+        assert_ne!(first, polygenic);
+        assert_ne!(first, proximity);
+        assert_ne!(polygenic, proximity);
+    }
+
+    #[test]
+    fn query_scope_fields_default_off_and_reject_legacy_or_non_boolean_values() {
+        let omitted: ProfileUpdate = serde_json::from_value(json!({"action": "preview"})).unwrap();
+        assert!(!omitted.include_polygenic);
+        assert!(!omitted.include_upstream_downstream);
+        for invalid in [
+            json!({"action": "preview", "includePolygenic": "true"}),
+            json!({"action": "preview", "includeUpstreamDownstream": 1}),
+            json!({"action": "preview", "includePolygenicAndUnknown": true}),
+            json!({"action": "preview", "includeUnknown": true}),
+        ] {
+            assert!(serde_json::from_value::<ProfileUpdate>(invalid).is_err());
+        }
     }
 
     #[test]
@@ -4300,6 +4692,9 @@ mod tests {
 
     #[test]
     fn pasted_gene_symbols_and_identifiers_are_exact_matches() {
+        assert!(!valid_gene_symbol("-"));
+        assert!(!valid_gene_symbol("."));
+        assert!(valid_gene_symbol("SNORD115-1"));
         let mut gene = TermSearchResult {
             id: "ENSG00000141510".into(),
             label: "TP53".into(),
@@ -4419,6 +4814,127 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ReferenceRank {
+        score_key: u64,
+        rank: usize,
+        tie_count: usize,
+        best_disease_id: String,
+    }
+
+    fn reference_resnik_ranking(
+        knowledge: &HpoKnowledge,
+        observed: &[usize],
+    ) -> BTreeMap<String, ReferenceRank> {
+        let mut diseases = knowledge
+            .diseases
+            .iter()
+            .filter_map(|disease| {
+                let genes = disease
+                    .genes
+                    .iter()
+                    .filter(|association| {
+                        association
+                            .association_type
+                            .eq_ignore_ascii_case("MENDELIAN")
+                    })
+                    .map(|association| {
+                        format!("SYMBOL:{}", association.symbol.to_ascii_uppercase())
+                    })
+                    .collect::<BTreeSet<_>>();
+                (!disease.positive.is_empty() && !genes.is_empty()).then_some((disease, genes))
+            })
+            .collect::<Vec<_>>();
+        diseases.sort_by(|left, right| left.0.id.cmp(&right.0.id));
+        let disease_count = diseases.len();
+        let mut profile_counts = vec![0_u64; knowledge.terms.len()];
+        for (disease, _) in &diseases {
+            let propagated = disease
+                .positive
+                .iter()
+                .flat_map(|index| knowledge.terms[*index].ancestors.iter().copied())
+                .collect::<BTreeSet<_>>();
+            for term in propagated {
+                profile_counts[term] += 1;
+            }
+        }
+        let information_content = profile_counts
+            .iter()
+            .map(|count| (*count > 0).then(|| (disease_count as f64 / *count as f64).ln().max(0.0)))
+            .collect::<Vec<_>>();
+        let mut query = observed.to_vec();
+        query.sort_by(|left, right| knowledge.terms[*left].id.cmp(&knowledge.terms[*right].id));
+        query.dedup();
+
+        let mut best_by_gene = BTreeMap::<String, (f64, u64, String)>::new();
+        for (disease, genes) in diseases {
+            let score_sum = query
+                .iter()
+                .map(|query_term| {
+                    disease
+                        .positive
+                        .iter()
+                        .map(|disease_term| {
+                            knowledge.terms[*query_term]
+                                .ancestors
+                                .iter()
+                                .filter(|ancestor| {
+                                    knowledge.terms[*disease_term].ancestors.contains(ancestor)
+                                })
+                                .filter_map(|ancestor| information_content[*ancestor])
+                                .fold(0.0_f64, f64::max)
+                        })
+                        .fold(0.0_f64, f64::max)
+                })
+                .sum::<f64>();
+            let raw_score = score_sum / query.len() as f64;
+            let score_key = (raw_score * 1_000_000_000_000.0 + 0.5).floor() as u64;
+            for gene in genes {
+                let candidate = (raw_score, score_key, disease.id.clone());
+                best_by_gene
+                    .entry(gene)
+                    .and_modify(|current| {
+                        if candidate.0 > current.0
+                            || candidate.0 == current.0 && candidate.2 < current.2
+                        {
+                            *current = candidate.clone();
+                        }
+                    })
+                    .or_insert(candidate);
+            }
+        }
+
+        let mut ordered = best_by_gene.into_iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| right.1.1.cmp(&left.1.1).then(left.0.cmp(&right.0)));
+        let tie_counts = ordered
+            .iter()
+            .fold(HashMap::<u64, usize>::new(), |mut counts, row| {
+                *counts.entry(row.1.1).or_default() += 1;
+                counts
+            });
+        let mut previous = None;
+        let mut rank = 0;
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(position, (gene, (_, score_key, best_disease_id)))| {
+                if previous != Some(score_key) {
+                    rank = position + 1;
+                    previous = Some(score_key);
+                }
+                (
+                    gene,
+                    ReferenceRank {
+                        score_key,
+                        rank,
+                        tie_count: tie_counts[&score_key],
+                        best_disease_id,
+                    },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn hpo_membership_is_exact_or_descendant_while_resnik_ranks_the_global_universe() {
         let mut knowledge = test_knowledge();
@@ -4427,13 +4943,18 @@ mod tests {
             disease("OMIM:2", &[2], "GENE2", "MENDELIAN"),
             disease("OMIM:3", &[3], "GENE3", "MENDELIAN"),
             disease("OMIM:4", &[1], "POLY1", "POLYGENIC"),
+            disease("OMIM:5", &[1], "UNKNOWN1", "UNKNOWN"),
         ];
-        let report = ["GENE1", "GENE2", "POLY1"]
+        let report = ["GENE1", "GENE2", "POLY1", "UNKNOWN1"]
             .into_iter()
             .enumerate()
             .map(|(index, symbol)| (symbol.into(), format!("ENSG{index:011}")))
             .collect::<Vec<_>>();
         let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let (mendelian_counts, polygenic_counts) =
+            hpo_association_gene_counts(&knowledge, &resolver);
+        assert_eq!(mendelian_counts[1], 1);
+        assert_eq!(polygenic_counts[1], 2);
         let ranking = build_phenotype_ranking(&knowledge, &resolver, &[1], "test".into());
         assert_eq!(ranking.denominator, 3);
         assert_eq!(ranking.genes["SYMBOL:GENE1"].rank, 1);
@@ -4442,6 +4963,7 @@ mod tests {
         assert_eq!(ranking.genes["SYMBOL:GENE2"].tie_count, 2);
         assert!(ranking.genes.contains_key("SYMBOL:GENE3"));
         assert!(!ranking.genes.contains_key("SYMBOL:POLY1"));
+        assert!(!ranking.genes.contains_key("SYMBOL:UNKNOWN1"));
 
         let occurrences = report
             .iter()
@@ -4466,6 +4988,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &ranking,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -4480,7 +5003,69 @@ mod tests {
         assert_eq!(gene.hpo_links.len(), 2);
         assert_eq!(
             gene.selected_matches["Feature:HP:0001250"].relation,
-            "HPO link via exact disease annotation"
+            "HPO link via exact disease annotation · MENDELIAN"
+        );
+
+        let with_polygenic = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            Some(&knowledge),
+            &[PhenotypeTerm {
+                id: "HP:0001250".into(),
+                label: "Seizure".into(),
+            }],
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &ranking,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            with_polygenic
+                .genes
+                .values()
+                .map(|gene| gene.identity.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["GENE1", "POLY1"]
+        );
+        assert_eq!(
+            with_polygenic.genes["SYMBOL:POLY1"].selected_matches["Feature:HP:0001250"].relation,
+            "HPO link via exact disease annotation · POLYGENIC"
+        );
+        let sections = preview_gene_sections(&PreparedGeneProfile {
+            observed: vec![PhenotypeTerm {
+                id: "HP:0001250".into(),
+                label: "Seizure".into(),
+            }],
+            conditions: Vec::new(),
+            pathways: Vec::new(),
+            genes: Vec::new(),
+            ranking,
+            source_assets: Vec::new(),
+            resolved: with_polygenic,
+            identity: crate::gene_identity::Resolver::new(Path::new("missing"), &report),
+            report_identities: report.clone(),
+            include_polygenic: true,
+            include_upstream_downstream: false,
+        });
+        assert_eq!(
+            sections
+                .iter()
+                .map(|section| (
+                    section.label.as_str(),
+                    section
+                        .genes
+                        .iter()
+                        .map(|gene| gene.symbol.as_str())
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("Feature: Seizure (HP:0001250) · MENDELIAN", vec!["GENE1"]),
+                ("Feature: Seizure (HP:0001250) · POLYGENIC", vec!["POLY1"]),
+            ]
         );
 
         knowledge.diseases = vec![
@@ -4507,6 +5092,7 @@ mod tests {
                 denominator: 0,
                 genes: BTreeMap::new(),
             },
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -4516,6 +5102,78 @@ mod tests {
                 .map(|gene| gene.identity.symbol.as_str())
                 .collect::<Vec<_>>(),
             ["GENE2"]
+        );
+
+        let selected = vec![
+            PhenotypeTerm {
+                id: "HP:0001250".into(),
+                label: "Seizure".into(),
+            },
+            PhenotypeTerm {
+                id: "HP:0002197".into(),
+                label: "Generalized-onset seizure".into(),
+            },
+        ];
+        let resolved = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            Some(&knowledge),
+            &selected,
+            &[],
+            &[],
+            &[],
+            &HashMap::new(),
+            &PhenotypeRanking {
+                hpo_release: "test".into(),
+                query_count: 0,
+                disease_profile_count: 0,
+                denominator: 0,
+                genes: BTreeMap::new(),
+            },
+            false,
+        )
+        .unwrap();
+        let sections = preview_gene_sections(&PreparedGeneProfile {
+            observed: selected,
+            conditions: Vec::new(),
+            pathways: Vec::new(),
+            genes: Vec::new(),
+            ranking: PhenotypeRanking {
+                hpo_release: "test".into(),
+                query_count: 0,
+                disease_profile_count: 0,
+                denominator: 0,
+                genes: BTreeMap::new(),
+            },
+            source_assets: Vec::new(),
+            resolved,
+            identity: crate::gene_identity::Resolver::new(Path::new("missing"), &report),
+            report_identities: report.clone(),
+            include_polygenic: false,
+            include_upstream_downstream: false,
+        });
+        assert_eq!(
+            sections
+                .iter()
+                .map(|section| (
+                    section.label.as_str(),
+                    section
+                        .genes
+                        .iter()
+                        .map(|gene| gene.symbol.as_str())
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    "Feature: Seizure (HP:0001250) · MENDELIAN",
+                    vec!["GENE1", "GENE2"]
+                ),
+                (
+                    "Feature: Generalized-onset seizure (HP:0002197) · MENDELIAN",
+                    vec!["GENE2"]
+                ),
+            ]
         );
     }
 
@@ -4535,14 +5193,15 @@ mod tests {
         knowledge.condition_associations = vec![
             association("OMIM:1", "MENDELIAN"),
             association("OMIM:2", "POLYGENIC"),
+            association("OMIM:3", "UNKNOWN"),
         ];
         let report = vec![("GENE1".into(), "ENSG00000000001".into())];
         let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
-        let occurrence = super::super::results::ReportGeneOccurrence {
+        let occurrences = vec![super::super::results::ReportGeneOccurrence {
             allele_id: "allele-1".into(),
             gene_symbol: report[0].0.clone(),
             gene_id: report[0].1.clone(),
-        };
+        }];
         let matched = |matched_id: &str, relation| crate::mondo::DiseaseConditionMatch {
             selected_id: "MONDO:0000001".into(),
             selected_label: "Selected condition".into(),
@@ -4559,6 +5218,10 @@ mod tests {
                 "OMIM:2".into(),
                 vec![matched("MONDO:0000002", "Condition subtype")],
             ),
+            (
+                "OMIM:3".into(),
+                vec![matched("MONDO:0000003", "Condition subtype")],
+            ),
         ]);
         let ranking = PhenotypeRanking {
             hpo_release: String::new(),
@@ -4569,7 +5232,7 @@ mod tests {
         };
         let resolved = resolve_gene_set(
             &resolver,
-            &[occurrence],
+            &occurrences,
             Some(&knowledge),
             &[],
             &[PhenotypeTerm {
@@ -4580,14 +5243,39 @@ mod tests {
             &[],
             &condition_matches,
             &ranking,
+            false,
         )
         .unwrap();
         let gene = &resolved.genes["SYMBOL:GENE1"];
         assert_eq!(gene.condition_links.len(), 1);
-        assert_eq!(gene.condition_evidence_links.len(), 2);
+        assert_eq!(gene.condition_evidence_links.len(), 1);
         assert_eq!(
             gene.selected_matches["Condition:MONDO:0000001"].relation,
             "Exact condition · MENDELIAN"
+        );
+
+        let with_polygenic = resolve_gene_set(
+            &resolver,
+            &occurrences,
+            Some(&knowledge),
+            &[],
+            &[PhenotypeTerm {
+                id: "MONDO:0000001".into(),
+                label: "Selected condition".into(),
+            }],
+            &[],
+            &[],
+            &condition_matches,
+            &ranking,
+            true,
+        )
+        .unwrap();
+        let gene = &with_polygenic.genes["SYMBOL:GENE1"];
+        assert_eq!(gene.condition_evidence_links.len(), 2);
+        assert!(
+            gene.condition_evidence_links
+                .iter()
+                .all(|link| link.association_type != "UNKNOWN")
         );
     }
 
@@ -4665,6 +5353,45 @@ mod tests {
     }
 
     #[test]
+    fn production_resnik_matches_an_independent_reference_and_is_order_invariant() {
+        let mut knowledge = test_knowledge();
+        knowledge.diseases = vec![
+            disease("OMIM:1", &[4], "GENE1", "MENDELIAN"),
+            disease("OMIM:2", &[1], "GENE2", "MENDELIAN"),
+            disease("OMIM:3", &[2], "GENE3", "MENDELIAN"),
+            disease("OMIM:4", &[3], "GENE4", "MENDELIAN"),
+            disease("OMIM:5", &[4], "POLY1", "POLYGENIC"),
+        ];
+        let report = ["GENE1", "GENE2", "GENE3", "GENE4", "POLY1"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, symbol)| (symbol.into(), format!("ENSG{index:011}")))
+            .collect::<Vec<_>>();
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &report);
+        let reference = reference_resnik_ranking(&knowledge, &[2, 4]);
+        let production = build_phenotype_ranking(&knowledge, &resolver, &[2, 4], "test".into());
+        let reordered = build_phenotype_ranking(&knowledge, &resolver, &[4, 2, 2], "test".into());
+
+        assert_eq!(production.genes.len(), reference.len());
+        assert!(!production.genes.contains_key("SYMBOL:POLY1"));
+        for (gene, expected) in reference {
+            let actual = &production.genes[&gene];
+            assert_eq!(actual.score_key, expected.score_key, "score key for {gene}");
+            assert_eq!(actual.rank, expected.rank, "rank for {gene}");
+            assert_eq!(actual.tie_count, expected.tie_count, "tie count for {gene}");
+            assert_eq!(
+                actual.best_disease_id, expected.best_disease_id,
+                "best disease for {gene}"
+            );
+            let permuted = &reordered.genes[&gene];
+            assert_eq!(permuted.score_key, actual.score_key);
+            assert_eq!(permuted.rank, actual.rank);
+            assert_eq!(permuted.tie_count, actual.tie_count);
+            assert_eq!(permuted.best_disease_id, actual.best_disease_id);
+        }
+    }
+
+    #[test]
     fn allele_gene_matches_deduplicate_selected_items_but_keep_gene_rows() {
         let root = std::env::temp_dir().join(format!(
             "annocat-gene-match-test-{}",
@@ -4720,6 +5447,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &ranking,
+            false,
         )
         .unwrap();
         let connection = Connection::open_in_memory().unwrap();
@@ -4727,13 +5455,14 @@ mod tests {
         connection
             .execute_batch(&format!(
                 "COPY (SELECT * FROM (VALUES
-                    ('allele-1', 'GENE1', 'ENSG00000000001'),
-                    ('allele-1', 'GENE2', 'ENSG00000000002')
-                 ) AS t(allele_id, gene_symbol, gene_id))
+                    ('allele-1', 'GENE1', 'ENSG00000000001', 'missense_variant'),
+                    ('allele-1', 'GENE2', 'ENSG00000000002', 'missense_variant'),
+                    ('allele-2', 'GENE1', 'ENSG00000000001', 'upstream_gene_variant')
+                 ) AS t(allele_id, gene_symbol, gene_id, primary_consequence))
                  TO '{destination}' (FORMAT PARQUET)"
             ))
             .unwrap();
-        let prepared = PreparedGeneProfile {
+        let mut prepared = PreparedGeneProfile {
             observed: Vec::new(),
             conditions: Vec::new(),
             pathways: vec![
@@ -4751,8 +5480,14 @@ mod tests {
             source_assets: Vec::new(),
             resolved,
             identity: resolver,
+            report_identities: occurrences
+                .iter()
+                .map(|gene| (gene.gene_symbol.clone(), gene.gene_id.clone()))
+                .collect(),
+            include_polygenic: false,
+            include_upstream_downstream: false,
         };
-        let active = build_active_gene_query(&variants, &prepared, "a".repeat(64)).unwrap();
+        let active = build_active_gene_query(&prepared, "a".repeat(64)).unwrap();
         register_active_query(&connection, &variants, &active).unwrap();
         let gene_rows: i64 = connection
             .query_row(
@@ -4774,8 +5509,34 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let matched_alleles_without_proximity: i64 = connection
+            .query_row(
+                "SELECT count(DISTINCT allele_id) FROM annocat_active_allele_genes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(gene_rows, 3);
         assert_eq!(selected_items, 2);
+        assert_eq!(matched_alleles_without_proximity, 1);
+
+        prepared.include_upstream_downstream = true;
+        let connection_with_proximity = Connection::open_in_memory().unwrap();
+        let active_with_proximity = build_active_gene_query(&prepared, "b".repeat(64)).unwrap();
+        register_active_query(
+            &connection_with_proximity,
+            &variants,
+            &active_with_proximity,
+        )
+        .unwrap();
+        let matched_alleles: i64 = connection_with_proximity
+            .query_row(
+                "SELECT count(DISTINCT allele_id) FROM annocat_active_allele_genes",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(matched_alleles, 2);
         assert!(!root.join("phenotype-gene-evidence.test.parquet").exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -4819,13 +5580,13 @@ mod tests {
         connection
             .execute_batch(&format!(
                 "COPY (SELECT * FROM (VALUES
-                    ('{first_allele_sql}', 0, 'GENE1', 'ENSG00000000001',
+                    ('{first_allele_sql}', 0, 'GENE1', 'ENSG00000000001', 'missense_variant',
                      '{{\"SYMBOL\":\"GENE1\",\"Gene\":\"ENSG00000000001\",\"Feature\":\"ENST1\",\"Consequence\":\"missense_variant\",\"IMPACT\":\"MODERATE\",\"CANONICAL\":\"YES\"}}'),
-                    ('{first_allele_sql}', 1, 'GENE2', 'ENSG00000000002',
+                    ('{first_allele_sql}', 1, 'GENE2', 'ENSG00000000002', 'intron_variant',
                      '{{\"SYMBOL\":\"GENE2\",\"Gene\":\"ENSG00000000002\",\"Feature\":\"ENST2\",\"Consequence\":\"intron_variant\",\"IMPACT\":\"MODIFIER\"}}'),
-                    ('{second_allele_sql}', 0, 'GENE3', 'ENSG00000000003',
+                    ('{second_allele_sql}', 0, 'GENE3', 'ENSG00000000003', 'missense_variant',
                      '{{\"SYMBOL\":\"GENE3\",\"Gene\":\"ENSG00000000003\",\"Feature\":\"ENST3\",\"Consequence\":\"missense_variant\",\"IMPACT\":\"MODERATE\",\"CANONICAL\":\"YES\"}}')
-                 ) AS t(allele_id, ordinal, gene_symbol, gene_id, consequence_json))
+                 ) AS t(allele_id, ordinal, gene_symbol, gene_id, primary_consequence, consequence_json))
                  TO '{consequences_path}' (FORMAT PARQUET)"
             ))
             .unwrap();
@@ -4906,6 +5667,7 @@ mod tests {
             &[],
             &HashMap::new(),
             &ranking,
+            false,
         )
         .unwrap();
         let prepared = PreparedGeneProfile {
@@ -4920,9 +5682,15 @@ mod tests {
             source_assets: Vec::new(),
             resolved,
             identity: resolver,
+            report_identities: occurrences
+                .iter()
+                .map(|gene| (gene.gene_symbol.clone(), gene.gene_id.clone()))
+                .collect(),
+            include_polygenic: false,
+            include_upstream_downstream: false,
         };
-        let active = build_active_gene_query(&variants, &prepared, "b".repeat(64)).unwrap();
-        let fields = crate::report_import::gene_catalog_fields(1);
+        let active = build_active_gene_query(&prepared, "b".repeat(64)).unwrap();
+        let fields = crate::report_import::gene_catalog_fields(1, true);
         let gene_matches_index = fields
             .iter()
             .position(|field| field["fieldPath"] == "geneMatches")
@@ -4930,6 +5698,10 @@ mod tests {
         let gene_match_index = fields
             .iter()
             .position(|field| field["fieldPath"] == "geneMatch")
+            .unwrap();
+        let gene_match_details_index = fields
+            .iter()
+            .position(|field| field["fieldPath"] == "geneMatchDetails")
             .unwrap();
         let phenotype_rank_index = fields
             .iter()
@@ -4941,7 +5713,7 @@ mod tests {
         )
         .unwrap();
         let request = crate::results::PageRequest {
-            evidence_columns: vec![gene_matches_index],
+            evidence_columns: vec![gene_matches_index, gene_match_details_index],
             evidence_filters: vec![crate::results::EvidenceFilterRequest {
                 index: gene_match_index,
                 operator: "equals".into(),
@@ -4974,6 +5746,15 @@ mod tests {
             page["rows"][0]["evidence"][gene_matches_index.to_string()],
             "Only GENE2 pathway"
         );
+        let match_details: serde_json::Value = serde_json::from_str(
+            page["rows"][0]["evidence"][gene_match_details_index.to_string()]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(match_details[0]["geneSymbol"], "GENE2");
+        assert_eq!(match_details[0]["consequence"], "intron_variant");
+        assert_eq!(match_details[0]["representativeGene"], "GENE1");
 
         let mut changed = active.clone();
         changed.fingerprint = "c".repeat(64);
@@ -5060,12 +5841,697 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn validation_gene_id(value: &str) -> Result<u64, String> {
+        let value = value.trim();
+        let value = value
+            .strip_prefix("NCBIGene:")
+            .or_else(|| value.strip_prefix("NCBIGENE:"))
+            .unwrap_or(value);
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(format!("invalid numeric NCBI Gene identifier: {value}"));
+        }
+        value
+            .parse()
+            .map_err(|_| format!("invalid numeric NCBI Gene identifier: {value}"))
+    }
+
+    fn validation_field<'a>(
+        fields: &[&'a str],
+        columns: &HashMap<String, usize>,
+        name: &str,
+    ) -> &'a str {
+        fields[columns[name]].trim()
+    }
+
+    fn validation_frequency_is_excluded(raw: &str) -> bool {
+        let raw = raw.trim();
+        if raw == "HP:0040285" {
+            return true;
+        }
+        if let Some((numerator, denominator)) = raw.split_once('/') {
+            return numerator.trim().parse::<u64>().ok() == Some(0)
+                && denominator
+                    .trim()
+                    .parse::<u64>()
+                    .is_ok_and(|value| value > 0);
+        }
+        raw.strip_suffix('%')
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            == Some(0.0)
+    }
+
+    fn validation_gene_index(
+        indexes: &mut HashMap<String, u32>,
+        keys: &mut Vec<String>,
+        key: String,
+    ) -> u32 {
+        if let Some(index) = indexes.get(&key) {
+            return *index;
+        }
+        let index = u32::try_from(keys.len()).expect("validation gene universe exceeds u32");
+        keys.push(key.clone());
+        indexes.insert(key, index);
+        index
+    }
+
+    fn normalize_validation_sets(sets: &mut [Vec<u32>]) {
+        for genes in sets {
+            genes.sort_unstable();
+            genes.dedup();
+        }
+    }
+
+    fn assert_validation_set_eq(
+        term: &OntologyTerm,
+        scope: &str,
+        expected: &[u32],
+        actual: &[u32],
+        gene_keys: &[String],
+    ) {
+        assert_validation_gene_set_eq(&term.id, scope, expected, actual, gene_keys);
+    }
+
+    fn assert_validation_gene_set_eq(
+        id: &str,
+        scope: &str,
+        expected: &[u32],
+        actual: &[u32],
+        gene_keys: &[String],
+    ) {
+        if expected == actual {
+            return;
+        }
+        let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+        let actual = actual.iter().copied().collect::<BTreeSet<_>>();
+        let missing = expected
+            .difference(&actual)
+            .take(20)
+            .map(|index| gene_keys[*index as usize].as_str())
+            .collect::<Vec<_>>();
+        let extra = actual
+            .difference(&expected)
+            .take(20)
+            .map(|index| gene_keys[*index as usize].as_str())
+            .collect::<Vec<_>>();
+        panic!(
+            "{} {} membership differs: expected {}, actual {}, missing {:?}, extra {:?}",
+            id,
+            scope,
+            expected.len(),
+            actual.len(),
+            missing,
+            extra
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT and ANNOCAT_HPO_MEMBERSHIP_ORACLE to pinned release assets"]
+    fn official_hpo_membership_matches_published_oracle() {
+        const ORACLE_BYTES: u64 = 66_907_216;
+        const ORACLE_SHA256: &str =
+            "1386a4dd3ea046f5a5971f4011a3711a9d7928d60961e2e7b757b6860c63c778";
+        const ORACLE_HEADER: &str = "hpo_id\thpo_name\tncbi_gene_id\tgene_symbol\tdisease_id";
+
+        let root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let oracle = PathBuf::from(std::env::var("ANNOCAT_HPO_MEMBERSHIP_ORACLE").unwrap());
+        assert_eq!(fs::metadata(&oracle).unwrap().len(), ORACLE_BYTES);
+        assert_eq!(crate::fastvep::sha256_file(&oracle).unwrap(), ORACLE_SHA256);
+        assert_eq!(asset_manifest_at(&root).unwrap().release(), "2026-06-23");
+
+        let resources = root
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture root must be resources/hpo/release");
+        let knowledge = load_knowledge_from_root(&root).unwrap();
+        let resolver = crate::gene_identity::Resolver::new(resources, &[]);
+        assert_eq!(resolver.identity_release(), Some("2026-08-07"));
+        let active = knowledge
+            .active_terms
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+
+        let gene_source = File::open(root.join("raw").join("genes_to_disease.txt")).unwrap();
+        let mut source_lines = BufReader::new(gene_source).lines();
+        let source_header = loop {
+            let line = source_lines.next().unwrap().unwrap();
+            if !line.starts_with('#') && !line.trim().is_empty() {
+                break line;
+            }
+        };
+        let source_columns = source_header
+            .split('\t')
+            .enumerate()
+            .map(|(index, name)| (name.to_owned(), index))
+            .collect::<HashMap<_, _>>();
+        for required in [
+            "ncbi_gene_id",
+            "gene_symbol",
+            "association_type",
+            "disease_id",
+        ] {
+            assert!(source_columns.contains_key(required), "missing {required}");
+        }
+        let mut source_associations = HashMap::<(String, u64), Vec<(String, String)>>::new();
+        for line in source_lines {
+            let line = line.unwrap();
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let disease_id = validation_field(&fields, &source_columns, "disease_id");
+            assert!(!disease_id.is_empty());
+            let gene_id =
+                validation_gene_id(validation_field(&fields, &source_columns, "ncbi_gene_id"))
+                    .unwrap();
+            source_associations
+                .entry((disease_id.to_owned(), gene_id))
+                .or_default()
+                .push((
+                    validation_field(&fields, &source_columns, "gene_symbol").to_owned(),
+                    validation_field(&fields, &source_columns, "association_type").to_owned(),
+                ));
+        }
+        for associations in source_associations.values_mut() {
+            associations.sort();
+            associations.dedup();
+        }
+
+        let term_count = knowledge.terms.len();
+        let mut gene_indexes = HashMap::<String, u32>::new();
+        let mut gene_keys = Vec::<String>::new();
+        let mut published_all = vec![Vec::<u32>::new(); term_count];
+        let oracle_file = File::open(&oracle).unwrap();
+        let mut oracle_lines = BufReader::new(oracle_file).lines();
+        assert_eq!(
+            oracle_lines.next().unwrap().unwrap().trim_end_matches('\r'),
+            ORACLE_HEADER
+        );
+        let mut oracle_rows = 0_u64;
+        let mut identity_exclusions = 0_u64;
+        for line in oracle_lines {
+            let line = line.unwrap();
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 5, "malformed oracle row: {line}");
+            validate_hpo_id(fields[0]).unwrap();
+            let term_index = *knowledge
+                .term_index
+                .get(fields[0])
+                .unwrap_or_else(|| panic!("oracle term {} is absent from hp.obo", fields[0]));
+            let gene_id = validation_gene_id(fields[2]).unwrap();
+            let disease_id = fields[4].trim();
+            assert!(!disease_id.is_empty(), "oracle disease identifier is empty");
+            let associations = source_associations
+                .get(&(disease_id.to_owned(), gene_id))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "oracle row has no exact disease-gene source association: {} {}",
+                        disease_id, gene_id
+                    )
+                });
+            oracle_rows += 1;
+            if !active.contains(&term_index) {
+                continue;
+            }
+            for (symbol, association_type) in associations {
+                let association = GeneAssociation {
+                    gene_id: format!("NCBIGene:{gene_id}"),
+                    symbol: symbol.clone(),
+                    association_type: association_type.clone(),
+                    source: "phenotype_to_genes validation join".into(),
+                };
+                let Some(gene) = resolved_association_gene(&resolver, &association) else {
+                    identity_exclusions += 1;
+                    continue;
+                };
+                let gene =
+                    validation_gene_index(&mut gene_indexes, &mut gene_keys, gene.comparison_key());
+                published_all[term_index].push(gene);
+            }
+        }
+        assert!(
+            oracle_rows > 100_000,
+            "oracle unexpectedly contains only {oracle_rows} rows"
+        );
+        normalize_validation_sets(&mut published_all);
+
+        let annotation_source = File::open(root.join("raw").join("phenotype.hpoa")).unwrap();
+        let mut annotation_lines = BufReader::new(annotation_source).lines();
+        let annotation_header = loop {
+            let line = annotation_lines.next().unwrap().unwrap();
+            if !line.starts_with('#') && !line.trim().is_empty() {
+                break line;
+            }
+        };
+        let annotation_columns = annotation_header
+            .split('\t')
+            .enumerate()
+            .map(|(index, name)| (name.to_owned(), index))
+            .collect::<HashMap<_, _>>();
+        for required in ["database_id", "qualifier", "hpo_id", "frequency", "aspect"] {
+            assert!(
+                annotation_columns.contains_key(required),
+                "missing {required}"
+            );
+        }
+        let mut positive_by_disease = HashMap::<String, BTreeSet<usize>>::new();
+        let mut excluded_by_disease = HashMap::<String, BTreeSet<usize>>::new();
+        for line in annotation_lines {
+            let line = line.unwrap();
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if validation_field(&fields, &annotation_columns, "aspect") != "P" {
+                continue;
+            }
+            let Some(term) = resolve_term_index(
+                validation_field(&fields, &annotation_columns, "hpo_id"),
+                &knowledge.terms,
+                &knowledge.term_index,
+            ) else {
+                continue;
+            };
+            if term == knowledge.phenotypic_abnormality_root
+                || !knowledge.terms[term]
+                    .ancestors
+                    .contains(&knowledge.phenotypic_abnormality_root)
+            {
+                continue;
+            }
+            let disease = validation_field(&fields, &annotation_columns, "database_id");
+            assert!(!disease.is_empty());
+            let excluded = validation_field(&fields, &annotation_columns, "qualifier") == "NOT"
+                || validation_frequency_is_excluded(validation_field(
+                    &fields,
+                    &annotation_columns,
+                    "frequency",
+                ));
+            if excluded {
+                excluded_by_disease
+                    .entry(disease.to_owned())
+                    .or_default()
+                    .insert(term);
+            } else {
+                positive_by_disease
+                    .entry(disease.to_owned())
+                    .or_default()
+                    .insert(term);
+            }
+        }
+
+        let mut expected_all = vec![Vec::<u32>::new(); term_count];
+        let mut expected_mendelian = vec![Vec::<u32>::new(); term_count];
+        let mut expected_with_polygenic = vec![Vec::<u32>::new(); term_count];
+        for ((disease_id, gene_id), associations) in &source_associations {
+            let Some(positive_terms) = positive_by_disease.get(disease_id) else {
+                continue;
+            };
+            let selected_terms = positive_terms
+                .iter()
+                .flat_map(|index| knowledge.terms[*index].ancestors.iter().copied())
+                .filter(|index| active.contains(index))
+                .collect::<BTreeSet<_>>();
+            for (symbol, association_type) in associations {
+                let association = GeneAssociation {
+                    gene_id: format!("NCBIGene:{gene_id}"),
+                    symbol: symbol.clone(),
+                    association_type: association_type.clone(),
+                    source: "independent raw validation".into(),
+                };
+                let Some(gene) = resolved_association_gene(&resolver, &association) else {
+                    continue;
+                };
+                let gene =
+                    validation_gene_index(&mut gene_indexes, &mut gene_keys, gene.comparison_key());
+                for term in &selected_terms {
+                    expected_all[*term].push(gene);
+                }
+                if !eligible_association_type(association_type, true) {
+                    continue;
+                }
+                for term in &selected_terms {
+                    expected_with_polygenic[*term].push(gene);
+                    if association_type.eq_ignore_ascii_case("MENDELIAN") {
+                        expected_mendelian[*term].push(gene);
+                    }
+                }
+            }
+        }
+        normalize_validation_sets(&mut expected_all);
+        normalize_validation_sets(&mut expected_mendelian);
+        normalize_validation_sets(&mut expected_with_polygenic);
+
+        let mut actual_mendelian = vec![Vec::<u32>::new(); term_count];
+        let mut actual_with_polygenic = vec![Vec::<u32>::new(); term_count];
+        for disease in &knowledge.diseases {
+            let selected_terms = disease
+                .positive
+                .iter()
+                .flat_map(|index| knowledge.terms[*index].ancestors.iter().copied())
+                .filter(|index| active.contains(index))
+                .collect::<BTreeSet<_>>();
+            for association in &disease.genes {
+                if !eligible_association_type(&association.association_type, true) {
+                    continue;
+                }
+                let Some(gene) = resolved_association_gene(&resolver, association) else {
+                    continue;
+                };
+                let gene =
+                    validation_gene_index(&mut gene_indexes, &mut gene_keys, gene.comparison_key());
+                for term in &selected_terms {
+                    actual_with_polygenic[*term].push(gene);
+                    if association
+                        .association_type
+                        .eq_ignore_ascii_case("MENDELIAN")
+                    {
+                        actual_mendelian[*term].push(gene);
+                    }
+                }
+            }
+        }
+        normalize_validation_sets(&mut actual_mendelian);
+        normalize_validation_sets(&mut actual_with_polygenic);
+        let (production_mendelian_counts, production_polygenic_counts) =
+            hpo_association_gene_counts(&knowledge, &resolver);
+        for term_index in &knowledge.active_terms {
+            let term = &knowledge.terms[*term_index];
+            assert_validation_set_eq(
+                term,
+                "Mendelian",
+                &expected_mendelian[*term_index],
+                &actual_mendelian[*term_index],
+                &gene_keys,
+            );
+            assert_validation_set_eq(
+                term,
+                "Mendelian plus polygenic",
+                &expected_with_polygenic[*term_index],
+                &actual_with_polygenic[*term_index],
+                &gene_keys,
+            );
+            assert_eq!(
+                production_mendelian_counts[*term_index] as usize,
+                expected_mendelian[*term_index].len(),
+                "Mendelian autocomplete count for {}",
+                term.id
+            );
+            assert_eq!(
+                production_polygenic_counts[*term_index] as usize,
+                expected_with_polygenic[*term_index].len(),
+                "polygenic autocomplete count for {}",
+                term.id
+            );
+        }
+
+        let mut untyped_differential = Vec::new();
+        let mut published_only_pairs = HashSet::<(usize, u32)>::new();
+        let mut untyped_published_only = 0_usize;
+        let mut untyped_raw_only = 0_usize;
+        for term_index in &knowledge.active_terms {
+            let published = published_all[*term_index]
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let raw = expected_all[*term_index]
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            for gene in published.difference(&raw) {
+                untyped_published_only += 1;
+                published_only_pairs.insert((*term_index, *gene));
+                untyped_differential.push(format!(
+                    "published-only\t{}\t{}",
+                    knowledge.terms[*term_index].id, gene_keys[*gene as usize]
+                ));
+            }
+            for gene in raw.difference(&published) {
+                untyped_raw_only += 1;
+                untyped_differential.push(format!(
+                    "raw-only\t{}\t{}",
+                    knowledge.terms[*term_index].id, gene_keys[*gene as usize]
+                ));
+            }
+        }
+        untyped_differential.sort();
+        let mut untyped_hash = Sha256::new();
+        for row in &untyped_differential {
+            untyped_hash.update(row.as_bytes());
+            untyped_hash.update(b"\n");
+        }
+        let untyped_sha256 = format!("{:x}", untyped_hash.finalize());
+        assert_eq!(untyped_published_only, 7_019);
+        assert_eq!(untyped_raw_only, 0);
+        assert_eq!(
+            untyped_sha256,
+            "b2729876ea7d6e1803ca4848ccb87279459dbe435994a00e06c21e2903e92444"
+        );
+        eprintln!(
+            "untyped published HPO reconciliation: {untyped_published_only} published-only memberships, {untyped_raw_only} raw-only memberships, SHA-256 {untyped_sha256}"
+        );
+
+        let oracle_file = File::open(&oracle).unwrap();
+        let mut oracle_lines = BufReader::new(oracle_file).lines();
+        oracle_lines.next().unwrap().unwrap();
+        let mut explained_published_only = HashSet::<(usize, u32)>::new();
+        for line in oracle_lines {
+            let line = line.unwrap();
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let term_index = knowledge.term_index[fields[0]];
+            if !active.contains(&term_index) {
+                continue;
+            }
+            let gene_id = validation_gene_id(fields[2]).unwrap();
+            let disease_id = fields[4].trim();
+            let associations = &source_associations[&(disease_id.to_owned(), gene_id)];
+            for (symbol, association_type) in associations {
+                let association = GeneAssociation {
+                    gene_id: format!("NCBIGene:{gene_id}"),
+                    symbol: symbol.clone(),
+                    association_type: association_type.clone(),
+                    source: "phenotype_to_genes exclusion reconciliation".into(),
+                };
+                let Some(gene) = resolved_association_gene(&resolver, &association) else {
+                    continue;
+                };
+                let Some(&gene) = gene_indexes.get(&gene.comparison_key()) else {
+                    continue;
+                };
+                let pair = (term_index, gene);
+                if !published_only_pairs.contains(&pair) {
+                    continue;
+                }
+                let explained = excluded_by_disease.get(disease_id).is_some_and(|terms| {
+                    terms
+                        .iter()
+                        .any(|term| knowledge.terms[*term].ancestors.contains(&term_index))
+                });
+                if explained {
+                    explained_published_only.insert(pair);
+                }
+            }
+        }
+        let unexplained = published_only_pairs
+            .difference(&explained_published_only)
+            .take(20)
+            .map(|(term, gene)| {
+                format!(
+                    "{} {}",
+                    knowledge.terms[*term].id, gene_keys[*gene as usize]
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unexplained.is_empty(),
+            "published-only HPO memberships lack an explicit source exclusion: {unexplained:?}"
+        );
+
+        let somnolence = knowledge.term_index["HP:0001262"];
+        assert_eq!(expected_mendelian[somnolence].len(), 27);
+        assert!(
+            expected_mendelian[somnolence]
+                .iter()
+                .all(|index| gene_keys[*index as usize] != "SYMBOL:-")
+        );
+        let mut expected_raw_exclusions = BTreeSet::new();
+        for disease in &knowledge.diseases {
+            if !disease
+                .positive
+                .iter()
+                .any(|index| knowledge.terms[*index].ancestors.contains(&somnolence))
+            {
+                continue;
+            }
+            for association in &disease.genes {
+                let id = validation_gene_id(&association.gene_id).unwrap();
+                if matches!(id, 10108 | 3653) {
+                    assert!(resolved_association_gene(&resolver, association).is_none());
+                    expected_raw_exclusions.insert(id);
+                }
+            }
+        }
+        assert_eq!(expected_raw_exclusions, BTreeSet::from([3653, 10108]));
+        assert_eq!(identity_exclusions, 0);
+        eprintln!(
+            "validated {oracle_rows} HPO oracle rows across {} active terms; all {untyped_published_only} published-only memberships map to explicit source exclusions",
+            knowledge.active_terms.len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT and ANNOCAT_MONDO_FIXTURE to pinned release assets"]
+    fn official_mondo_gene_sets_match_independent_hpo_source_join() {
+        let root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let mondo_path = PathBuf::from(std::env::var("ANNOCAT_MONDO_FIXTURE").unwrap());
+        let resources = root
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture root must be resources/hpo/release");
+        let knowledge = load_knowledge_from_root(&root).unwrap();
+        let mondo = crate::mondo::load_fixture(&mondo_path).unwrap();
+        let resolver = crate::gene_identity::Resolver::new(resources, &[]);
+        let mut gene_indexes = HashMap::<String, u32>::new();
+        let mut gene_keys = Vec::<String>::new();
+        let mut expected_mendelian = vec![Vec::<u32>::new(); mondo.term_count()];
+        let mut expected_with_polygenic = vec![Vec::<u32>::new(); mondo.term_count()];
+
+        let source = File::open(root.join("raw").join("genes_to_disease.txt")).unwrap();
+        let mut lines = BufReader::new(source).lines();
+        let header = loop {
+            let line = lines.next().unwrap().unwrap();
+            if !line.starts_with('#') && !line.trim().is_empty() {
+                break line;
+            }
+        };
+        let columns = header
+            .split('\t')
+            .enumerate()
+            .map(|(index, name)| (name.to_owned(), index))
+            .collect::<HashMap<_, _>>();
+        for required in [
+            "ncbi_gene_id",
+            "gene_symbol",
+            "association_type",
+            "disease_id",
+        ] {
+            assert!(columns.contains_key(required), "missing {required}");
+        }
+        for line in lines {
+            let line = line.unwrap();
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let association_type = validation_field(&fields, &columns, "association_type");
+            if !eligible_association_type(association_type, true) {
+                continue;
+            }
+            let gene_id =
+                validation_gene_id(validation_field(&fields, &columns, "ncbi_gene_id")).unwrap();
+            let association = GeneAssociation {
+                gene_id: format!("NCBIGene:{gene_id}"),
+                symbol: validation_field(&fields, &columns, "gene_symbol").to_owned(),
+                association_type: association_type.to_owned(),
+                source: "independent raw MONDO validation join".into(),
+            };
+            let Some(gene) = resolved_association_gene(&resolver, &association) else {
+                continue;
+            };
+            let gene =
+                validation_gene_index(&mut gene_indexes, &mut gene_keys, gene.comparison_key());
+            for condition in
+                mondo.condition_ancestor_indices(validation_field(&fields, &columns, "disease_id"))
+            {
+                expected_with_polygenic[condition].push(gene);
+                if association_type.eq_ignore_ascii_case("MENDELIAN") {
+                    expected_mendelian[condition].push(gene);
+                }
+            }
+        }
+        normalize_validation_sets(&mut expected_mendelian);
+        normalize_validation_sets(&mut expected_with_polygenic);
+
+        let mut actual_mendelian = vec![Vec::<u32>::new(); mondo.term_count()];
+        let mut actual_with_polygenic = vec![Vec::<u32>::new(); mondo.term_count()];
+        for disease in &knowledge.condition_associations {
+            let conditions = mondo.condition_ancestor_indices(&disease.id);
+            for association in &disease.genes {
+                if !eligible_association_type(&association.association_type, true) {
+                    continue;
+                }
+                let Some(gene) = resolved_association_gene(&resolver, association) else {
+                    continue;
+                };
+                let gene =
+                    validation_gene_index(&mut gene_indexes, &mut gene_keys, gene.comparison_key());
+                for condition in &conditions {
+                    actual_with_polygenic[*condition].push(gene);
+                    if association
+                        .association_type
+                        .eq_ignore_ascii_case("MENDELIAN")
+                    {
+                        actual_mendelian[*condition].push(gene);
+                    }
+                }
+            }
+        }
+        normalize_validation_sets(&mut actual_mendelian);
+        normalize_validation_sets(&mut actual_with_polygenic);
+
+        let (mendelian_counts, with_polygenic_counts) =
+            mondo_association_gene_counts(&knowledge, &resolver, &mondo);
+        let mut nonempty = 0_usize;
+        for &condition in mondo.active_term_indices() {
+            let id = mondo.term_id(condition);
+            assert_validation_gene_set_eq(
+                id,
+                "Mendelian",
+                &expected_mendelian[condition],
+                &actual_mendelian[condition],
+                &gene_keys,
+            );
+            assert_validation_gene_set_eq(
+                id,
+                "Mendelian plus polygenic",
+                &expected_with_polygenic[condition],
+                &actual_with_polygenic[condition],
+                &gene_keys,
+            );
+            assert_eq!(
+                mendelian_counts[condition] as usize,
+                expected_mendelian[condition].len(),
+                "Mendelian autocomplete count differs for {id}"
+            );
+            assert_eq!(
+                with_polygenic_counts[condition] as usize,
+                expected_with_polygenic[condition].len(),
+                "polygenic autocomplete count differs for {id}"
+            );
+            nonempty += usize::from(!expected_with_polygenic[condition].is_empty());
+        }
+        eprintln!(
+            "validated exact condition-gene sets and autocomplete counts for {} active MONDO conditions; {nonempty} have at least one Mendelian or polygenic association",
+            mondo.active_term_indices().len()
+        );
+    }
+
     #[test]
     #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT to the root containing raw/hp.obo and HPO tables"]
     fn official_hpo_known_cases_rank_within_top_twenty() {
         let root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let resources = root
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture root must be resources/hpo/release");
         let knowledge = load_knowledge_from_root(&root).unwrap();
-        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &[]);
+        let resolver = crate::gene_identity::Resolver::new(resources, &[]);
         let mut global_denominator = None;
         for (disease_id, target_symbol) in [("OMIM:607208", "SCN1A"), ("OMIM:108500", "CACNA1A")] {
             let disease = knowledge
@@ -5079,7 +6545,12 @@ mod tests {
                 &disease.positive,
                 "official-fixture".into(),
             );
-            let target = &ranking.genes[&format!("SYMBOL:{target_symbol}")];
+            let target_key = resolver
+                .resolve(target_symbol)
+                .resolved()
+                .map(|gene| gene.comparison_key())
+                .unwrap_or_else(|| format!("SYMBOL:{target_symbol}"));
+            let target = &ranking.genes[&target_key];
             global_denominator.get_or_insert(ranking.denominator);
             let target_group_end = ranking
                 .genes
@@ -5103,6 +6574,8 @@ mod tests {
             denominator: 0,
             genes: BTreeMap::new(),
         };
+        let (mendelian_counts, with_polygenic_counts) =
+            hpo_association_gene_counts(&knowledge, &resolver);
         let mut counts = Vec::new();
         for (id, label) in [
             ("HP:0001250", "Seizure"),
@@ -5122,8 +6595,49 @@ mod tests {
                 &[],
                 &HashMap::new(),
                 &empty_ranking,
+                false,
             )
             .unwrap();
+            let term_index = knowledge.term_index[id];
+            assert_eq!(
+                resolved.included.len(),
+                mendelian_counts[term_index] as usize
+            );
+            let search_count = search_terms(resources, id, 100, false)
+                .unwrap()
+                .into_iter()
+                .find(|term| term.id == id)
+                .and_then(|term| term.gene_count)
+                .expect("exact HPO search result must expose a gene count");
+            assert_eq!(search_count, resolved.included.len());
+            let with_polygenic = resolve_gene_set(
+                &resolver,
+                &[],
+                Some(&knowledge),
+                &[PhenotypeTerm {
+                    id: id.into(),
+                    label: label.into(),
+                }],
+                &[],
+                &[],
+                &[],
+                &HashMap::new(),
+                &empty_ranking,
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                with_polygenic.included.len(),
+                with_polygenic_counts[term_index] as usize
+            );
+            let polygenic_search_count = search_terms(resources, id, 100, true)
+                .unwrap()
+                .into_iter()
+                .find(|term| term.id == id)
+                .and_then(|term| term.gene_count)
+                .expect("polygenic HPO search result must expose a gene count");
+            assert_eq!(polygenic_search_count, with_polygenic.included.len());
+            assert!(with_polygenic.included.is_superset(&resolved.included));
             counts.push(resolved.included.len());
         }
         eprintln!("official HPO association counts: {counts:?}");
@@ -5160,6 +6674,10 @@ mod tests {
             phenotype_frequency("invalid"),
             (None, Some("invalid".into()))
         );
+        for excluded in ["HP:0040285", "0/5", "0%"] {
+            assert!(phenotype_frequency_is_excluded(excluded));
+        }
+        assert!(!phenotype_frequency_is_excluded("1/5"));
     }
 
     #[test]
@@ -5426,6 +6944,8 @@ mod tests {
                 conditions: Vec::new(),
                 pathways: Vec::new(),
                 genes: Vec::new(),
+                include_polygenic: false,
+                include_upstream_downstream: false,
                 show_matches_only: false,
                 preview_fingerprint: None,
             },
@@ -5502,9 +7022,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_normalization_keeps_the_most_specific_observed_term() {
+    fn selected_observed_terms_remain_while_ranking_keeps_the_most_specific_term() {
         let knowledge = test_knowledge();
-        let terms = canonical_terms(
+        let selected = canonical_terms(
             &knowledge,
             &[
                 PhenotypeTerm {
@@ -5519,9 +7039,44 @@ mod tests {
             false,
         )
         .unwrap();
-        let normalized = normalize_terms(&knowledge, terms, true).unwrap();
-        assert_eq!(normalized.len(), 1);
-        assert_eq!(normalized[0].id, "HP:0002197");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|term| term.id.as_str())
+                .collect::<Vec<_>>(),
+            ["HP:0001250", "HP:0002197"]
+        );
+        let resolver = crate::gene_identity::Resolver::new(Path::new("missing"), &[]);
+        let ranking_indexes = ranking_term_indexes(&knowledge, &selected).unwrap();
+        assert_eq!(ranking_indexes, [4]);
+        assert_eq!(
+            build_phenotype_ranking(&knowledge, &resolver, &ranking_indexes, "test".into())
+                .query_count,
+            1
+        );
+
+        let unrelated = canonical_terms(
+            &knowledge,
+            &[
+                PhenotypeTerm {
+                    id: "HP:0001250".into(),
+                    label: "Seizure".into(),
+                },
+                PhenotypeTerm {
+                    id: "HP:0001263".into(),
+                    label: "Global developmental delay".into(),
+                },
+            ],
+            false,
+        )
+        .unwrap();
+        let ranking_indexes = ranking_term_indexes(&knowledge, &unrelated).unwrap();
+        assert_eq!(ranking_indexes, [1, 2]);
+        assert_eq!(
+            build_phenotype_ranking(&knowledge, &resolver, &ranking_indexes, "test".into())
+                .query_count,
+            2
+        );
     }
 
     #[test]
@@ -5531,7 +7086,7 @@ mod tests {
             (1, vec!["geneMatches"]),
             (2, vec!["phenotypeRank", "geneMatches"]),
         ] {
-            let fields = crate::report_import::gene_catalog_fields(feature_count);
+            let fields = crate::report_import::gene_catalog_fields(feature_count, true);
             assert_eq!(
                 fields
                     .iter()
@@ -5555,6 +7110,22 @@ mod tests {
                         .is_some_and(|path| path == "geneMatches" || path == "phenotypeRank"))
             );
         }
+    }
+
+    #[test]
+    fn phenotype_rank_is_available_after_cohort_level_release_qualification() {
+        assert!(PHENOTYPE_RANK_RELEASE_QUALIFIED);
+        let fields = crate::report_import::gene_catalog_fields(2, PHENOTYPE_RANK_RELEASE_QUALIFIED);
+        assert!(
+            fields
+                .iter()
+                .any(|field| field["fieldPath"] == "phenotypeRank")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field["fieldPath"] == "geneMatches")
+        );
     }
 
     #[test]

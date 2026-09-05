@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "ignoredFields": [
+    {
+      "field": "SYMBOL_SOURCE",
+      "reason": "The public Ensembl GFF3 supplies the symbol but not VEP cache symbol provenance."
+    },
+    {
+      "field": "HGNC_ID",
+      "reason": "The public Ensembl GFF3 does not provide the VEP cache HGNC cross-reference."
+    },
+    {
+      "field": "APPRIS",
+      "reason": "The public Ensembl GFF3 does not provide the APPRIS metadata retained by the VEP cache."
+    },
+    {
+      "field": "SOURCE",
+      "reason": "SOURCE is an invocation label for the same GFF3 file, not a predicted variant consequence."
+    }
+  ],
+  "allowedExtraIdentities": []
+}

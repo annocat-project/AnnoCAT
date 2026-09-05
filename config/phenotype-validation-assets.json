@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "kind": "hpo-membership-oracle",
+      "release": "2026-06-23",
+      "filename": "phenotype_to_genes.txt",
+      "url": "https://github.com/obophenotype/human-phenotype-ontology/releases/download/v2026-06-23/phenotype_to_genes.txt",
+      "bytes": 66907216,
+      "sha256": "1386a4dd3ea046f5a5971f4011a3711a9d7928d60961e2e7b757b6860c63c778",
+      "reconciliation": {
+        "comparison": "active HPO term plus canonical gene, before association-type filtering",
+        "publishedOnly": 7019,
+        "rawOnly": 0,
+        "differentialSha256": "b2729876ea7d6e1803ca4848ccb87279459dbe435994a00e06c21e2903e92444"
+      }
+    }
+  ]
+}

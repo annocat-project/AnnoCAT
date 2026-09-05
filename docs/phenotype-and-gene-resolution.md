@@ -14,35 +14,45 @@ phenotype.
 ## Document status
 
 This is a specification, defect record, and implementation record, with status
-updated on 2026-08-26. **Required** describes the target contract. The local
+updated on 2026-08-27. **Required** describes the target contract. The local
 implementation status below does not mean the behavior has been published in a
 release.
 
 | Scope | Exact identity | Conformance to this contract |
 |---|---|---|
 | Public Windows release | GitHub release [`v0.1.0`](https://github.com/annocat-project/AnnoCAT/releases/tag/v0.1.0), release record published 2026-08-20; tag commit `795b5161cda0b814f27b886dc17f242546256bbe`; asset `AnnoCat-0.1.0-windows-x86_64.zip`, uploaded 2026-08-23, SHA-256 `fb27c464e07d6ec59152079dfc4b7fe80d0fbf116eaefd31d73821d6ca9c327a` | Uses the defective `hpo-lin-query-v4` behavior and does not conform to the corrected contract |
-| Local tracked baseline | Commit `4b9ee40d1336d316899a1601cef6e9ce635c5057` | Implements the corrected scientific and existing-UI workflow using a generated phenotype evidence file |
-| Local working tree | The tracked baseline plus the uncommitted live-query correction inspected on 2026-08-26 | Removes the generated phenotype evidence/catalog files and rebuilds the active query in memory. It predates the autocomplete-count, polygenic-scope, generated-list notation, upstream/downstream-scope, and wider-popover requirements added below; it is not committed, pushed, or published |
-| Target corrected query | Profile schema `6`, active-query contract `gene-profile-live-v1`, identity contract `hgnc-identity-v2` | Partially implemented in the local working tree. HPO/MONDO autocomplete counts, the polygenic-association switch, the upstream/downstream variant checkbox, typed generated-list headings, and wider responsive popover remain to be implemented and verified before publication |
+| Local preimplementation checkpoint | Commit `2219ac7` | Commits the reviewed specification and source-validation baseline before the new popover and resolver implementation |
+| Local working tree | Commit `2219ac7` plus the uncommitted implementation inspected on 2026-08-27 | Implements schema-6 polygenic and upstream/downstream scope, typed generated sections, HPO/MONDO/Reactome counts, the wider accessible popover, live in-memory matching, numeric NCBI Gene normalization, explicit-zero phenotype exclusion, the complete HPO/MONDO/Reactome/HGNC source validators, and the pinned public patient-case runner. **Phenotype rank** is available after passing the predeclared aggregate target-label null gate; individual challenge-case ranks remain nonblocking diagnostics. The work is not yet committed, pushed, or published |
+| Target corrected query | Profile schema `6`, active-query contract `gene-profile-live-v1`, identity contract `hgnc-identity-v2` | Gene membership, filtering, source-oracle validation, local workspace/browser verification, and the optional `resnik-query-disease-v1` search rank are implemented. The public retrospective cohort supports search-feature plausibility and regression testing, not a clinical-validation claim |
 
-Local verification through 2026-08-26 used the pinned source manifests and produced
-the following evidence for the pre-switch local implementation:
+Local verification through 2026-08-27 used the pinned source manifests and produced
+the following evidence for the current local implementation:
 
 | Check | Local result |
 |---|---|
-| Full Rust workspace, including the standalone report worker and AppContainer tests | 387 passed, 5 intentionally ignored, 0 failed |
-| Browser-module suite | 36 passed, 0 failed |
-| Pinned HPO self-retrieval regression | SCN1A/OMIM:607208 rank 1 and CACNA1A/OMIM:108500 rank 1; each tie group ends at 1 in a 4,805-gene denominator. These queries reuse complete disease profiles from the installed HPO corpus, so they verify implementation behavior but are not independent patient-case evidence |
-| Pinned HPO association sanity queries | Seizure 1,575; Short stature 987; Atrial septal defect 355; all distinct and non-universal |
-| Official HPO membership-oracle audit | The 2026-06-23 `phenotype_to_genes.txt` asset matched its 66,907,216-byte size, publisher SHA-256, and five-column header. `HP:0001262` produced 27 Mendelian oracle gene IDs; the raw source reconstruction produced those 27 plus two unresolved placeholder-symbol rows, which explains the prior `-` output |
-| Pinned HGNC reproducibility audit | The former mutable-current-object generation URLs returned `NoSuchKey`. The runtime manifest now uses the digest-equivalent immutable 2026-08 archive copies, which matched the configured complete-set and withdrawn-file byte sizes and SHA-256 values |
+| Full Rust workspace, including the standalone report worker and AppContainer tests | 393 active tests passed, 14 source-, network-, or corpus-dependent tests were intentionally ignored in the ordinary run, and 0 failed. The applicable ignored source and patient tests were then run explicitly as described below |
+| Browser-module suite | 40 passed, 0 failed |
+| Pinned HPO self-retrieval regression | SCN1A/OMIM:607208 rank 1 and CACNA1A/OMIM:108500 rank 1; each tie group ends at 1 in the corrected 4,803-gene denominator. These queries reuse complete disease profiles from the installed HPO corpus, so they verify implementation behavior but are not independent patient-case evidence |
+| Pinned HPO association sanity queries | Seizure 1,545; Short stature 977; Atrial septal defect 354; all distinct and non-universal after explicit zero-frequency observations and invalid placeholder genes are excluded |
+| Official HPO membership-oracle audit | The 2026-06-23 `phenotype_to_genes.txt` asset matched its 66,907,216-byte size, publisher SHA-256, and five-column header. Independent raw reconstruction and production matched exactly for 19,119 active terms under both association scopes. All raw positive memberships occurred in the 1,096,033-row flattened file; its 7,019 additional untyped memberships all mapped to explicit source exclusions and reproduced the pinned differential SHA-256. `HP:0001262` produced exactly 27 Mendelian genes and excluded numeric IDs `10108` and `3653` without emitting `-` |
+| Pinned MONDO graph and condition-gene audit | Independent parsing matched all 23,714 active human conditions, 19,016 unambiguous exact external mappings, every active ancestor set, and every subtype count. An independent join to the raw HPO disease-gene table then matched exact Mendelian and Mendelian-plus-polygenic sets and autocomplete counts for every active condition, including empty sets; 9,491 conditions had at least one eligible association in the broader scope |
+| Pinned Reactome pathway audit | Independent GMT parsing matched all 2,868 human pathways and all 142,657 distinct pathway-gene memberships exactly |
+| Pinned HGNC reproducibility and identity audit | The former mutable-current-object generation URLs returned `NoSuchKey`. The runtime manifest now uses the digest-equivalent immutable 2026-08 archive copies, which matched the configured complete-set and withdrawn-file byte sizes and SHA-256 values. The exhaustive resolver matrix matched 45,031 approved genes across 234,533 accepted or intentionally ambiguous identifiers |
 | Configured-source URL audit | All 116 unique production URLs passed the protocol-aware release check with zero blocking or advisory failures; all six pinned HPO, MONDO, and HGNC assets also passed full byte-count and SHA-256 verification |
-| Isolated local UI smoke test | Existing Genes popover retained; entered HNF1A resolved to 1 of 1 result gene; **Gene matches** displayed `HNF1A`, no `true` value or **Gene associations** section appeared, and the compact tooltip worked by keyboard and Escape |
+| Frozen Phenopacket Store manifest | Release `0.1.27`, commit `3f3619800b2c949f8bfb457a122346c2fae7e482`, 10,377 phenopacket files, canonical tree SHA-256 `8bd5aca8a75999644ff2008bd05ff0f85b84d8a64adb6c27e56e2f365607579e`. The eligibility runner found 10,305 eligible solved single-gene cases and 72 declared exclusions; the frozen cohort contains 40 cases from 40 genes, diseases, and publications |
+| Public patient-case plausibility report | The final 2026-08-27 run reproduced target coverage 95%; top 1 65%; top 3 65%; top 5 67.5%; top 10 67.5%; top 20 72.5%; mean reciprocal worst-tie rank 0.6611; median 1. The observed gene-balanced MRR exceeded the 95th percentile of 1,000 fixed-seed target-label derangements (0.6611 versus 0.0110). Dropout, less-specific-term, unrelated-noise, and 2,000-replicate gene- and publication-cluster bootstrap reports were produced with the fixed manifest seeds. The most recent local Windows run took 221,482 ms; runtime is telemetry, and Windows does not expose the Linux `/proc` peak-memory field |
+| Frozen challenge-case diagnostics | Seven of eight predeclared challenge cases ended within their historical complete top-20 reference group; `PMID_27057656_patient` placed ADAMTSL2 at rank 70. The case and result remain recorded, but no individual patient is an all-or-nothing performance gate. `PHENOTYPE_RANK_RELEASE_QUALIFIED` is true because the predeclared aggregate cohort null gate passed |
+| Validation-only ranking-candidate comparison | The comparison ranker reproduced every production score key, rank, tie count, and best disease for all genes in all 40 cases. Neither published form of symmetric Resnik aggregation nor a validation-only Phrank implementation fixed the ADAMTSL2 challenge result: worst-tie ranks were 71, 86, and 91 respectively, versus 70 for the current method. Each alternative had an unfavorable overall cohort tradeoff, so the production algorithm remains unchanged |
+| Isolated local UI smoke test | Existing Genes popover retained; entered HNF1A resolved to 1 of 1 result gene; keyboard selection set `aria-activedescendant`; successful results cleared the live announcement; the exact no-match state was announced; the 500 px footer remained inside the popover; and no `true` value or **Gene associations** section appeared |
 | Static and repository checks | Rust formatting, edited JavaScript syntax, the VEP concordance comparator self-test, and `git diff --check` passed; the final UI detector reported only two pre-existing width-transition warnings outside the changed CSS block |
 
-These are local results, not GitHub Actions or release evidence. The workflows
-are changed to run the pinned HPO gate, but that remote execution cannot occur
-until the implementation is committed and pushed.
+These are local results, not GitHub Actions or release evidence. The workflow
+is changed to run the pinned HPO, MONDO, Reactome, HGNC, fastVEP, and patient
+gates, but that remote execution cannot occur until the implementation is
+committed and pushed. The full patient gate passed its predeclared aggregate
+target-label null qualification locally. That qualifies **Phenotype rank** only
+as an exploratory search field in the local working tree; the public `v0.1.0`
+release is unchanged, and no corrected build has been published.
 
 The public defect counts below are observations from that exact `v0.1.0`
 release with the stated installed data, not timeless properties of AnnoCAT.
@@ -69,9 +79,11 @@ reuses the existing Genes popover, its inline scope/message area, the existing
 absent-gene inspection dialog, the Results **Columns** menu, and compact result
 cells. The target widens the existing popover on desktop, adds gene counts to
 the existing autocomplete result line, adds one native switch for polygenic
-associations, adds one default-off checkbox for VEP upstream/downstream variant
-matches, and adds the **Phenotype rank** result column generated by the existing
-dynamic-column system. It does not require a new panel, dedicated ranking
+associations, adds one default-off switch for VEP upstream/downstream variant
+matches, and adds the release-qualified **Phenotype rank** result column through
+the existing dynamic-column system. Qualification is limited to an exploratory
+search feature supported by the frozen retrospective cohort and does not claim
+clinical diagnostic accuracy. It does not require a new panel, dedicated ranking
 control, or Variant Details replacement section.
 
 ## Product purpose and terminology
@@ -110,7 +122,7 @@ incremental searching and avoids requiring a complete profile or a strict
 intersection. There is no association-versus-ranking mode and no **Match any**
 or **Match every** choice in the Genes popover. One polygenic-association switch
 changes whether documented `POLYGENIC` disease-gene associations are eligible;
-HPO `UNKNOWN` associations remain excluded. A separate default-off checkbox
+HPO `UNKNOWN` associations remain excluded. A separate default-off switch
 changes whether allele filtering also accepts VEP upstream/downstream-only
 matches. Neither control changes the union rule or the phenotype-ranking
 method. Selecting multiple terms always previews the deterministic union of
@@ -119,13 +131,14 @@ their association-derived gene sets under the current control states.
 ### Genes popover interaction contract
 
 The visible layout remains the current one: the heading **Add a feature,
-condition, pathway, or gene** with one compact **Include polygenic associations
-for HPO and MONDO** switch at the top right of the same header row; one **Search
-names or identifiers** input; selected-item chips; the gene-only textarea; the
-saved-list selector with **Use list**, **Save list**, and **Delete**; the existing
-inline scope/message area; and one right-aligned footer action group ordered as
-the **Include upstream/downstream variants (VEP 5 kb)** label, its checkbox,
-**Clear**, and **Apply**. The visible controls have the following fixed meanings:
+condition, pathway, or gene** with a compact gene-settings gear at the top right;
+one **Search names or identifiers** input; selected-item chips; the gene-only
+textarea; the saved-list selector with **Use list**, **Save list**, and **Delete**;
+the existing inline scope/message area; and a right-aligned footer containing
+**Clear** and **Apply**. The gear opens an anchored settings popover containing
+**Include polygenic associations for HPO and MONDO** and **Include
+upstream/downstream variants (VEP 5 kb)**. The visible controls have the following
+fixed meanings:
 
 | User action | Meaning |
 |---|---|
@@ -135,7 +148,7 @@ the **Include upstream/downstream variants (VEP 5 kb)** label, its checkbox,
 | Choose a result labeled **Gene** | Add the resolved gene directly |
 | Paste genes in the textarea | Resolve gene identities only and switch to the manual-list workflow |
 | Turn on **Include polygenic associations for HPO and MONDO** | In addition to the default Mendelian associations, admit source association type `POLYGENIC` for HPO features and MONDO conditions; continue to exclude `UNKNOWN`, and do not change Reactome, entered genes, union behavior, or phenotype ranking |
-| Check **Include upstream/downstream variants (VEP 5 kb)** | In addition to direct selected-gene transcript consequences, allow VEP `upstream_gene_variant` and `downstream_gene_variant` proximity matches within the configured 5,000 bp distance for every resolved gene, regardless of whether it came from HPO, MONDO, Reactome, autocomplete, paste, or a saved manual list |
+| Turn on **Include upstream/downstream variants (VEP 5 kb)** | In addition to direct selected-gene transcript consequences, allow VEP `upstream_gene_variant` and `downstream_gene_variant` proximity matches within the configured 5,000 bp distance for every resolved gene, regardless of whether it came from HPO, MONDO, Reactome, autocomplete, paste, or a saved manual list |
 | Choose **Use list** | Load the selected saved list as manual genes; do not restore ontology selections |
 | Choose **Save list** | Save the currently resolved genes as a manual gene list, not as a saved HPO/MONDO/Reactome query |
 | Choose **Delete** | Delete only the selected saved manual gene list |
@@ -154,18 +167,14 @@ unchanged. No horizontal page scrolling or clipped footer action is permitted.
 
 Autocomplete result labels and canonical identifiers make the chosen entity
 type visible. Selected items appear as labeled chips. Other than the documented
-polygenic-association switch and upstream/downstream variant checkbox, the
+polygenic-association and upstream/downstream variant switches, the
 popover must not gain controls for an association mode, semantic-similarity
 method, **any**, **every**, or a complete-patient-profile mode.
 
-The polygenic switch is a single compact label-and-toggle control, not a
-full-width row, card, or persistent helper paragraph. On desktop it stays
-top-right in the header. When the available width cannot fit the heading and
-control on one line, the header may wrap the control directly beneath the
-heading and before the search field. It does not move into the footer. The
-upstream/downstream checkbox remains in the footer because it changes the
-variant rows included when **Apply** is chosen, rather than changing ontology
-gene expansion.
+Both switches are compact label-and-toggle controls inside the settings
+popover, not full-width cards or persistent helper paragraphs. The settings
+gear stays at the top right of the header and the footer contains only
+**Clear** and **Apply**.
 
 A gene chosen from autocomplete can coexist with feature, condition, and
 pathway chips. Selecting an HPO feature, MONDO condition, or Reactome pathway
@@ -238,22 +247,13 @@ switch to off. An applied schema-6 Genes query persists the state so reopening
 reconstructs the same membership policy; a saved manual gene list does not
 persist it.
 
-#### Upstream/downstream variant checkbox
+#### Upstream/downstream variant switch
 
-The checkbox **Include upstream/downstream variants (VEP 5 kb)** is immediately
-before **Clear** in the popover footer. Its visible label is on the left of its
-checkbox square, producing the fixed desktop order **label, checkbox, Clear,
-Apply**. The label text and checkbox square are vertically centered on the same
-horizontal axis as the text inside **Clear** and **Apply**. They must align with
-the buttons' vertical midpoint, not with the buttons' top edge. The coded layout
-uses one footer flex group with centered cross-axis alignment rather than a
-manual top margin or pixel offset, so the alignment survives font scaling and
-zoom. It is a checkbox rather than a switch because changing it does not
-immediately alter the table;
-**Apply** commits the selected variant-match scope. At narrow widths the entire
-labeled checkbox moves as one unit to a full footer row above the action
-buttons; the label and square do not split into different rows. It is off by
-default, and **Clear** resets it to off.
+The switch **Include upstream/downstream variants (VEP 5 kb)** is the second
+option in the anchored gene-settings popover. Its visible label precedes the
+native switch. It is off by default, and **Clear** resets it to off. Changing
+the switch updates the preview; **Apply** commits the selected variant-match
+scope.
 
 With the checkbox off, a resolved gene matches an allele only when that gene
 has at least one consequence whose Sequence Ontology term set is not limited to
@@ -315,12 +315,12 @@ referenced [Transcript and evidence selection](transcript-and-evidence-selection
 section explains why the table and matching transcript can name different
 genes and how the selector changes the displayed transcript context.
 
-Changing the checkbox invalidates the current preview and fingerprint and
+Changing the switch invalidates the current preview and fingerprint and
 recomputes `includedGenesInResult` under the new match scope. It does not rerun
 ontology autocomplete or change the generated gene list. An applied schema-6
 Genes query persists `includeUpstreamDownstream`; a saved manual gene list does
 not. Editing generated text into a manual list or choosing **Use list** does not
-silently change the visible checkbox state.
+silently change the visible switch state.
 
 #### Generated gene-list association notation
 
@@ -596,7 +596,7 @@ provenance is not rewritten. If the August 2026 identity bytes must be retained
 instead, the correct durable solution is a controlled immutable mirror of
 those exact bytes, not the different July quarterly snapshot.
 
-The preview and active-query fingerprint includes the normalized selections,
+The preview and active-query fingerprint includes the canonical selected items,
 the `includePolygenic` and `includeUpstreamDownstream` states, profile schema,
 active-query and identity contract versions, fixed union policy, both algorithm
 versions, and every source-asset SHA-256. The saved record stores the
@@ -649,18 +649,18 @@ item type are removed.
 ### Autocomplete listbox states
 
 After the existing input debounce starts a search request, the autocomplete
-listbox opens with one nonselectable **Searching…** status row while that current
-request remains pending. A fast response may replace the row immediately; the
-browser must not impose a minimum display time or delay usable results merely
-to make the loading state visible.
+listbox remains closed while that request is pending. The visually hidden polite
+status region announces **Searching…** once; no temporary loading suggestion is
+shown. A fast response is used immediately, without an artificial minimum delay.
 
 When the current request succeeds with no results, the listbox remains open and
 shows one nonselectable **No matching feature, condition, pathway, or gene**
-row. Matching results replace either transient row with the normal selectable
-options and their documented identifiers, types, match details, and associated-
-gene counts. The pending and no-match messages are each announced once through
-a polite status region. They do not create a selection, change the current
-query, or enable **Apply**.
+row. Matching results replace the row with the normal selectable options and
+their documented identifiers, types, match details, and associated-gene counts.
+The pending and no-match messages are each announced once through a polite
+status region. Only the no-match message is also a visible nonselectable row.
+Neither state creates a selection, changes the current query, or enables
+**Apply**.
 
 Missing HPO/MONDO or Reactome data continues to use the existing warning and
 **Open Data sources** action outside the listbox; the autocomplete does not add
@@ -728,9 +728,14 @@ stored label is replaced with the installed canonical label. Each result also
 reports its unique feature-derived `geneCount` under the current association
 scope.
 
-Observed features keep the most specific selected term when an ancestor and
-descendant are both present. Explicitly absent features keep the most general
-term. An observed term cannot also fall under an explicitly absent ancestor.
+Every selected observed feature remains in the saved profile and generated gene
+preview, including when one selected term is an ancestor of another. Each
+feature contributes its documented exact-or-descendant gene set to the fixed
+union and retains its own bracketed section and provenance. For phenotype
+ranking only, an ancestor selected together with one of its descendants is
+redundant and is omitted from the Resnik query so the same clinical finding is
+not scored twice. This ranking-only normalization must never remove a chip,
+generated section, gene-membership contribution, or saved selection.
 
 ### MONDO condition search
 
@@ -840,7 +845,7 @@ above rather than the generic ontology-term shape. The saved Genes query can
 store observed HPO terms, MONDO conditions, Reactome pathways, and entered
 genes. It stores `includePolygenic` as the polygenic-association switch state
 and `includeUpstreamDownstream` as the VEP upstream/downstream variant-match
-checkbox state. Schema 6 does not contain `excluded` or `excludedGenes`.
+switch state. Schema 6 does not contain `excluded` or `excludedGenes`.
 Applying a saved Genes query requires the fingerprint returned by the latest
 preview; the server rejects an apply request
 when releases, source hashes, identities, selections, schemas, contracts, or
@@ -947,14 +952,21 @@ separate from positive associations.
 
 ### HPO gene-membership release oracle
 
-The official HPO `phenotype_to_genes.txt` file is a suitable oracle for whether
-AnnoCAT reconstructed the published HPO feature-to-gene relation in the correct
-ontology direction. It is not a second runtime data source and is not an
-independent biological truth set: HPO generates it from the same underlying
-ontology, phenotype annotations, and disease-gene curation that AnnoCAT reads.
-Passing this oracle demonstrates source conformance and catches implementation
-errors; it does not establish that every published association is causal or
-clinically useful.
+The official HPO `phenotype_to_genes.txt` file is a suitable untyped
+superset/reconciliation oracle for whether AnnoCAT traversed the published HPO
+feature-to-gene relation in the correct ontology direction. It is not a suitable
+standalone oracle for AnnoCAT's Mendelian-versus-polygenic policy: it has no
+`association_type` column, and the pinned file retains term-gene rows derived
+from explicitly excluded `phenotype.hpoa` observations. The independently
+parsed `hp.obo`, `phenotype.hpoa`, and `genes_to_disease.txt` files are therefore
+the operative typed-membership oracle. The flattened file confirms that the raw
+positive relation was not lost and freezes its reviewed exclusion differential.
+
+Neither layer is a second runtime data source or an independent biological truth
+set. HPO generates all of them from the same ontology, phenotype annotations,
+and disease-gene curation that AnnoCAT reads. Passing these checks demonstrates
+source conformance and catches implementation errors; it does not establish that
+every published association is causal or clinically useful.
 
 For the currently pinned HPO release, the validation-only asset is:
 
@@ -988,36 +1000,47 @@ The complete membership-oracle test is:
    oracle row to that file on the exact pair `(disease_id, numeric NCBI Gene
    ID)`. An unmatched oracle row is a source-contract failure; the test must not
    guess an association type from the disease or gene.
-4. Because `phenotype_to_genes.txt` does not contain `association_type`, apply
-   the product policy from the joined `genes_to_disease.txt` row. With
-   `includePolygenic: false`, retain only `MENDELIAN`; with it true, retain
-   `MENDELIAN` and `POLYGENIC`. Exclude `UNKNOWN`, other, and missing types in
-   both states. If duplicate joined rows have different types, a normalized
-   provenance tuple retains each eligible literal type while the operative gene
-   set remains deduplicated.
+4. Do not infer the operative association type for a flattened term-gene pair
+   from only the `disease_id` printed on that row. That provenance is sufficient
+   to validate an exact source join but is not a complete typed representation
+   of every disease that can contribute the same term-gene association. Use the
+   raw disease-gene rows instead: with `includePolygenic: false`, retain only
+   `MENDELIAN`; with it true, retain `MENDELIAN` and `POLYGENIC`. Exclude
+   `UNKNOWN`, other, and missing types in both states. Retain each eligible
+   literal type in provenance while deduplicating the operative gene set.
 5. In separate validation code, independently reconstruct the raw association
    relation from `hp.obo`, positive `phenotype.hpoa` annotations, and
-   `genes_to_disease.txt`. Resolve every eligible numeric source identity through
-   the pinned `hgnc-identity-v2` bundle. Compare genes by stable
+   `genes_to_disease.txt`. `qualifier=NOT`, `HP:0040285`, a zero numerator such
+   as `0/5`, and `0%` are excluded observations and must not contribute a
+   positive disease profile. If positive and excluded rows both exist for one
+   disease-term pair, retain the positive evidence; variable absence in one
+   cohort does not erase positive disease-level evidence from another. Resolve
+   every eligible numeric source identity through the pinned
+   `hgnc-identity-v2` bundle. Compare genes by stable
    `canonicalGeneId`, or by the documented unique `symbol-only` fallback only
    when no HGNC identity is available. Record every unresolved or ambiguous raw
    association in a deterministic exclusion ledger containing HPO ID, disease
    ID, numeric NCBI Gene ID, source label, association type, and reason. A
    placeholder such as `-` is never a gene.
-6. Reconcile the independently reconstructed view with the published oracle.
-   Every eligible, canonically resolved oracle tuple must exist in the raw view,
-   and every canonically resolved raw tuple must exist in the oracle. A raw row
-   absent from the oracle is permitted only when it is also excluded from the
-   operative set and appears in the reviewed exclusion ledger. For release
-   2026-06-23, the raw disease-gene file has 10 such Mendelian rows, covering
-   seven numeric NCBI Gene IDs, all with `-` as the source symbol; the official
-   oracle publishes none of those seven IDs. A resolved raw-only gene, an
-   unexplained oracle-only gene, or any other unreviewed differential is a hard
-   failure rather than an automatically accepted source update.
+6. Reconcile the untyped, canonically resolved raw positive relation with the
+   published oracle on `(active HPO term, canonical gene)`. For release
+   2026-06-23, all raw positive memberships are present in the published file:
+   `rawOnly = 0`. The published file has 7,019 additional memberships, and every
+   one maps back to an explicit excluded observation in `phenotype.hpoa`. The
+   sorted differential uses rows `published-only<TAB>HPO-ID<TAB>gene-key` and
+   has SHA-256
+   `b2729876ea7d6e1803ca4848ccb87279459dbe435994a00e06c21e2903e92444`.
+   These values are pinned in `config/phenotype-validation-assets.json`; any
+   raw-only membership, unexplained published-only membership, count change, or
+   hash change is a hard failure requiring a reviewed source update. Separately,
+   the raw disease-gene file has 10 Mendelian rows covering seven numeric NCBI
+   Gene IDs with `-` as the source symbol; unresolved placeholder rows remain in
+   the identity exclusion ledger and never become genes.
 7. For every active HPO descendant of `HP:0000118`, including active terms
-   absent from the oracle, construct expected Mendelian-only and Mendelian-plus-
-   polygenic sets. Compare them with AnnoCAT's one-item generated membership by
-   exact set equality after the documented identity exclusions. Assert no
+   absent from the flattened oracle, independently construct expected
+   Mendelian-only and Mendelian-plus-polygenic sets from the raw source files.
+   Compare them with AnnoCAT's generated membership and precomputed autocomplete
+   count by exact set equality after the documented identity exclusions. Assert no
    missing genes, no extra genes, no duplicate canonical identities, and exact
    equality of the independently derived exclusion ledger. The autocomplete
    `geneCount`, one-item preview count and gene set, generated textarea's
@@ -1026,7 +1049,11 @@ The complete membership-oracle test is:
 8. Test unions separately with fixed pairs and triples of overlapping and
    disjoint HPO selections. The operative union is deduplicated by canonical
    identity, while each selected feature retains its own disease and association-
-   type provenance.
+   type provenance. Include an ancestor/descendant pair and assert that both
+   chips, both generated sections, the saved profile, and both membership
+   contributions remain, while the Resnik query contains only the most specific
+   term. Include an unrelated pair and assert that both selections remain in
+   membership and ranking.
 9. Verify exact-versus-more-specific provenance against `phenotype.hpoa` and
    `hp.obo`, not against the flattened oracle. For every emitted feature,
    disease, and gene tuple, classify it as exact only when that disease has a
@@ -1036,8 +1063,8 @@ The complete membership-oracle test is:
    annotation is a hard failure if it contributes membership.
 10. Retain `HP:0001262` **Excessive daytime somnolence** as a pinned sentinel.
     Under the 2026-06-23 Mendelian policy the official oracle contains 27
-    distinct numeric NCBI Gene identities. The independent raw reconstruction
-    contains those 27 plus `10108` and `3653`, whose
+    distinct numeric NCBI Gene identities. The raw source relation before
+    identity exclusion contains those 27 plus `10108` and `3653`, whose
     `genes_to_disease.txt` symbols are both `-`. Neither numeric ID resolves to
     a unique approved identity through the pinned HGNC bundle: HGNC marks
     MKRN3-AS1 as an entry-withdrawn record, while
@@ -1094,27 +1121,31 @@ The Resnik implementation contract is:
    cannot be the most informative common ancestor. A selected term with no
    direct corpus support may still match through a supported ancestor; when no
    common ancestor with `Dt > 0` exists, its term-pair similarity is `0`.
-5. The Resnik similarity of two terms is the greatest usable IC among their
+5. Before scoring, canonical selected HPO terms are made nonredundant for the
+   ranking query only: when an ancestor and descendant are both selected, keep
+   the most specific selected term. The uncollapsed selections remain the
+   authoritative gene-membership union and saved profile.
+6. The Resnik similarity of two terms is the greatest usable IC among their
    common ancestors. For each positive selected query term, take its greatest
    similarity to any positive term in the disease profile, then average those
    values over the selected query terms. This is the asymmetric
    query-to-disease best-match average.
-6. For a gene associated with multiple eligible profiles, use its highest
+7. For a gene associated with multiple eligible profiles, use its highest
    disease-profile score as the gene score and retain that exact source disease
    identifier and label as the explanation.
-7. Canonicalize disease-gene associations before constructing the ranking
+8. Canonicalize disease-gene associations before constructing the ranking
    universe. Count one gene once by `canonicalGeneId`. A unique symbol-only
    fallback is counted once by its normalized approved symbol and marked
    `symbol-only`; ambiguous or unresolved associations are excluded from the
    ranking universe and its denominator.
-8. Rank the complete eligible HPO Mendelian gene universe. The denominator does
+9. Rank the complete eligible HPO Mendelian gene universe. The denominator does
    not change when result rows are filtered or when the query also contains
    MONDO conditions, Reactome pathways, or entered genes.
-9. Sort selected query terms, disease terms, disease identifiers, and canonical
+10. Sort selected query terms, disease terms, disease identifiers, and canonical
    gene identities lexically by their canonical IDs before evaluation. Sum each
    query term's best score sequentially in query-ID order; do not use a
    nondeterministic parallel floating-point reduction.
-10. Persist the raw `f64` score, but compare and tie scores using
+11. Persist the raw `f64` score, but compare and tie scores using
     `scoreKey = floor(rawScore * 10^12 + 0.5)`. A gene's competition rank is one
     plus the number of genes with a greater score key. Equal score keys receive
     the same rank, and tie count is the total number of genes with that key.
@@ -1177,23 +1208,88 @@ resolution, or manual gene filtering. Those search functions require the
 source-specific equality tests in this document rather than a patient-case
 ranking benchmark.
 
-The case-level validation has two distinct sets:
+The case-level validation has two distinct views of one frozen cohort:
 
-1. A small frozen sentinel set is a blocking regression gate. Its inclusion
-   criteria and expected worst-tie rank are fixed before implementation output
-   is examined. Every sentinel's entire tie group must end within its declared
-   threshold; the initial threshold is top 20 unless the manifest documents a
-   stricter precomputed expectation. Unrelated sentinels must produce distinct,
-   non-universal rankings. The threshold protects known behavior and is not a
-   claim that every real Mendelian case should rank within the top 20.
-2. A broader frozen benchmark cohort measures plausibility and performance.
+1. Eight predeclared challenge cases retain their historical top-20 references
+   for transparent case-level diagnostics. They must remain present,
+   resolvable, and reproducible, but an individual miss is not a release gate.
+   A causal gene below top 20 is reported as a false negative for that cutoff.
+2. The complete frozen benchmark cohort measures plausibility and performance.
    It reports target coverage, found and missed counts, top 1, 3, 5, 10, and 20
    proportions, mean reciprocal rank, median target rank, complete worst-tie
-   rank distribution, runtime, and peak memory. Initially this report is
-   release telemetry, not a new arbitrary pass percentage. After one reviewed
-   baseline release, subsequent releases must not regress beyond a predeclared
-   tolerance; the cohort and tolerance cannot be changed after seeing a
-   candidate build's output.
+   rank distribution, runtime, and peak memory. The first release gate is the
+   predeclared aggregate target-label null comparison below. Absolute top-k
+   values establish telemetry rather than an invented pass percentage. After
+   one reviewed baseline release, subsequent releases must not regress beyond
+   a predeclared tolerance; the cohort and tolerance cannot be changed after
+   seeing a candidate build's output.
+
+The 2026-08-26 implementation freezes Phenopacket Store release `0.1.27` at
+commit `3f3619800b2c949f8bfb457a122346c2fae7e482`. Its canonical index of all
+10,377 phenopacket JSON files has SHA-256
+`8bd5aca8a75999644ff2008bd05ff0f85b84d8a64adb6c27e56e2f365607579e`.
+The manifest fixes eight challenge cases and 32 additional HGNC-distinct cases before
+the production ranks are run. The runner independently verifies the full source
+tree, each selected file, positive and excluded findings, solved interpretation,
+single causative approved HGNC identity, disease and publication provenance,
+and the 40 exact query lists. It emits a transient detailed JSON report and a
+complete per-case gene-rank TSV suitable for a PhEval adapter during release
+validation. The report records the AnnoCAT
+version and release commit, data versions, association and query policies,
+eligible-gene denominator, tie policy, metrics, uncertainty, perturbations, and
+per-case results. GitHub retains the workflow artifacts for 90 days; neither
+corpus nor output is installed in AnnoCAT or included in the release ZIP.
+
+That first frozen run passed the predeclared aggregate target-label null gate.
+`PMID_27057656_patient` nevertheless placed ADAMTSL2 at worst-tie rank 70
+against its historical top-20 reference, while the other seven challenge cases
+ended within 20. This is not evidence that the Resnik implementation is
+arithmetically wrong; the synthetic and independent-comparator tests pass. It
+is a disclosed case-level false negative for a top-20 cutoff. Existing phenotype
+ranking tools also report misses at cohort level rather than requiring every
+patient to pass one cutoff. The implementation therefore makes **Phenotype
+rank** available as an exploratory search field while retaining this failure in
+the report. The result does not establish clinical validity.
+
+The failure was followed by a validation-only comparison on 2026-08-27. It did
+not alter the frozen manifest, production algorithm, rank catalog, or release
+flag. The comparator first reproduced the production baseline for every gene
+in every one of the 40 cases, including score keys, competition ranks, tie
+counts, and best-disease identifiers. It then scored the same fixed corpus with
+three independently named candidates:
+
+| Validation-only method | ADAMTSL2 worst-tie rank | Top 1 | Top 20 | MRR | Challenge cases beyond historical top 20 |
+|---|---:|---:|---:|---:|---:|
+| `resnik-query-disease-v1` production baseline | 70 | 65.0% | 72.5% | 0.6611 | 1 |
+| Equal mean of query-to-disease and disease-to-query Resnik averages | 71 | 52.5% | 80.0% | 0.6006 | 1 |
+| Size-weighted symmetric Resnik best-match average | 86 | 47.5% | 77.5% | 0.5593 | 1 |
+| Phrank candidate | 91 | 65.0% | 70.0% | 0.6678 | 2 |
+
+Every method retained 95% target coverage and passed the same 1,000-replicate
+target-label null. The target gene's best disease remained the causally correct
+`OMIM:231050` under all methods. For that profile, its query-to-disease Resnik
+average was 2.4269 and its disease-to-query average was 1.5146. Symmetry
+therefore penalized the correct 45-term disease profile for findings missing
+from the 16-term patient query; it did not selectively remove the advantage of
+other densely annotated profiles. Phrank also placed a second challenge case
+beyond the historical top-20 reference. No candidate produced a sufficiently
+consistent cohort-level improvement to justify changing the documented
+production method for this release.
+
+This result is concordant with the intended partial-query workflow and the
+literature. The original
+[`Phenomizer`](https://pmc.ncbi.nlm.nih.gov/articles/PMC2756558/) uses the
+one-sided query-to-disease direction for differential diagnosis, while the
+directional average is principally introduced when symmetry is required. The
+2025 [Phenopacket-Store comparison](https://pmc.ncbi.nlm.nih.gov/articles/PMC12667856/)
+found no universally superior semantic-similarity method and retained
+one-sided Phenomizer similarity among the strongest general differential-
+diagnosis methods. [`Phrank`](https://www.nature.com/articles/s41436-018-0072-y)
+is a legitimate diagnostic-ranking alternative, but its published performance
+does not by itself establish superiority on AnnoCAT's fixed task and gene
+universe. A future candidate must receive a new algorithm version and pass a
+newly governed, untouched holdout; ADAMTSL2 remains a disclosed diagnostic case
+and must not be removed merely because it ranks poorly.
 
 #### Patient-case benchmark governance
 
@@ -1213,6 +1309,24 @@ for which no single causal gene is established. A case is not excluded because
 AnnoCAT omits or poorly ranks its target. An eligible target outside the fixed
 ranking universe remains a coverage failure, contributes zero to mean
 reciprocal rank, and stays in the relevant denominator.
+
+There is no universal published minimum cohort size. The current 40
+HGNC-, disease-, and publication-distinct cases are a frozen engineering and
+first-release plausibility baseline, not a precise clinical-performance study.
+For illustration only, if the true top-20 recovery were approximately 70% and
+cases were independent, ordinary binomial 95% margins would be about 14
+percentage points with 40 cases, 6 with 200, and 4 with 500. A future validation
+must choose its sample size from a prespecified precision or non-inferiority
+target and account for repeated genes, diseases, and publications; 200 and 500
+are planning examples, not standards.
+
+This monogenic cohort evaluates multi-feature patient profiles. A single HPO
+feature selected in AnnoCAT remains a valid exploratory search, but it is tested
+primarily for source association correctness, coverage, stable tie handling,
+and non-universal output rather than an expectation that one causal gene must
+appear in a fixed top-k. MONDO, Reactome, HGNC, and the optional polygenic
+association expansion have separate source-contract tests. Polygenic retrieval
+cannot use a one-causal-gene Recall@k endpoint.
 
 Corpus preparation normalizes every positive HPO identifier against the pinned
 HPO release. An active identifier is retained; an obsolete identifier is
@@ -1339,48 +1453,113 @@ not clinical validation. The existing SCN1A and CACNA1A tests that query
 complete profiles from the same installed HPO corpus remain useful
 self-retrieval regressions but do not satisfy this external case-level layer.
 
+#### Comparable validation practice and current AnnoCAT state
+
+Published phenotype-ranking evaluations use several different designs; most do
+not provide both a temporal knowledge cutoff and a patient cohort proven never
+to have contributed to the reference annotations.
+
+| Tool or evaluation | Documented design | What the design establishes |
+|---|---|---|
+| [`Phenomizer`](https://pmc.ncbi.nlm.nih.gov/articles/PMC2756558/) | Simulated patient profiles derived from known disease phenotypes, with phenotype loss, generalization, and noise | Ranking mechanics and robustness on known disease knowledge; not independent clinical performance |
+| [`Phrank`](https://www.nature.com/articles/s41436-018-0072-y) | 169 diagnosed DDD patients scored against HPO-A/OMIM knowledge; novel causal-gene hypotheses were excluded | Real-patient retrieval of established diagnoses, but not a documented temporal holdout |
+| [`Phen2Gene`](https://pmc.ncbi.nlm.nih.gov/articles/PMC7252576/) | 197 literature-derived patients plus 85 clinician-curated CHOP patients | The CHOP cases provide a separate clinical cohort; literature cases can overlap HPO or other knowledge sources, and the study does not impose a complete knowledge-date cutoff |
+| [`LIRICAL`](https://pmc.ncbi.nlm.nih.gov/articles/PMC7477017/) | 384 literature case reports plus a separate 100,000 Genomes comparison cohort | A mixture of public-case plausibility and stronger separate clinical evidence; the literature cohort is not demonstrated to be leakage-free or temporal |
+| [`Xrare`](https://pmc.ncbi.nlm.nih.gov/articles/PMC6752318/) | Pathogenic variants were separated by publication year, post-2016 variants were reserved for evaluation, and known pre-2016 HPO-associated genes were excluded for the novel-gene analysis | An explicit temporal safeguard for the applicable evaluation, stronger than an ordinary retrospective split |
+| [`GADO`](https://pmc.ncbi.nlm.nih.gov/articles/PMC6599066/) | Leave-one-association-out scoring for known HPO term-gene associations | Whether correlated expression and phenotype information can recover an omitted direct association; not a temporal patient holdout |
+| [`PhEval`](https://pmc.ncbi.nlm.nih.gov/articles/PMC11929307/) | Standardized Phenopacket corpora, tool adapters, pinned configurations, normalized rank output, and perturbation analysis | Reproducible comparison; using PhEval does not by itself make a corpus temporal or independent of HPO curation |
+| [Timestamped novel-condition benchmark](https://pmc.ncbi.nlm.nih.gov/articles/PMC10570269/) | Multiple tools were restricted to a 2015 knowledge graph and evaluated on post-2015 discoveries and UDN patients | The closest published model for testing generalization beyond knowledge available at a declared cutoff |
+| [`Endeavour`](https://pmc.ncbi.nlm.nih.gov/articles/PMC4987917/) | Predictions from data available through January 2013 were tested against HPO associations added by December 2015 | A true time-stamped association benchmark; its lower result than ordinary cross-validation demonstrates why temporal evidence must be reported separately |
+
+A separate patient cohort is not automatically a cohort "unused by HPO." A
+patient record may be new and never supplied to HPO while the patient's disease,
+causal gene, and characteristic features are already represented in HPO. That is
+appropriate when the stated task is retrieval from current clinical knowledge.
+Potential leakage arises when the exact case report or patient observations
+being scored helped create the reference annotations and the resulting metric is
+then described as independent diagnostic accuracy. Independence requires either
+auditable annotation and publication provenance against a frozen cutoff or a
+separately governed cohort that was unavailable to the knowledge source.
+
+[VarSeq PhoRank](https://www.goldenhelix.com/blog/varseq-phorank-part-1-variant-phorank-gene-ranking/)
+and [VarSome Picks](https://docs.varsome.com/en/varsome-picks) publicly document
+phenotype prioritization from current HPO, OMIM, and other sources, but their
+public product documentation does not supply a temporal, independently
+reproducible validation design that can be used as AnnoCAT's scientific oracle.
+They remain workflow and presentation comparators only.
+
+AnnoCAT therefore separates two validation claims:
+
+1. **Known-association retrieval** asks whether current installed knowledge can
+   retrieve a solved causal gene from a real patient profile. The current public
+   cohort addresses this task, subject to its retrospective-overlap limitation.
+2. **Temporal or independent generalization** asks how ranking performs when the
+   tested case or association was unavailable to the frozen knowledge snapshot.
+   AnnoCAT does not yet have evidence for this claim.
+
+The validation state as of 2026-08-27 is:
+
+| Layer | Current state | Permitted conclusion |
+|---|---|---|
+| Source membership and identity | Implemented and passed locally for the complete pinned HPO, MONDO, Reactome, and HGNC contracts | The installed sources are parsed and resolved according to this specification |
+| Resnik arithmetic and determinism | Implemented and passed locally with synthetic fixtures, invariants, and complete-output comparison against a validation-only scorer | The documented `resnik-query-disease-v1` calculation is implemented consistently; this does not establish clinical usefulness |
+| Frozen retrospective patient cohort | Implemented and passed locally for 40 gene-, disease-, and publication-distinct Phenopacket Store cases, including the aggregate null, clustered intervals, and perturbations | Search-feature plausibility and a first nonrandom regression baseline; not a precise or independent clinical-accuracy estimate |
+| Current 40-case status | Results have been inspected and alternative aggregations have been compared on these cases | This cohort is now a development/regression set. It must not be reused as an untouched test for choosing a later algorithm |
+| Larger untouched public cohort | Not implemented or frozen | A new manifest must be selected and frozen before any candidate output is examined. Approximately 300 independent cases is a planning target for an initial roughly five-percentage-point binomial margin near the observed top-20 rate, not a universal standard; clustering and source overlap can require more |
+| Temporal holdout | Not implemented | No claim about performance on associations or cases unavailable to the installed HPO snapshot |
+| Separately governed clinical cohort | Not available | No clinical-validation or real-world diagnostic-accuracy claim |
+| GitHub and release evidence | Not run for the uncommitted implementation; public `v0.1.0` remains the defective build | Local qualification does not mean the corrected feature has been published |
+
+The current 40 cases remain immutable as the first regression baseline. A
+future larger public cohort must be a separately named version and frozen before
+its results are viewed; simply adding cases to the already inspected manifest
+would not create a holdout. A temporal cohort must additionally pin an older HPO
+and association snapshot and admit only cases or associations first available
+after that cutoff. The two cohort results must be reported separately rather
+than combined into one "accuracy" percentage.
+
 #### Verification implementation scope and difficulty
 
-The minimum implementation reuses the existing production resolver and ranker,
+The implementation reuses the existing production resolver and ranker,
 the ignored official-HPO case test, `verify-phenotype-known-cases.ps1`, and the
 current release workflows. It does not add PhEval, a second ontology library, a
 new runtime service, or a patient-case corpus to the application or release ZIP.
 
-| Work item | Existing base | Relative difficulty |
+| Work item | Existing base | Current status or remaining difficulty |
 |---|---|---|
-| Pinned fastVEP 5 kb default guard | Source-contract CI already clones and builds the exact pin | Low: add an implicit-default boundary fixture and record the verified default; do not change AnnoCAT's command |
-| Resnik hand fixtures and invariants | Production ranking and a fixed-IC/tie test already exist | Low to moderate: expand the synthetic DAG cases and add order, duplicate, excluded-term, and worst-tie assertions |
-| Independent Resnik comparator | The production formula and output contract are fixed | Moderate: write one small validation-only implementation that shares no scoring helpers and compare exact score keys and ranks |
-| Complete HPO/MONDO/Reactome/HGNC source oracles | Production parsers, pinned manifests, and source-contract workflow already exist | Moderate to high: independent parsing, complete-set reconciliation, exclusion ledgers, and actionable failure reports are still required |
-| Public patient-case runner | The official-HPO test already loads the ranking corpus and calls the production ranker | Moderate: validate the pinned case manifest and exclusion ledger, then emit deterministic case-, gene-, and optional disease-balanced rank records |
-| Cohort uncertainty and negative control | Uses the recorded public-case output; no second ranker or runtime dependency is required | Low after the runner exists: add fixed-seed clustered bootstrap summaries and target-label derangements to the validation report |
-| Noise and imprecision report | Uses the same public-case runner | Low to moderate after the runner exists: generate deterministic dropout, ancestor-replacement, and unrelated-noise profiles from recorded seeds |
+| Pinned fastVEP 5 kb default guard | Source-contract CI clones and builds the exact pin | Completed locally: the implicit-default strand-aware fixtures verify inclusion at 5,000 bases and exclusion at 5,001 without changing AnnoCAT's command |
+| Resnik hand fixtures and invariants | Production ranking and fixed-IC/tie tests exist | Completed locally for IC, most-informative common ancestor, asymmetric averaging, best-disease selection, score keys, competition ties, query order, and duplicate terms |
+| Independent Resnik comparator | The production formula and output contract are fixed | Completed locally: the validation-only scorer reproduced all production score keys, ranks, ties, and best-disease identifiers for the fixed 40-case output before comparing alternative aggregations |
+| Complete HPO/MONDO/Reactome/HGNC source oracles | Implemented in the existing source-contract workflow | Completed with independent parsing, complete-set reconciliation, exclusion ledgers, exact autocomplete-count checks, and actionable set-difference failures |
+| Public patient-case runner | The official-HPO test loads the ranking corpus and calls the production ranker | Completed locally for the pinned 40-case manifest, exclusion ledger, deterministic JSON report, and complete gene-rank TSV |
+| Cohort uncertainty and negative control | Uses the recorded public-case output; no second ranker or runtime dependency is required | Completed locally with 2,000 fixed-seed gene- and publication-cluster bootstrap replicates and 1,000 target-label derangements |
+| Noise and imprecision report | Uses the same public-case runner | Completed locally for deterministic term dropout, less-specific ancestor replacement, and strictly unrelated positive-term noise |
 | Temporal or private clinical holdout | No independent post-snapshot or governed clinical cohort is bundled | High scientifically and operationally; this is future stronger evidence, not a blocker for the current correction |
 
-The shortest correct implementation path is:
+The maintained verification path is:
 
 1. Keep the small synthetic source, Resnik, identity, and UI tests in normal CI.
-2. Extend the existing ignored official-HPO runner to read a validation-only
-   case manifest, enforce its eligibility and normalization rules, and write
+2. Run the existing ignored official-HPO runner with the validation-only case
+   manifest, enforce its eligibility and normalization rules, and write
    machine-readable target rank, tie, coverage, cohort-composition, runtime,
    and memory records. It must call the production ranker rather than duplicate
    it.
-3. Keep the independent Resnik comparator small and restricted to synthetic
-   fixtures; it must not become another way to generate user results.
-4. Run the frozen sentinels as the blocking patient-case gate. During a Windows
-   release, download the pinned public case corpus into temporary runner storage,
-   run the broader cohort, clustered summaries, target-label control, and
+3. Keep the validation-only Resnik comparator outside the application and
+   release ZIP. It may compare a frozen validation corpus, but it must not become
+   another way to generate user results.
+4. Run the frozen challenge cases as nonblocking per-case diagnostics. During a
+   Windows release, download the pinned public case corpus into temporary runner
+   storage, run the aggregate target-label gate, clustered summaries, and
    robustness variants, upload the JSON report, and discard the corpus. Do not
    install or package it.
 5. Reuse the existing source-contract workflow for complete HPO, MONDO,
    Reactome, and HGNC equality. Keep those pass/fail results separate from the
    patient-case ranking report.
 
-This is a moderate verification project overall, not a difficult production
-architecture change. The largest work is making independent full-source
-comparisons and useful failure reports. The ranking runner itself is relatively
-small because AnnoCAT already has the production scorer and an official-HPO
-test entry point.
+The implemented verification was a moderate test and release-workflow change,
+not a production architecture change. The remaining temporal or separately
+governed clinical evaluation is primarily a corpus-governance and scientific
+validation project; it must not add another ranking path to the application.
 
 A cross-method contest is not required to verify the fixed
 `resnik-query-disease-v1` contract. Comparing Resnik with Lin, Jiang-Conrath,
@@ -1390,11 +1569,11 @@ whether this implementation computes its declared method correctly.
 #### Phenotype rank presentation
 
 `phenotypeRank` is the structured field name and its user-facing column label
-is **Phenotype rank**. It may be enabled in a release only after the deterministic,
-reference-comparator, and frozen-sentinel gates pass and the versioned
-public-cohort report is produced and reviewed, including the target-label null
-gate above. The current
-complete-disease-profile self-retrieval tests do not by themselves satisfy that
+is **Phenotype rank**. It may be enabled in a release only after the deterministic
+and reference-comparator checks pass and the versioned public-cohort report is
+produced and reviewed, including the aggregate target-label null gate above.
+Challenge-case ranks remain visible diagnostics but are not individual release
+gates. The current complete-disease-profile self-retrieval tests do not by themselves satisfy that
 requirement. Once qualified, the field uses the existing **Columns** menu
 alongside the other result fields. No separate rank control, icon, or column
 chooser is added. Its availability and contextual
@@ -1539,7 +1718,7 @@ exclusion workflow would require its own visible design and a new schema.
 The preview reports both the complete resolved gene count and the number of
 those genes present in the current result under the active
 `includeUpstreamDownstream` scope. A gene with only upstream/downstream result
-consequences counts as present only when that checkbox is on. Result presence
+consequences counts as present only when that switch is on. Result presence
 changes the displayed overlap; it does not change the biological expansion.
 
 **Apply** is a result-filter action, not a separate save-record action. When the
@@ -1554,7 +1733,7 @@ scope/message area; they do not open a modal or add another panel. The current
 rows and previously active filter remain unchanged. A direct API request must
 distinguish and reject both cases. With positive overlap, applying the query
 creates a normal result filter and shows only rows with an eligible consequence
-match under the checkbox state. It does not reorder variants, infer inheritance,
+match under the switch state. It does not reorder variants, infer inheritance,
 or assign causality.
 
 The inspection action **View N without variants** remains visible whenever the
@@ -1645,7 +1824,7 @@ The field-level contract is:
 | Field | Purpose | User-facing standalone field? |
 |---|---|---|
 | `geneMatches` | Compact selected-item match for a result allele | Yes; composite table/filter field |
-| `phenotypeRank` | Integer competition rank for the combined positive-HPO query; displayed as **Phenotype rank** | Only with at least one positive HPO feature; initially visible with two or more when no explicit saved column choice exists, beside rather than instead of **Gene matches** |
+| `phenotypeRank` | Integer competition rank for the combined positive-HPO query; displayed as **Phenotype rank** | In a release-qualified build and with at least one positive HPO feature; initially visible with two or more when no explicit saved column choice exists, beside rather than instead of **Gene matches**. The current local build qualifies it through the predeclared aggregate retrospective-cohort null gate |
 | `phenotypeRankDetails` | Denominator, tie count, best disease, raw Resnik score, score key, algorithm, query count, and HPO provenance | No; tooltip dependency regenerated in RAM |
 | `geneMatchDetails` | Allele, selected-item, matched gene, relationship, matched consequence term, and representative-gene context | No; compact-tooltip dependency regenerated in RAM |
 | `phenotypeEvidenceDetails` | Documented feature and condition links for a gene | No |
@@ -1839,8 +2018,8 @@ boundaries:
     a flaky blocking threshold to this correction.
 17. Gate release on the specified unit, browser, workspace, full-release HPO
     membership oracle, MONDO/Reactome/HGNC source contracts, deterministic and
-    reference-comparator Resnik checks, frozen patient-case sentinels, and the
-    required public-cohort report. The public report must include its eligibility
+    reference-comparator Resnik checks, the frozen patient challenge-case report,
+    and the required aggregate public-cohort report. The public report must include its eligibility
     and exclusion ledger, case- and gene-balanced metrics, clustered uncertainty
     summaries, and a passing target-label null control.
     Record the exact commit, release asset digest, and every runtime and
@@ -1857,9 +2036,10 @@ boundaries:
     **Searching…** and **No matching feature, condition, pathway, or gene**
     listbox states without duplicating the existing source-unavailability
     warning or inline request-error message.
-20. Add exactly one native **Include polygenic associations for HPO and MONDO**
-    switch at the top right of the popover header, persist `includePolygenic` in
-    schema 6, and
+20. Add one gene-settings gear at the top right of the popover header. Its
+    anchored popover contains the native **Include polygenic associations for HPO
+    and MONDO** switch and **Include upstream/downstream variants (VEP 5 kb)**
+    switch. Persist `includePolygenic` in schema 6 and
     use it consistently for autocomplete counts, preview, Apply, reopen, and
     provenance. Do not expose or accept an HPO `UNKNOWN` switch. Widen the
     desktop popover to the existing `51.25rem` wide-dialog target while retaining
@@ -1870,14 +2050,12 @@ boundaries:
     type. Deduplicate the operative gene set even when a gene appears in more
     than one display section.
 22. Add exactly one default-off **Include upstream/downstream variants (VEP 5
-    kb)** checkbox immediately before **Clear** in the popover footer. Render
-    its label to the left of the checkbox square, use the desktop order **label,
-    checkbox, Clear, Apply**, and center the label and square on the buttons'
-    vertical midpoint rather than their top edge. Persist
+    kb)** switch inside the header's gene-settings popover. Keep **Clear** and
+    **Apply** as the only footer actions. Persist
     `includeUpstreamDownstream` in schema 6, retain the existing fastVEP
     annotation command with no `--distance` override, verify the pinned 5,000 bp
     default as specified above, and exclude
-    upstream/downstream-only allele-to-gene matches when the checkbox is off.
+    upstream/downstream-only allele-to-gene matches when the switch is off.
     Use the exact documented native tooltip and accessible description, including
     its plain-text reference to **Transcript and evidence selection**.
 23. Replace the expired mutable-current-object HGNC generation URLs in
@@ -2067,20 +2245,22 @@ desktop presentation and making its state understandable and safe:
   genes, or zero current-result overlap. This text uses the existing inline
   scope/message area and is not available only on hover.
 - The polygenic control uses the existing native `.fui-switch` pattern with
-  `role="switch"` and the always-visible label **Include polygenic associations
-  for HPO and MONDO**. It is off by default and uses the exact native-tooltip
+  `role="switch"` and the label **Include polygenic associations for HPO and
+  MONDO** inside the gene-settings popover. It is off by default and uses the exact native-tooltip
   text defined above. The same text is available through an accessible
   description for keyboard and screen-reader users; no custom tooltip, tooltip
   icon, or persistent helper paragraph is added. Its checked state is not
   conveyed by color alone. A zero-count condition or pathway exposes its reason
   through visible **0 associated genes** text as well as
   `aria-disabled="true"`.
-- The upstream/downstream control is a native checkbox with the always-visible
-  label **Include upstream/downstream variants (VEP 5 kb)**. The label precedes
-  the square, and the labeled control sits immediately before **Clear** in the
-  footer action group. Its text and square are vertically centered against the
-  text inside **Clear** and **Apply**, not aligned to the buttons' top edge. It
-  remains separate from the HPO/MONDO polygenic switch. It is off by default and
+- The heading uses the existing Fluent subtitle-2 size and line height rather
+  than the page-level `h2` scale. The settings gear remains vertically centered
+  in that heading row. The footer **Clear** and **Apply** actions share one
+  vertical centerline at desktop widths.
+- The upstream/downstream control is a native switch with the visible
+  label **Include upstream/downstream variants (VEP 5 kb)** inside the
+  gene-settings popover. The label precedes the switch and remains separate from
+  the HPO/MONDO polygenic switch. It is off by default and
   uses the exact native-tooltip text defined above, including **These variants
   can be biologically relevant, but proximity alone does not show that they
   affect the selected gene** and the plain-text documentation reference. The
@@ -2118,7 +2298,7 @@ literature supports a layered plan:
 | HPO, MONDO, and Reactome expansion | Did AnnoCAT reproduce the associations and mapping policy in the pinned sources? | Complete normalized set equality, counts, provenance, exclusions, and source hashes |
 | HGNC resolution | Did each accepted identifier resolve to the correct stable identity without guessing through ambiguity? | Full accepted-namespace matrix against the pinned HGNC release, including previous, withdrawn, ambiguous, placeholder, and unknown cases |
 | Resnik implementation | Did AnnoCAT calculate the declared formula exactly? | Hand-computed DAG fixtures, a separately implemented comparator, metamorphic invariants, exact score keys, ties, and ranks |
-| Patient-case ranking | Does the fixed method place known causal genes plausibly high on solved monogenic cases? | PhEval-compatible frozen sentinels, cohort metrics, and phenotype-perturbation reports |
+| Patient-case ranking | Does the fixed method place known causal genes plausibly high on solved monogenic cases? | Phenopacket-based frozen challenge cases, aggregate cohort metrics, and phenotype-perturbation reports |
 | Product integration | Did the correct resolver remain correct through the user workflow? | Browser/API equality from autocomplete through Apply, reopen, row filtering, sorting, and export |
 
 [`SSSOM`](https://pmc.ncbi.nlm.nih.gov/articles/PMC9216545/) specifically
@@ -2133,11 +2313,14 @@ HGNC identity equality.
 
 The source-specific release tests are:
 
-- HPO membership runs the full-release `phenotype_to_genes.txt` procedure above
-  for every active phenotypic-abnormality term and both polygenic-switch states.
-  Normal CI may use a checked-in miniature fixture, but the Windows release gate
-  must run the pinned 66,907,216-byte oracle and compare complete normalized sets
-  and exclusion ledgers.
+- HPO membership independently parses the raw ontology, positive and explicitly
+  excluded disease annotations, typed disease-gene rows, and HGNC identities for
+  every active phenotypic-abnormality term and both polygenic-switch states.
+  Production sets and autocomplete counts must equal that reconstruction. The
+  same release gate then streams the pinned 66,907,216-byte
+  `phenotype_to_genes.txt` file and reproduces the reviewed untyped superset
+  differential and exclusion ledger. Normal CI may use a checked-in miniature
+  fixture; the Windows release gate runs the full assets.
 - MONDO membership independently walks exact and descendant conditions in the
   pinned `mondo.json`, accepts only unambiguous `skos:exactMatch` disease
   mappings, joins those source disease IDs to the pinned HPO disease-gene file,
@@ -2157,8 +2340,9 @@ The source-specific release tests are:
   HGNC identity, approved display symbol, result-specific identity, status, and
   deterministic exclusion; a placeholder is never accepted as a gene.
 - Resnik uses the hand-calculated and validation-only reference-comparator
-  layers above. The frozen sentinel manifest and broader public patient-case
-  cohort are separate plausibility layers. Neither membership oracle is allowed
+  layers above. Frozen challenge cases provide per-case diagnostics and the
+  broader public patient-case cohort provides the aggregate plausibility gate.
+  Neither membership oracle is allowed
   to provide expected rank values, and rank is never allowed to alter an oracle
   gene set.
 - Patient-case manifest validation accepts only the predeclared solved,
@@ -2175,7 +2359,7 @@ The source-specific release tests are:
   the same through autocomplete count, preview, generated text, Apply, reopen,
   active consequence matching, visible filtering, sorting, and CSV export,
   subject only to the separately tested current-result intersection and VEP
-  upstream/downstream checkbox. This catches a correct resolver connected to an
+  upstream/downstream switch. This catches a correct resolver connected to an
   incorrect UI or result-query path.
 
 The maintained test contract includes:
@@ -2195,8 +2379,9 @@ The maintained test contract includes:
   source preview under both polygenic-switch states, Reactome counts are
   unchanged, and autocomplete performs no result-row scan or disk-cache write;
 - a query shorter than two normalized search units leaves the listbox closed;
-  a deliberately delayed current request exposes one nonselectable
-  **Searching…** row; a successful empty response exposes one nonselectable
+  a deliberately delayed current request keeps the listbox closed and announces
+  **Searching…** only through the polite status region; a successful empty
+  response exposes one nonselectable
   **No matching feature, condition, pathway, or gene** row; each state is
   announced once through a polite status region, and matching options replace
   it without an artificial minimum delay;
@@ -2252,29 +2437,26 @@ The maintained test contract includes:
   in more than one display section from the operative union; headings are
   ignored by the paste parser, inline annotations are not accepted as genes,
   and editing generated text drops typed provenance and enters manual-list mode;
-- the Genes popover adds only the documented **Include polygenic associations
-  for HPO and MONDO** switch at the top right of its header and **Include
-  upstream/downstream variants (VEP 5 kb)** checkbox immediately before
-  **Clear** in its footer, with no panel, persistent helper paragraph,
-  unclassified-association control, association mode, or ranking selector; both
+- the Genes popover adds only the documented gene-settings gear at the top right
+  of its header; its anchored popover contains **Include polygenic associations
+  for HPO and MONDO** and **Include upstream/downstream variants (VEP 5 kb)**,
+  with no persistent helper paragraph, unclassified-association control,
+  association mode, or ranking selector; both
   are off by default,
   their native tooltips have the exact documented copy, and their accessible
   descriptions expose the same text; editing the textarea or choosing **Use
   list** replaces typed ontology selections with gene-only input without hiding
-  or silently changing the upstream/downstream checkbox, **Save list** stores
-  resolved genes without ontology-query provenance or checkbox state,
+  or silently changing the upstream/downstream switch, **Save list** stores
+  resolved genes without ontology-query provenance or switch state,
   **Delete** removes only the selected manual list, and **Clear** clears the
   active query/filter without deleting saved lists and resets both controls;
 - the popover uses `min(51.25rem, calc(100vw - 24px))` on desktop, retains 12 px
   viewport margins and its existing maximum height, and keeps search, generated
   headings, saved-list controls, **Clear**, and **Apply** reachable without
-  horizontal page scrolling at narrow widths and 200% zoom; the polygenic
-  control remains top-right on a wide header, wraps between the heading and
-  search field when necessary, and never moves beside the footer actions; on
-  wide layouts the footer order is **upstream/downstream label, checkbox, Clear,
-  Apply**, with the label and square centered on the buttons' vertical midpoint;
-  at narrow widths the intact labeled checkbox wraps above **Clear** and
-  **Apply** without separating its text from its square;
+  horizontal page scrolling at narrow widths and 200% zoom; the settings gear
+  remains top-right in the header, its anchored popover stays within 12 px of the
+  viewport, and both setting labels and controls remain reachable; the footer
+  order remains **Clear, Apply** at all widths;
 - current, historical, withdrawn, versioned Ensembl, ambiguous, and unknown
   HGNC inputs resolve as documented, and the active map retains the canonical HGNC
   ID separately from the result-specific identifier; ambiguous and unresolved
@@ -2299,7 +2481,7 @@ The maintained test contract includes:
   displays only eligible matches;
 - **View N without variants** remains available for all-zero-result and partial
   overlap when `N > 0`, reports the correct absent count under the current
-  upstream/downstream scope, updates when the checkbox changes, and opening it
+  upstream/downstream scope, updates when the switch changes, and opening it
   never applies or changes a filter;
 - browser selections use union behavior, schema-6 requests containing a
   combination, absent terms, or gene exclusions are rejected, and no
@@ -2351,7 +2533,7 @@ Verification includes the focused Rust phenotype tests, HGNC, MONDO, and
 Reactome unit suites, browser phenotype tests, full Rust workspace, full web
 suite, and formatting checks in `.github/workflows/ci.yml` (**Test**).
 Small deterministic source fixtures, hand-calculated Resnik fixtures, the
-validation-only Resnik comparator, frozen patient-case sentinels, and the
+validation-only Resnik comparator, frozen patient challenge cases, and the
 versioned public-cohort runner belong in that maintained test path. The separate
 `.github/workflows/source-contract-validation.yml` workflow must stream and
 validate the full pinned HPO membership oracle and the pinned MONDO, Reactome,

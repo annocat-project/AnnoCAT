@@ -19,10 +19,12 @@ pub const MAX_CANDIDATES: usize = 10_000;
 const MAX_PHENOTYPE_PROFILE_BYTES: u64 = 64 * 1024 * 1024;
 const PHENOTYPE_ROLES: [&str; 1] = ["phenotype-profile"];
 
-#[allow(dead_code)]
-pub(crate) fn gene_catalog_fields(positive_hpo_feature_count: usize) -> Vec<serde_json::Value> {
+pub(crate) fn gene_catalog_fields(
+    positive_hpo_feature_count: usize,
+    phenotype_rank_available: bool,
+) -> Vec<serde_json::Value> {
     let mut fields = Vec::new();
-    if positive_hpo_feature_count > 0 {
+    if phenotype_rank_available && positive_hpo_feature_count > 0 {
         fields.extend([
             json!({
                 "scope": "gene",

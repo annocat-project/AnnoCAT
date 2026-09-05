@@ -2,121 +2,319 @@ name: Annotation concordance
 
 on:
   workflow_dispatch:
+    inputs:
+      fastvep_ref:
+        description: Candidate commit, tag, or branch in the configured fastVEP repository; blank uses the AnnoCAT pin
+        required: false
+        type: string
 
 permissions:
   contents: read
 
+env:
+  VEP_IMAGE: ensemblorg/ensembl-vep@sha256:ed6b660e278458109afc00d5e730aee240a3bf77e817796386033e1a18963152
+  ENSEMBL_GFF3_SHA256: 1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c
+  GRCH38_ARCHIVE_SHA256: fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02
+  GRCH38_FASTA_SHA256: 9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7
+
 jobs:
   ensembl-vep-115:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    name: Source-matched Ensembl VEP 115.2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install source preparation tools
         run: |
           sudo apt-get update
           sudo apt-get install -y samtools tabix
 
-      - name: Fetch and build pinned fastVEP
+      - name: Create validation workspace
+        run: mkdir -p "$RUNNER_TEMP/concordance/downloads"
+
+      - name: Cache pinned annotation downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/concordance/downloads
+          key: vep115-sources-${{ env.ENSEMBL_GFF3_SHA256 }}-${{ env.GRCH38_ARCHIVE_SHA256 }}
+
+      - name: Resolve and build candidate fastVEP
+        env:
+          REQUESTED_FASTVEP_REF: ${{ inputs.fastvep_ref }}
         run: |
-          commit=$(jq -r .commit config/fastvep-pin.json)
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
           repository=$(jq -r .repository config/fastvep-pin.json)
-          git clone "$repository" "$RUNNER_TEMP/fastVEP"
-          git -C "$RUNNER_TEMP/fastVEP" checkout --detach "$commit"
+          pinned_ref=$(jq -r .commit config/fastvep-pin.json)
+          ref="${REQUESTED_FASTVEP_REF:-$pinned_ref}"
+          git init "$RUNNER_TEMP/fastVEP"
+          git -C "$RUNNER_TEMP/fastVEP" remote add origin "$repository"
+          git -C "$RUNNER_TEMP/fastVEP" fetch --depth=1 origin "$ref"
+          git -C "$RUNNER_TEMP/fastVEP" checkout --detach FETCH_HEAD
+          resolved=$(git -C "$RUNNER_TEMP/fastVEP" rev-parse HEAD)
+          {
+            printf 'repository=%s\n' "$repository"
+            printf 'requested_ref=%s\n' "$ref"
+            printf 'resolved_commit=%s\n' "$resolved"
+          } > "$work/fastvep-source.txt"
+          printf 'FASTVEP_COMMIT=%s\n' "$resolved" >> "$GITHUB_ENV"
           cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
             --release --locked -p fastvep-cli
+          "$RUNNER_TEMP/fastVEP/target/release/fastvep" --version \
+            > "$work/fastvep-version.txt"
 
       - name: Require supplementary source cache parity
         run: |
-          mkdir -p "$RUNNER_TEMP/concordance"
           python scripts/verify-supplementary-cache-parity.py \
             --fastvep "$RUNNER_TEMP/fastVEP/target/release/fastvep" \
             --json "$RUNNER_TEMP/concordance/source-cache-parity.json"
 
-      - name: Prepare pinned Ensembl 115 chromosome inputs
+      - name: Download and verify pinned Ensembl 115 inputs
         run: |
-          mkdir -p "$RUNNER_TEMP/concordance"
-          cd "$RUNNER_TEMP/concordance"
-          curl --fail --location --retry 3 --output annotations.gff3.gz \
-            https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz
-          : > reference.fa
-          for chromosome in 21 22 X Y MT; do
-            curl --fail --location --retry 3 \
-              --output "reference.$chromosome.fa.gz" \
-              "https://ftp.ensembl.org/pub/release-115/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.chromosome.$chromosome.fa.gz"
-            gzip -dc "reference.$chromosome.fa.gz" >> reference.fa
-          done
-          samtools faidx reference.fa
-          gzip -dc annotations.gff3.gz | grep '^#' > annotations.gff3
-          gzip -dc annotations.gff3.gz | grep -v '^#' | \
-            awk -F '\t' '$1 == "21" || $1 == "22" || $1 == "X" || $1 == "Y" || $1 == "MT"' | \
-            sort -t $'\t' -k1,1V -k4,4n >> annotations.gff3
-          bgzip -c annotations.gff3 > annotations.gff3.gz
-          tabix -p gff annotations.gff3.gz
-          sha256sum reference.fa annotations.gff3.gz > source-hashes.sha256
+          set -euo pipefail
+          downloads="$RUNNER_TEMP/concordance/downloads"
+          gff="$downloads/Homo_sapiens.GRCh38.115.gff3.gz"
+          reference="$downloads/GRCh38_no_alt_analysis_set.fna.gz"
 
-      - name: Annotate with pinned fastVEP and require transcript-cache parity
+          if ! printf '%s  %s\n' "$ENSEMBL_GFF3_SHA256" "$gff" | sha256sum --check --status; then
+            rm -f "$gff"
+            curl --fail --location --retry 3 --output "$gff" \
+              https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz
+          fi
+          printf '%s  %s\n' "$ENSEMBL_GFF3_SHA256" "$gff" | sha256sum --check
+
+          if ! printf '%s  %s\n' "$GRCH38_ARCHIVE_SHA256" "$reference" | sha256sum --check --status; then
+            rm -f "$reference"
+            curl --fail --location --retry 3 --output "$reference" \
+              https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz
+          fi
+          printf '%s  %s\n' "$GRCH38_ARCHIVE_SHA256" "$reference" | sha256sum --check
+
+      - name: Prepare the shared GFF3 and FASTA
         run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
+          downloads="$work/downloads"
+          gzip -dc "$downloads/GRCh38_no_alt_analysis_set.fna.gz" > "$work/reference.fa"
+          printf '%s  %s\n' "$GRCH38_FASTA_SHA256" "$work/reference.fa" | sha256sum --check
+          samtools faidx "$work/reference.fa"
+
+          gzip -dc "$downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            | grep '^#' > "$work/annotations.gff3"
+          gzip -dc "$downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            | grep -v '^#' \
+            | awk -F '\t' '($1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 22) || $1 == "X" || $1 == "Y" || $1 == "MT"' \
+            | LC_ALL=C sort -t $'\t' -k1,1V -k4,4n -k5,5n \
+            >> "$work/annotations.gff3"
+          bgzip -f "$work/annotations.gff3"
+          tabix -f -p gff "$work/annotations.gff3.gz"
+
+          for chromosome in $(seq 1 22) X Y; do
+            printf '%s\tchr%s\n' "$chromosome" "$chromosome"
+          done > "$work/chr_synonyms.txt"
+          printf 'MT\tchrM\n' >> "$work/chr_synonyms.txt"
+
+          sha256sum \
+            "$downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            "$downloads/GRCh38_no_alt_analysis_set.fna.gz" \
+            "$work/reference.fa" "$work/reference.fa.fai" \
+            "$work/annotations.gff3.gz" "$work/annotations.gff3.gz.tbi" \
+            "$work/chr_synonyms.txt" > "$work/source-hashes.sha256"
+
+      - name: Verify and stage frozen qualification corpora
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
+          check_fixture() {
+            path=$1
+            expected_records=$2
+            expected_hash=$3
+            test "$(grep -vc '^#' "$path")" -eq "$expected_records"
+            printf '%s  %s\n' "$expected_hash" "$path" | sha256sum --check
+          }
+          check_fixture fixtures/fastvep/ensembl-115-legacy.vcf 197 \
+            b846a65bf671ddc7afcf9e6729d35bd85c31dc3f089cee3a7ce81926fa39b9d5
+          check_fixture fixtures/fastvep/ensembl-115-boundary.vcf 1262 \
+            ea912b66c7dfdc127c038faaffece824d78ed2873997d9cf7255290afdd58917
+          check_fixture fixtures/fastvep/ensembl-115-clinvar-reviewed.vcf 400 \
+            3de468d953892d970c132a3fcb48f2e5e7e98345dc10ceb25874f624daf6d4de
+          cp fixtures/fastvep/ensembl-115-legacy.vcf "$work/legacy.vcf"
+          cp fixtures/fastvep/ensembl-115-boundary.vcf "$work/boundary.vcf"
+          cp fixtures/fastvep/ensembl-115-clinvar-reviewed.vcf "$work/clinvar-reviewed.vcf"
+          sha256sum "$work/legacy.vcf" "$work/boundary.vcf" \
+            "$work/clinvar-reviewed.vcf" >> "$work/source-hashes.sha256"
+
+      - name: Pull the pinned official VEP 115.2 image
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
+          docker pull "$VEP_IMAGE"
+          docker image inspect --format '{{.Id}} {{join .RepoDigests " "}}' \
+            "$VEP_IMAGE" > "$work/vep-image.txt"
+          docker run --rm "$VEP_IMAGE" vep --version > "$work/vep-version.txt"
+
+      - name: Annotate with official VEP using the shared GFF3 and FASTA
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
+          fields='Allele,Consequence,IMPACT,SYMBOL,Gene,Feature_type,Feature,BIOTYPE,EXON,INTRON,HGVSc,HGVSp,cDNA_position,CDS_position,Protein_position,Amino_acids,Codons,DISTANCE,STRAND,FLAGS,CANONICAL,TSL'
+          for corpus in legacy boundary clinvar-reviewed; do
+            docker run --rm \
+              --user "$(id -u):$(id -g)" -e HOME=/tmp \
+              -v "$work:/data" "$VEP_IMAGE" vep \
+              --input_file "/data/$corpus.vcf" \
+              --output_file "/data/vep-gff-$corpus.vcf" \
+              --format vcf --vcf --force_overwrite --no_stats \
+              --offline --species homo_sapiens --assembly GRCh38 \
+              --gff /data/annotations.gff3.gz \
+              --fasta /data/reference.fa \
+              --synonyms /data/chr_synonyms.txt \
+              --terms SO --distance 5000 --hgvs --symbol --canonical \
+              --numbers --protein --biotype --tsl --no_check_variants_order \
+              --fields "$fields"
+          done
+          sha256sum "$work"/vep-gff-*.vcf >> "$work/source-hashes.sha256"
+
+      - name: Annotate with candidate fastVEP and require cache parity
+        id: cache_parity
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           work="$RUNNER_TEMP/concordance"
           fastvep="$RUNNER_TEMP/fastVEP/target/release/fastvep"
-          cp "$RUNNER_TEMP/fastVEP/validation/human/vep_example_GRCh38.vcf" "$work/input.vcf"
-          grep -v '^#' fixtures/fastvep/ensembl-115-xy-mt.vcf >> "$work/input.vcf"
-          test "$(grep -vc '^#' "$work/input.vcf")" -eq 197
-          "$fastvep" annotate -i "$work/input.vcf" \
-            --gff3 "Ensembl=$work/annotations.gff3" \
-            --fasta "$work/reference.fa" --hgvs --symbol --canonical \
-            -o "$work/fastvep.vcf"
           "$fastvep" cache \
-            --gff3 "Ensembl=$work/annotations.gff3" \
+            --gff3 "Ensembl=$work/annotations.gff3.gz" \
             --fasta "$work/reference.fa" \
             --output "$work/transcripts.cache" --no-progress
-          "$fastvep" annotate -i "$work/input.vcf" \
-            --transcript-cache "$work/transcripts.cache" \
-            --fasta "$work/reference.fa" --hgvs --symbol --canonical \
-            -o "$work/fastvep-cache.vcf"
-          sha256sum "$work/transcripts.cache" "$work/fastvep-cache.vcf" \
-            >> "$work/source-hashes.sha256"
-          cmp --silent "$work/fastvep.vcf" "$work/fastvep-cache.vcf"
-          "$fastvep" --version > "$work/fastvep-version.txt"
-
-      - name: Fetch the archived Ensembl VEP 115 oracle
-        run: |
-          work="$RUNNER_TEMP/concordance"
-          python scripts/fetch-ensembl-vep-oracle.py "$work/input.vcf" \
-            --request "$work/vep-request.json" \
-            --response "$work/vep-response.json" \
-            --software "$work/vep-software.json"
-
-      - name: Require exact supported-field concordance
-        run: |
-          work="$RUNNER_TEMP/concordance"
-          set +e
-          python scripts/compare-vep-concordance.py \
-            "$work/fastvep.vcf" "$work/vep-response.json" \
-            --oracle-format rest-json \
-            --contract fixtures/fastvep/ensembl-115-gff-rest-contract.json \
-            --json "$work/concordance.json"
-          status=$?
-          set -e
-          sha256sum "$work/input.vcf" "$work/fastvep.vcf" \
-            "$work/vep-request.json" "$work/vep-response.json" \
-            "$work/vep-software.json" \
-            fixtures/fastvep/ensembl-115-gff-rest-contract.json \
+          status=0
+          for corpus in legacy boundary clinvar-reviewed; do
+            "$fastvep" annotate --input "$work/$corpus.vcf" \
+              --output "$work/fastvep-direct-$corpus.vcf" \
+              --gff3 "Ensembl=$work/annotations.gff3.gz" \
+              --fasta "$work/reference.fa" --distance 5000 \
+              --hgvs --symbol --canonical --no-progress
+            "$fastvep" annotate --input "$work/$corpus.vcf" \
+              --output "$work/fastvep-cache-$corpus.vcf" \
+              --transcript-cache "$work/transcripts.cache" \
+              --fasta "$work/reference.fa" --distance 5000 \
+              --hgvs --symbol --canonical --no-progress
+            if ! cmp --silent "$work/fastvep-direct-$corpus.vcf" \
+              "$work/fastvep-cache-$corpus.vcf"; then
+              printf 'direct/cache mismatch: %s\n' "$corpus" >&2
+              status=1
+            fi
+          done
+          sha256sum "$work/transcripts.cache" "$work"/fastvep-*.vcf \
             >> "$work/source-hashes.sha256"
           exit "$status"
+
+      - name: Require source-matched official VEP concordance
+        id: source_matched
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          work="$RUNNER_TEMP/concordance"
+          status=0
+          for corpus in legacy boundary clinvar-reviewed; do
+            if ! python scripts/compare-vep-concordance.py \
+              "$work/fastvep-cache-$corpus.vcf" \
+              "$work/vep-gff-$corpus.vcf" \
+              --oracle-format vcf \
+              --contract fixtures/fastvep/ensembl-115-gff-gff-contract.json \
+              --json "$work/source-matched-$corpus.json"; then
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Require the existing archived REST contract for the legacy corpus
+        id: rest_legacy
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/concordance"
+          python scripts/fetch-ensembl-vep-oracle.py "$work/legacy.vcf" \
+            --batch-size 50 \
+            --request "$work/rest-legacy-request.json" \
+            --response "$work/rest-legacy-response.json" \
+            --software "$work/rest-legacy-software.json"
+          python scripts/compare-vep-concordance.py \
+            "$work/fastvep-cache-legacy.vcf" "$work/rest-legacy-response.json" \
+            --oracle-format rest-json \
+            --contract fixtures/fastvep/ensembl-115-gff-rest-contract.json \
+            --json "$work/rest-legacy-concordance.json"
+
+      - name: Record expanded archived REST differences
+        id: rest_expanded
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          work="$RUNNER_TEMP/concordance"
+          status=0
+          for corpus in boundary clinvar-reviewed; do
+            if python scripts/fetch-ensembl-vep-oracle.py "$work/$corpus.vcf" \
+              --batch-size 50 \
+              --request "$work/rest-$corpus-request.json" \
+              --response "$work/rest-$corpus-response.json" \
+              --software "$work/rest-$corpus-software.json"; then
+              if ! python scripts/compare-vep-concordance.py \
+                "$work/fastvep-cache-$corpus.vcf" \
+                "$work/rest-$corpus-response.json" \
+                --oracle-format rest-json \
+                --json "$work/rest-$corpus-concordance.json"; then
+                status=1
+              fi
+            else
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Summarize qualification lanes
+        if: always()
+        env:
+          CACHE_PARITY: ${{ steps.cache_parity.outcome }}
+          SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
+          REST_LEGACY: ${{ steps.rest_legacy.outcome }}
+          REST_EXPANDED: ${{ steps.rest_expanded.outcome }}
+        run: |
+          {
+            echo '## Ensembl VEP 115.2 qualification'
+            echo
+            echo '| Lane | Outcome | Release gate |'
+            echo '| --- | --- | --- |'
+            echo "| fastVEP direct/cache parity | $CACHE_PARITY | Yes |"
+            echo "| Source-matched official VEP | $SOURCE_MATCHED | Yes |"
+            echo "| Archived REST legacy contract | $REST_LEGACY | Yes |"
+            echo "| Expanded archived REST differential | $REST_EXPANDED | Diagnostic |"
+            echo
+            printf 'Candidate fastVEP commit: `%s`\n' "$FASTVEP_COMMIT"
+            echo
+            echo 'The expanded REST lane is diagnostic because REST uses a different transcript dataset. Its complete identity differences are retained in the uploaded JSON reports.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reproducibility record
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: annotation-concordance
+          name: annotation-concordance-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/concordance/concordance.json
-            ${{ runner.temp }}/concordance/source-cache-parity.json
-            ${{ runner.temp }}/concordance/source-hashes.sha256
-            ${{ runner.temp }}/concordance/fastvep-version.txt
-            ${{ runner.temp }}/concordance/vep-request.json
-            ${{ runner.temp }}/concordance/vep-response.json
-            ${{ runner.temp }}/concordance/vep-software.json
+            ${{ runner.temp }}/concordance/*.json
+            ${{ runner.temp }}/concordance/*.txt
+            ${{ runner.temp }}/concordance/*.sha256
+            ${{ runner.temp }}/concordance/fastvep-*.vcf
+            ${{ runner.temp }}/concordance/vep-gff-*.vcf
           if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce release qualification
+        if: always()
+        env:
+          CACHE_PARITY: ${{ steps.cache_parity.outcome }}
+          SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
+          REST_LEGACY: ${{ steps.rest_legacy.outcome }}
+        run: |
+          test "$CACHE_PARITY" = success
+          test "$SOURCE_MATCHED" = success
+          test "$REST_LEGACY" = success

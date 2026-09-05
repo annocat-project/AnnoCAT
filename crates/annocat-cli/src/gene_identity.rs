@@ -477,6 +477,7 @@ fn normalize(value: &str) -> String {
 
 fn normalize_identifier(value: &str) -> String {
     let value = normalize(value);
+    let value = value.strip_prefix("NCBIGENE:").unwrap_or(&value).to_owned();
     strip_ensembl_version(&value)
 }
 
@@ -532,6 +533,7 @@ fn transcript_genes(resources: &Path) -> Result<Arc<Vec<(String, String)>>, Stri
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     fn test_resolver() -> Resolver {
         let complete = concat!(
@@ -557,7 +559,13 @@ mod tests {
     #[test]
     fn resolves_current_and_historical_hgnc_identities() {
         let resolver = test_resolver();
-        for value in ["TP53", "HGNC:11998", "7157", "ENSG00000141510.18"] {
+        for value in [
+            "TP53",
+            "HGNC:11998",
+            "7157",
+            "NCBIGene:7157",
+            "ENSG00000141510.18",
+        ] {
             assert_eq!(resolver.resolve(value).resolved().unwrap().symbol, "TP53");
         }
         assert_eq!(resolver.resolve("ENSG00000141510.bad"), Resolution::Unknown);
@@ -617,6 +625,132 @@ mod tests {
         assert_eq!(
             resolver.resolve("CURRENT").resolved().unwrap().symbol,
             "CURRENT"
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT to a pinned HPO/HGNC release"]
+    fn official_hpo_hgnc_identifier_matrix_matches_release() {
+        let hpo_root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let resources = hpo_root
+            .parent()
+            .and_then(Path::parent)
+            .expect("HPO fixture root must be resources/hpo/release");
+        let complete = hpo_root.join("raw/hgnc_complete_set.txt");
+        let withdrawn = hpo_root.join("raw/withdrawn.txt");
+        let resolver = Resolver::new(resources, &[]);
+        assert_eq!(resolver.identity_release(), Some("2026-08-07"));
+
+        let complete_text = std::fs::read_to_string(&complete).unwrap();
+        let mut lines = complete_text.lines();
+        let header = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+        let column = |name: &str| header.iter().position(|value| *value == name).unwrap();
+        let hgnc = column("hgnc_id");
+        let symbol = column("symbol");
+        let status = column("status");
+        let alias = column("alias_symbol");
+        let previous = column("prev_symbol");
+        let ncbi = column("entrez_id");
+        let ensembl = column("ensembl_gene_id");
+        let clean = |value: &str| value.trim().trim_matches('"').to_ascii_uppercase();
+        let mut direct = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut historical = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut approved = BTreeMap::<String, String>::new();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.get(status).map(|value| clean(value)) != Some("APPROVED".into()) {
+                continue;
+            }
+            let hgnc_id = clean(fields.get(hgnc).copied().unwrap_or(""));
+            let approved_symbol = clean(fields.get(symbol).copied().unwrap_or(""));
+            approved.insert(hgnc_id.clone(), approved_symbol);
+            for key in [
+                fields.get(symbol).copied().unwrap_or(""),
+                fields.get(hgnc).copied().unwrap_or(""),
+                fields.get(ncbi).copied().unwrap_or(""),
+                fields.get(ensembl).copied().unwrap_or(""),
+            ] {
+                let key = clean(key).split('.').next().unwrap_or("").to_owned();
+                if !key.is_empty() {
+                    direct.entry(key).or_default().insert(hgnc_id.clone());
+                }
+            }
+            for field_index in [alias, previous] {
+                for key in fields
+                    .get(field_index)
+                    .copied()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .split('|')
+                    .map(clean)
+                    .filter(|key| !key.is_empty())
+                {
+                    historical.entry(key).or_default().insert(hgnc_id.clone());
+                }
+            }
+        }
+
+        let withdrawn_text = std::fs::read_to_string(&withdrawn).unwrap();
+        let mut lines = withdrawn_text.lines();
+        let header = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+        let symbol_index = header
+            .iter()
+            .position(|value| *value == "WITHDRAWN_SYMBOL")
+            .unwrap();
+        let targets_index = header
+            .iter()
+            .position(|value| *value == "MERGED_INTO_REPORT(S) (i.e HGNC_ID|SYMBOL|STATUS)")
+            .unwrap();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let key = clean(fields.get(symbol_index).copied().unwrap_or(""));
+            for target in fields
+                .get(targets_index)
+                .copied()
+                .unwrap_or("")
+                .trim_matches('"')
+                .split(',')
+            {
+                let target = clean(target.split('|').next().unwrap_or(""));
+                if approved.contains_key(&target) && !key.is_empty() {
+                    historical.entry(key.clone()).or_default().insert(target);
+                }
+            }
+        }
+
+        let keys = direct
+            .keys()
+            .chain(historical.keys())
+            .collect::<BTreeSet<_>>();
+        for key in keys.iter().copied() {
+            let candidates = direct.get(key).or_else(|| historical.get(key)).unwrap();
+            match candidates.len() {
+                1 => {
+                    let expected = candidates.iter().next().unwrap();
+                    let resolved = resolver
+                        .resolve(key)
+                        .resolved()
+                        .unwrap_or_else(|| panic!("{key} did not resolve"));
+                    assert_eq!(
+                        resolved.canonical_gene_id.as_deref(),
+                        Some(expected.as_str())
+                    );
+                    assert_eq!(resolved.symbol, approved[expected]);
+                    assert_eq!(resolved.identity_status, "hgnc");
+                }
+                _ => assert_eq!(resolver.resolve(key), Resolution::Ambiguous),
+            }
+        }
+        assert_eq!(
+            resolver.resolve("ANNOCAT_UNKNOWN_GENE"),
+            Resolution::Unknown
+        );
+        assert!(approved.len() > 40_000);
+        assert!(keys.len() > approved.len());
+        eprintln!(
+            "validated {} approved HGNC genes across {} accepted or ambiguous identifiers",
+            approved.len(),
+            keys.len()
         );
     }
 }

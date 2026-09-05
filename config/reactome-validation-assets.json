@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "source": "Reactome",
+  "policy": "rolling-runtime-quarterly-validation-snapshot",
+  "snapshot": "20260621-062359",
+  "snapshotCheckedAt": "2026-08-26T23:56:49-04:00",
+  "url": "https://reactome.org/download/current/ReactomePathways.gmt.zip",
+  "filename": "ReactomePathways.gmt.zip",
+  "etag": "\"48def-654bd9247b974\"",
+  "lastModified": "Sun, 21 Jun 2026 06:23:59 GMT",
+  "bytes": 298479,
+  "sha256": "8c1dbc8578431da5d2d5118262718c60b553a9be3398e93658daa069e4a9afd4"
+}
