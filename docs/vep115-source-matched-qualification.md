@@ -1,8 +1,8 @@
 # Source-matched Ensembl VEP 115.2 qualification
 
-Status: Proposed qualification contract. A local, uncommitted GitHub Actions
-draft exists, but it has not been run on GitHub and is not yet an approved
-release gate.
+Status: Qualification contract implemented locally. The expanded GitHub
+Actions workflow has not yet been run on GitHub, so no source-matched
+qualification has been awarded.
 
 Last updated: 2026-09-04
 
@@ -25,9 +25,9 @@ comparison remains a separate compatibility lane.
 
 This qualification does not install or invoke Ensembl VEP in AnnoCAT. The
 official VEP oracle runs on a temporary GitHub-hosted Linux runner. Candidate
-fastVEP testing also includes a Windows runner or equivalent controlled
-Windows environment for the exact executable intended for the AnnoCAT release
-ZIP.
+fastVEP testing also includes a Windows runner that builds and tests the exact
+candidate commit. The later release-artifact gate must separately bind the
+packaged executable to that qualified commit and recorded binary identity.
 
 ## Relevance and proportionality for AnnoCAT
 
@@ -354,9 +354,9 @@ fastVEP CSQ field must have exactly one disposition:
 - **input-derived**: compare with an independent deterministic extractor that
   reads the pinned input VCF and shares no parsing implementation with fastVEP;
 - **source-derived**: official GFF-mode VEP does not expose an equivalent
-  value, so compare fastVEP with a reviewed deterministic extractor that reads
-  the same pinned GFF3 and/or FASTA and shares no parsing implementation with
-  fastVEP; or
+  value, so compare fastVEP's declared source-supported projection with a
+  reviewed deterministic extractor that reads the same pinned GFF3 and/or
+  FASTA and shares no parsing implementation with fastVEP; or
 - **excluded**: the field is outside this source-matched consequence contract
   and has a specific documented reason and separate validation owner.
 
@@ -383,28 +383,41 @@ enables the VEP options required to emit each applicable field.
 `REF_ALLELE` after minimization, `UPLOADED_ALLELE` before minimization, and
 `HGVS_OFFSET` from VEP's HGVS shifting are exact comparisons when AnnoCAT emits
 them; the input-derived disposition may additionally verify their relationship
-to the submitted VCF. `ENSP` and `CCDS` are exact when the shared source exposes
-them.
+to the submitted VCF. `ENSP` is exact. `CCDS` is source-derived because VEP
+115.2's GFF parser does not project the GFF3 `ccdsid` attribute into its
+internal CCDS field; an independent validator therefore compares every
+fastVEP transcript CCDS value directly with the pinned GFF3.
 
-For MANE, compare exactly the designation that official GFF-mode VEP can derive
-from the shared GFF3. Do not synthesize or require the paired alternative
-transcript accession that official VEP provides only from its cache or
-database. Any product field carrying such an accession needs a separately
-pinned source and validation owner. Fields must not be dropped merely to obtain
-concordance. If AnnoCAT does not emit `ALLELE_NUM`, the comparator must still
-map each CSQ row unambiguously to one input ALT index and fail an ambiguous
-multiallelic mapping.
+For MANE, compare exactly the `MANE` set designation that official GFF-mode VEP
+can derive from the shared GFF3. The public GFF3 identifies `MANE_Select` and
+`MANE_Plus_Clinical` membership but does not contain the paired RefSeq
+accession. The source-derived check therefore requires the corresponding
+`MANE_SELECT` or `MANE_PLUS_CLINICAL` marker to be present only for tagged
+transcripts, but does not qualify its string value as a RefSeq accession.
+fastVEP's current GFF-built caches retain a versioned Ensembl transcript ID in
+that value for backward compatibility with AnnoCAT's transcript preference and
+viewer contract. AnnoCAT must not describe that value as the paired RefSeq
+transcript. Qualifying or displaying a paired accession requires a separately
+pinned MANE mapping source and validation owner. Fields must not be dropped
+merely to obtain concordance. If AnnoCAT does not emit `ALLELE_NUM`, the
+comparator must still map each CSQ row unambiguously to one input ALT index and
+fail an ambiguous multiallelic mapping.
 
-The following fields may be excluded from the GFF-to-GFF comparison only for
-the stated source reasons:
+The following fields are source-derived only for the stated source reasons:
 
 - `SYMBOL_SOURCE`, because the public GFF3 supplies the symbol without the VEP
   cache provenance;
 - `HGNC_ID`, because the GFF3 does not contain the VEP cache cross-reference;
+- `MANE_SELECT` and `MANE_PLUS_CLINICAL`, because the public GFF3 supports
+  membership validation but not validation of the paired RefSeq accession;
 - `APPRIS`, because fastVEP's GFF loader does not retain that cache metadata;
   and
-- `SOURCE`, because it is an invocation label for the same GFF3 rather than a
-  predicted consequence.
+- `CCDS`, because the public GFF3 contains `ccdsid` but official VEP 115.2 GFF
+  mode does not project it.
+
+`SOURCE` remains exact. The workflow stages the oracle GFF under the basename
+`Ensembl` and invokes fastVEP with the same explicit source label, making the
+invocation-derived values directly comparable.
 
 `FLAGS` is not excluded from the source-matched lane. If the shared GFF3
 provides `cds_start_NF` or `cds_end_NF`, both implementations must interpret
@@ -717,46 +730,53 @@ same artifact or a rerun of the packaged-binary qualification lane.
 As of 2026-09-04:
 
 - the local fastVEP branch is named `codex/vep115-concordance`;
-- fastVEP correctness changes remain uncommitted;
-- earlier forms of the Annotation concordance workflow are committed; the
-  expanded local draft and the three compact frozen VCF inputs have been
-  created, but the current draft and new inputs are uncommitted;
-- the supported-consequence manifest and versioned qualification input
-  contract do not yet exist;
-- the expanded ClinVar, transcript-boundary, metamorphic, and discovery
-  cohorts are documented requirements but have not been generated or added to
-  the workflow;
-- the current field contract does not yet own the complete production field
-  inventory, and the current workflow omits product-visible fields including
-  `ENSP`, `CCDS`, MANE metadata, and `HGVS_OFFSET`;
-- committed corpus-generation manifests, reference and complete VCF integrity
-  checks, complete row-level difference output, and the expanded comparator
-  self-tests do not yet exist;
-- the supported-previous-cache and packaged-Windows-executable qualification
-  lanes do not yet exist;
-- the immutable cache-compatibility manifest listing every supported release
-  cache and its identities does not yet exist;
+- the reviewed consequence and HGVS corrections are committed locally as
+  fastVEP `0863825`; the branch has not been pushed or pinned by AnnoCAT;
+- the expanded Annotation concordance workflow, three compact frozen VCF
+  inputs, their generators and manifests, and the verification helpers are
+  implemented locally;
+- the versioned qualification-input and 41-term supported-consequence
+  contracts exist and pass their local integrity checks;
+- the historical 197-record corpus, generated 1,262-record transcript-boundary
+  corpus, and independently selected 400-record ClinVar corpus are wired into
+  the workflow; the metamorphic and discovery cohorts remain requirements that
+  have not yet been implemented;
+- the field contract owns all 49 production CSQ fields. Applicable fields are
+  exact or input-derived; `CCDS` and MANE membership are checked directly
+  against the source GFF3; paired MANE RefSeq accessions are explicitly not
+  qualified by this lane; and every excluded field must remain empty;
+- the comparator emits complete row-level differences and its self-tests cover
+  missing, extra, changed, duplicate, multiallelic, and input-mutation failure
+  modes;
+- Linux source-matched, direct/cache, production-cache, live-REST diagnostic,
+  and Windows-candidate/previous-cache lanes are implemented locally;
+- the immutable previous-cache manifest enrolls AnnoCAT `v0.1.0`. Two local
+  invocations of its released builder produced the same 216,730,905-byte cache
+  with SHA-256
+  `e5a82215f22b5ff7b20bb214873a24c5f22e9eac8c1bc9fd403d9b22448bd4b2`;
 - the current `v0.1.0` GitHub release contains the Windows release ZIP and its
-  checksum but no transcript-cache asset; the planned compatibility lane will
-  therefore reproduce its baseline cache temporarily with the verified
-  released executable and pinned production inputs;
-- the production-equivalence lane does not yet compare a cache built from the
-  original GFF3 through AnnoCAT's exact production path with the
-  oracle-prepared cache;
-- the production source catalog pins the GFF3 checksum but does not yet pin the
-  GRCh38 reference archive checksum used by this qualification;
-- the current legacy REST lane fetches the archived service live; its frozen,
-  hashed regression response and separate diagnostic refresh do not yet exist;
-- the workflow still uses version tags for GitHub Actions, retains ordinary
-  artifacts for 30 days, and does not yet publish the durable compact release
-  evidence record;
-- the expanded workflow draft has not been committed, pushed, or run on
-  GitHub;
+  checksum but no transcript-cache asset; the Windows lane reproduces its
+  enrolled baseline cache temporarily from the verified released executable
+  and pinned production inputs;
+- local reproduction showed that the current candidate's exact production
+  cache is byte-identical to the enrolled `v0.1.0` cache, and the candidate
+  reads that old cache without modifying it across all three corpora;
+- local GFF projection validation covers 55,009 emitted transcript rows across
+  the three corpora, resolves every one of 9,957 distinct per-corpus transcript
+  identities, and reports no CCDS or MANE-membership mismatches. Distinct
+  transcript counts are reported per corpus and are not summed as a global
+  unique-transcript count;
+- the production source catalog and qualification contract pin both the GFF3
+  and GRCh38 reference-archive checksums;
+- the REST lanes are live diagnostics; a frozen, hashed archived-REST response
+  remains unimplemented and therefore is not a release gate;
+- third-party Actions are pinned to immutable commits and ordinary evidence is
+  retained for 90 days; the durable compact release evidence record is not yet
+  published;
+- the expanded workflow has not been pushed or run on GitHub;
 - the supplementary-source workflow currently proves synthetic OSA1/OSA2 and
   AnnoCAT projection parity; independently pinned real-source subsets are not
   yet implemented;
-- the fastVEP fixture README still describes archived REST as the consequence
-  oracle and must be aligned with this source-matched hierarchy;
 - no source-matched official VEP results exist yet; and
 - no AnnoCAT pin, packaged executable, or release has changed.
 

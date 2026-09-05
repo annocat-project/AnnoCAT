@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "assembly": "GRCh38",
+  "acceptedVcfVersions": ["4.0", "4.1", "4.2", "4.3"],
+  "contigs": {
+    "canonical": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "X", "Y", "MT"],
+    "acceptedAliases": "optional chr prefix; chrM aliases MT",
+    "excluded": "alternative, patch, decoy, and unlocalized contigs"
+  },
+  "positiveAlleles": {
+    "alphabet": "ACGT",
+    "classes": ["SNV", "MNV", "short insertion", "short deletion", "complex replacement"],
+    "multiallelic": "split and unsplit sequence alleles are in scope",
+    "referenceRequirement": "Every REF allele must match the pinned prepared FASTA"
+  },
+  "explicitlyExcluded": [
+    {"class": "symbolic structural allele", "examples": ["<DEL>", "<DUP>"], "reason": "Structural variants are outside the compact VEP 115.2 consequence lane."},
+    {"class": "breakend", "examples": ["N]2:100]"], "reason": "Breakends are outside the compact VEP 115.2 consequence lane."},
+    {"class": "spanning deletion", "examples": ["*"], "reason": "Spanning-deletion semantics require a dedicated multirecord contract."},
+    {"class": "non-variant", "examples": [".", "<NON_REF>"], "reason": "Non-variant records do not produce consequence annotations."}
+  ],
+  "recordPreservation": ["CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "original INFO", "FORMAT", "sample names", "sample values"],
+  "annotationMutation": "Only declared annotation headers and INFO fields may be added.",
+  "qualificationCorpora": [
+    "fixtures/fastvep/ensembl-115-legacy.vcf",
+    "fixtures/fastvep/ensembl-115-boundary.vcf",
+    "fixtures/fastvep/ensembl-115-clinvar-reviewed.vcf"
+  ]
+}

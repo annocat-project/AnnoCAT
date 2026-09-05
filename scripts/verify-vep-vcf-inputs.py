@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -99,6 +100,17 @@ def validate_vcf(path, fasta):
                 skipped["unsupported-symbolic"] += 1
                 skipped_identity.update(record_identity.encode())
                 continue
+            if not re.fullmatch(r"[ACGT]+", reference) or any(
+                not re.fullmatch(r"[ACGT]+", alt) for alt in alts
+            ):
+                mismatches.append(
+                    {
+                        "line": line_number,
+                        "record": record_identity.rstrip(),
+                        "error": "sequence alleles must use the uppercase A/C/G/T alphabet",
+                    }
+                )
+                continue
             try:
                 position = int(pos_text)
                 observed = fasta.fetch(chrom, position, len(reference))
@@ -125,7 +137,7 @@ def validate_vcf(path, fasta):
         "recordIdentitySha256": identity.hexdigest(),
         "skippedIdentitySha256": skipped_identity.hexdigest(),
         "referenceMismatches": mismatches,
-        "passed": not mismatches and validated + sum(skipped.values()) == records,
+        "passed": not mismatches and not skipped and validated == records,
     }
 
 
@@ -140,8 +152,7 @@ def self_test():
         valid_vcf.write_text(
             "##fileformat=VCFv4.2\n"
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
-            "chr1\t2\tvalid\tC\tT\t.\tPASS\t.\n"
-            "1\t3\tnonvariant\tG\t.\t.\tPASS\t.\n",
+            "chr1\t2\tvalid\tC\tT\t.\tPASS\t.\n",
             encoding="ascii",
         )
         invalid_vcf = root / "invalid.vcf"
@@ -151,19 +162,28 @@ def self_test():
             "1\t2\tbad-ref\tG\tT\t.\tPASS\t.\n",
             encoding="ascii",
         )
+        excluded_vcf = root / "excluded.vcf"
+        excluded_vcf.write_text(
+            "##fileformat=VCFv4.2\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            "1\t3\tnonvariant\tG\t.\t.\tPASS\t.\n",
+            encoding="ascii",
+        )
 
         fasta = IndexedFasta(fasta_path)
         try:
             valid = validate_vcf(valid_vcf, fasta)
             invalid = validate_vcf(invalid_vcf, fasta)
+            excluded = validate_vcf(excluded_vcf, fasta)
         finally:
             fasta.close()
 
         assert valid["passed"]
         assert valid["validatedReferenceRecords"] == 1
-        assert valid["skipped"] == {"non-variant": 1}
         assert not invalid["passed"]
         assert invalid["referenceMismatches"][0]["expectedReference"] == "C"
+        assert not excluded["passed"]
+        assert excluded["skipped"] == {"non-variant": 1}
     print("VEP qualification input validator self-test passed")
 
 

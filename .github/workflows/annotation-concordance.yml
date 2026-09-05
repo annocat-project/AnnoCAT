@@ -22,8 +22,10 @@ jobs:
     name: Source-matched Ensembl VEP 115.2
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    outputs:
+      fastvep_commit: ${{ steps.candidate.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Install source preparation tools
         run: |
@@ -31,15 +33,23 @@ jobs:
           sudo apt-get install -y samtools tabix
 
       - name: Create validation workspace
-        run: mkdir -p "$RUNNER_TEMP/concordance/downloads"
+        run: |
+          mkdir -p "$RUNNER_TEMP/concordance/downloads"
+          python scripts/compare-vep-concordance.py --self-test
+          python scripts/verify-vep-vcf-inputs.py --self-test
+          python scripts/verify-vep-gff-projection.py --self-test
+          python scripts/verify-vep-qualification.py \
+            --require-enrolled-caches \
+            --json "$RUNNER_TEMP/concordance/qualification-inputs.json"
 
       - name: Cache pinned annotation downloads
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/concordance/downloads
           key: vep115-sources-${{ env.ENSEMBL_GFF3_SHA256 }}-${{ env.GRCH38_ARCHIVE_SHA256 }}
 
       - name: Resolve and build candidate fastVEP
+        id: candidate
         env:
           REQUESTED_FASTVEP_REF: ${{ inputs.fastvep_ref }}
         run: |
@@ -59,10 +69,14 @@ jobs:
             printf 'resolved_commit=%s\n' "$resolved"
           } > "$work/fastvep-source.txt"
           printf 'FASTVEP_COMMIT=%s\n' "$resolved" >> "$GITHUB_ENV"
+          printf 'commit=%s\n' "$resolved" >> "$GITHUB_OUTPUT"
           cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
             --release --locked -p fastvep-cli
           "$RUNNER_TEMP/fastVEP/target/release/fastvep" --version \
             > "$work/fastvep-version.txt"
+          sha256sum "$RUNNER_TEMP/fastVEP/Cargo.lock" \
+            "$RUNNER_TEMP/fastVEP/target/release/fastvep" \
+            > "$work/fastvep-build-hashes.sha256"
 
       - name: Require supplementary source cache parity
         run: |
@@ -106,9 +120,14 @@ jobs:
             | grep -v '^#' \
             | awk -F '\t' '($1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 22) || $1 == "X" || $1 == "Y" || $1 == "MT"' \
             | LC_ALL=C sort -t $'\t' -k1,1V -k4,4n -k5,5n \
-            >> "$work/annotations.gff3"
+            > "$work/annotations.records.gff3"
+          sha256sum "$work/annotations.records.gff3" \
+            > "$work/canonical-gff-records.sha256"
+          cat "$work/annotations.records.gff3" >> "$work/annotations.gff3"
           bgzip -f "$work/annotations.gff3"
           tabix -f -p gff "$work/annotations.gff3.gz"
+          ln "$work/annotations.gff3.gz" "$work/Ensembl"
+          ln "$work/annotations.gff3.gz.tbi" "$work/Ensembl.tbi"
 
           for chromosome in $(seq 1 22) X Y; do
             printf '%s\tchr%s\n' "$chromosome" "$chromosome"
@@ -121,6 +140,12 @@ jobs:
             "$work/reference.fa" "$work/reference.fa.fai" \
             "$work/annotations.gff3.gz" "$work/annotations.gff3.gz.tbi" \
             "$work/chr_synonyms.txt" > "$work/source-hashes.sha256"
+          {
+            samtools --version
+            bgzip --version 2>&1
+            tabix --version 2>&1
+            sort --version
+          } > "$work/source-preparation-tools.txt"
 
       - name: Verify and stage frozen qualification corpora
         run: |
@@ -145,6 +170,12 @@ jobs:
           sha256sum "$work/legacy.vcf" "$work/boundary.vcf" \
             "$work/clinvar-reviewed.vcf" >> "$work/source-hashes.sha256"
 
+          python scripts/verify-vep-vcf-inputs.py \
+            "$work/legacy.vcf" "$work/boundary.vcf" \
+            "$work/clinvar-reviewed.vcf" \
+            --fasta "$work/reference.fa" \
+            --json "$work/vcf-input-validation.json"
+
       - name: Pull the pinned official VEP 115.2 image
         run: |
           set -euo pipefail
@@ -158,7 +189,8 @@ jobs:
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/concordance"
-          fields='Allele,Consequence,IMPACT,SYMBOL,Gene,Feature_type,Feature,BIOTYPE,EXON,INTRON,HGVSc,HGVSp,cDNA_position,CDS_position,Protein_position,Amino_acids,Codons,DISTANCE,STRAND,FLAGS,CANONICAL,TSL'
+          fields=$(jq -r '[.fields[] | select(.disposition == "exact" or .disposition == "input-derived") | .name] | join(",")' \
+            fixtures/fastvep/ensembl-115-gff-gff-contract.json)
           for corpus in legacy boundary clinvar-reviewed; do
             docker run --rm \
               --user "$(id -u):$(id -g)" -e HOME=/tmp \
@@ -167,11 +199,12 @@ jobs:
               --output_file "/data/vep-gff-$corpus.vcf" \
               --format vcf --vcf --force_overwrite --no_stats \
               --offline --species homo_sapiens --assembly GRCh38 \
-              --gff /data/annotations.gff3.gz \
+              --gff /data/Ensembl \
               --fasta /data/reference.fa \
               --synonyms /data/chr_synonyms.txt \
               --terms SO --distance 5000 --hgvs --symbol --canonical \
-              --numbers --protein --biotype --tsl --no_check_variants_order \
+              --numbers --protein --biotype --tsl --mane \
+              --show_ref_allele --uploaded_allele --no_check_variants_order \
               --fields "$fields"
           done
           sha256sum "$work"/vep-gff-*.vcf >> "$work/source-hashes.sha256"
@@ -187,6 +220,16 @@ jobs:
             --gff3 "Ensembl=$work/annotations.gff3.gz" \
             --fasta "$work/reference.fa" \
             --output "$work/transcripts.cache" --no-progress
+          "$fastvep" cache-verify --input "$work/transcripts.cache" \
+            --require-primary-coding-sequences \
+            > "$work/canonical-cache-verification.json"
+          "$fastvep" cache \
+            --gff3 "Ensembl=$work/downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            --fasta "$work/reference.fa" \
+            --output "$work/production.cache" --no-progress
+          "$fastvep" cache-verify --input "$work/production.cache" \
+            --require-primary-coding-sequences \
+            > "$work/production-cache-verification.json"
           status=0
           for corpus in legacy boundary clinvar-reviewed; do
             "$fastvep" annotate --input "$work/$corpus.vcf" \
@@ -199,15 +242,31 @@ jobs:
               --transcript-cache "$work/transcripts.cache" \
               --fasta "$work/reference.fa" --distance 5000 \
               --hgvs --symbol --canonical --no-progress
+            "$fastvep" annotate --input "$work/$corpus.vcf" \
+              --output "$work/fastvep-production-$corpus.vcf" \
+              --transcript-cache "$work/production.cache" \
+              --fasta "$work/reference.fa" --distance 5000 \
+              --hgvs --symbol --canonical --no-progress
             if ! cmp --silent "$work/fastvep-direct-$corpus.vcf" \
               "$work/fastvep-cache-$corpus.vcf"; then
               printf 'direct/cache mismatch: %s\n' "$corpus" >&2
               status=1
             fi
           done
-          sha256sum "$work/transcripts.cache" "$work"/fastvep-*.vcf \
+          sha256sum "$work/transcripts.cache" "$work/production.cache" \
+            "$work"/fastvep-*.vcf \
             >> "$work/source-hashes.sha256"
           exit "$status"
+
+      - name: Require GFF-derived field correctness
+        id: source_projection
+        continue-on-error: true
+        run: |
+          work="$RUNNER_TEMP/concordance"
+          python scripts/verify-vep-gff-projection.py \
+            --gff "$work/downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            --json "$work/gff-field-projection.json" \
+            "$work"/fastvep-cache-*.vcf "$work"/fastvep-production-*.vcf
 
       - name: Require source-matched official VEP concordance
         id: source_matched
@@ -222,13 +281,34 @@ jobs:
               "$work/vep-gff-$corpus.vcf" \
               --oracle-format vcf \
               --contract fixtures/fastvep/ensembl-115-gff-gff-contract.json \
+              --input "$work/$corpus.vcf" \
               --json "$work/source-matched-$corpus.json"; then
               status=1
             fi
           done
           exit "$status"
 
-      - name: Require the existing archived REST contract for the legacy corpus
+      - name: Require production GFF cache equivalence
+        id: production_equivalence
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          work="$RUNNER_TEMP/concordance"
+          status=0
+          for corpus in legacy boundary clinvar-reviewed; do
+            if ! python scripts/compare-vep-concordance.py \
+              "$work/fastvep-production-$corpus.vcf" \
+              "$work/fastvep-cache-$corpus.vcf" \
+              --oracle-format vcf \
+              --contract fixtures/fastvep/ensembl-115-gff-gff-contract.json \
+              --input "$work/$corpus.vcf" \
+              --json "$work/production-equivalence-$corpus.json"; then
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Record live archived REST differences for the legacy corpus
         id: rest_legacy
         continue-on-error: true
         run: |
@@ -243,6 +323,7 @@ jobs:
             "$work/fastvep-cache-legacy.vcf" "$work/rest-legacy-response.json" \
             --oracle-format rest-json \
             --contract fixtures/fastvep/ensembl-115-gff-rest-contract.json \
+            --input "$work/legacy.vcf" \
             --json "$work/rest-legacy-concordance.json"
 
       - name: Record expanded archived REST differences
@@ -262,6 +343,7 @@ jobs:
                 "$work/fastvep-cache-$corpus.vcf" \
                 "$work/rest-$corpus-response.json" \
                 --oracle-format rest-json \
+                --input "$work/$corpus.vcf" \
                 --json "$work/rest-$corpus-concordance.json"; then
                 status=1
               fi
@@ -275,7 +357,9 @@ jobs:
         if: always()
         env:
           CACHE_PARITY: ${{ steps.cache_parity.outcome }}
+          SOURCE_PROJECTION: ${{ steps.source_projection.outcome }}
           SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
+          PRODUCTION_EQUIVALENCE: ${{ steps.production_equivalence.outcome }}
           REST_LEGACY: ${{ steps.rest_legacy.outcome }}
           REST_EXPANDED: ${{ steps.rest_expanded.outcome }}
         run: |
@@ -285,18 +369,20 @@ jobs:
             echo '| Lane | Outcome | Release gate |'
             echo '| --- | --- | --- |'
             echo "| fastVEP direct/cache parity | $CACHE_PARITY | Yes |"
+            echo "| GFF-derived field projection | $SOURCE_PROJECTION | Yes |"
+            echo "| Production/oracle-prepared cache equivalence | $PRODUCTION_EQUIVALENCE | Yes |"
             echo "| Source-matched official VEP | $SOURCE_MATCHED | Yes |"
-            echo "| Archived REST legacy contract | $REST_LEGACY | Yes |"
+            echo "| Live archived REST legacy differential | $REST_LEGACY | Diagnostic |"
             echo "| Expanded archived REST differential | $REST_EXPANDED | Diagnostic |"
             echo
             printf 'Candidate fastVEP commit: `%s`\n' "$FASTVEP_COMMIT"
             echo
-            echo 'The expanded REST lane is diagnostic because REST uses a different transcript dataset. Its complete identity differences are retained in the uploaded JSON reports.'
+            echo 'The REST lanes are diagnostic because REST uses a different transcript dataset and a live network service. Complete identity differences are retained in the uploaded JSON reports.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reproducibility record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: annotation-concordance-${{ github.run_id }}
           path: |
@@ -306,15 +392,281 @@ jobs:
             ${{ runner.temp }}/concordance/fastvep-*.vcf
             ${{ runner.temp }}/concordance/vep-gff-*.vcf
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
 
       - name: Enforce release qualification
         if: always()
         env:
           CACHE_PARITY: ${{ steps.cache_parity.outcome }}
+          SOURCE_PROJECTION: ${{ steps.source_projection.outcome }}
           SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
-          REST_LEGACY: ${{ steps.rest_legacy.outcome }}
+          PRODUCTION_EQUIVALENCE: ${{ steps.production_equivalence.outcome }}
         run: |
           test "$CACHE_PARITY" = success
+          test "$SOURCE_PROJECTION" = success
           test "$SOURCE_MATCHED" = success
-          test "$REST_LEGACY" = success
+          test "$PRODUCTION_EQUIVALENCE" = success
+
+  previous-cache-windows:
+    name: Windows candidate and previous-cache compatibility
+    if: ${{ always() }}
+    needs: ensembl-vep-115
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Download Linux oracle record
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: annotation-concordance-${{ github.run_id }}
+          path: ${{ runner.temp }}\vep115-linux
+
+      - name: Create Windows qualification workspace
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\vep115-windows\downloads" | Out-Null
+          python scripts/compare-vep-concordance.py --self-test
+          python scripts/verify-vep-vcf-inputs.py --self-test
+          python scripts/verify-vep-gff-projection.py --self-test
+          python scripts/verify-vep-qualification.py --require-enrolled-caches --json "$env:RUNNER_TEMP\vep115-windows\qualification-inputs.json"
+
+      - name: Cache pinned Windows annotation downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}\vep115-windows\downloads
+          key: windows-vep115-sources-${{ env.ENSEMBL_GFF3_SHA256 }}-${{ env.GRCH38_ARCHIVE_SHA256 }}
+
+      - name: Download and verify pinned inputs on Windows
+        shell: pwsh
+        run: |
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $downloads = Join-Path $work "downloads"
+          $gff = Join-Path $downloads "Homo_sapiens.GRCh38.115.gff3.gz"
+          $referenceArchive = Join-Path $downloads "GRCh38_no_alt_analysis_set.fna.gz"
+          $reference = Join-Path $work "reference.fa"
+          function Get-Sha256([string] $path) {
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+          }
+          function Get-VerifiedDownload([string] $url, [string] $path, [string] $expected) {
+            if ((Test-Path -LiteralPath $path) -and (Get-Sha256 $path) -ne $expected) {
+              Remove-Item -LiteralPath $path -Force
+            }
+            if (-not (Test-Path -LiteralPath $path)) {
+              Invoke-WebRequest -Uri $url -OutFile $path
+            }
+            if ((Get-Sha256 $path) -ne $expected) {
+              throw "SHA-256 mismatch for $path"
+            }
+          }
+          Get-VerifiedDownload "https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz" $gff $env:ENSEMBL_GFF3_SHA256
+          Get-VerifiedDownload "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz" $referenceArchive $env:GRCH38_ARCHIVE_SHA256
+          $archiveStream = [IO.File]::OpenRead($referenceArchive)
+          try {
+            $gzipStream = [IO.Compression.GZipStream]::new($archiveStream, [IO.Compression.CompressionMode]::Decompress)
+            try {
+              $referenceStream = [IO.File]::Create($reference)
+              try {
+                $gzipStream.CopyTo($referenceStream)
+              } finally {
+                $referenceStream.Dispose()
+              }
+            } finally {
+              $gzipStream.Dispose()
+            }
+          } finally {
+            $archiveStream.Dispose()
+          }
+          if ((Get-Sha256 $reference) -ne $env:GRCH38_FASTA_SHA256) {
+            throw "prepared GRCh38 FASTA SHA-256 mismatch"
+          }
+          @(
+            "$((Get-Sha256 $gff))  $gff"
+            "$((Get-Sha256 $referenceArchive))  $referenceArchive"
+            "$((Get-Sha256 $reference))  $reference"
+          ) | Set-Content -LiteralPath (Join-Path $work "windows-source-hashes.sha256")
+
+      - name: Verify the published v0.1.0 builder
+        id: release_builder
+        shell: pwsh
+        run: |
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $contract = (Get-Content -LiteralPath fixtures/fastvep/previous-cache-compatibility.json -Raw | ConvertFrom-Json).releases[0]
+          $zip = Join-Path $work $contract.releaseBundle.path
+          Invoke-WebRequest -Uri $contract.releaseBundle.url -OutFile $zip
+          $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($zipHash -ne $contract.releaseBundle.sha256 -or (Get-Item -LiteralPath $zip).Length -ne $contract.releaseBundle.bytes) {
+            throw "published AnnoCAT release bundle identity mismatch"
+          }
+          $expanded = Join-Path $work "published-release"
+          Expand-Archive -LiteralPath $zip -DestinationPath $expanded
+          $builder = Join-Path $expanded ($contract.builder.pathInBundle -replace '/', '\')
+          $builderHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $builder).Hash.ToLowerInvariant()
+          if ($builderHash -ne $contract.builder.sha256 -or (Get-Item -LiteralPath $builder).Length -ne $contract.builder.bytes) {
+            throw "published fastVEP builder identity mismatch"
+          }
+          & $builder --version | Set-Content -LiteralPath (Join-Path $work "published-fastvep-version.txt")
+          "OLD_FASTVEP=$builder" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "builder=$builder" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build the exact Windows candidate
+        id: windows_candidate
+        env:
+          FASTVEP_COMMIT: ${{ needs.ensembl-vep-115.outputs.fastvep_commit }}
+        shell: pwsh
+        run: |
+          if (-not $env:FASTVEP_COMMIT) {
+            throw "the Linux job did not resolve a candidate fastVEP commit"
+          }
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $repository = (Get-Content -LiteralPath config/fastvep-pin.json -Raw | ConvertFrom-Json).repository
+          $source = Join-Path $env:RUNNER_TEMP "fastVEP-windows"
+          git init $source
+          git -C $source remote add origin $repository
+          git -C $source fetch --depth=1 origin $env:FASTVEP_COMMIT
+          git -C $source checkout --detach FETCH_HEAD
+          if ((git -C $source rev-parse HEAD) -ne $env:FASTVEP_COMMIT) {
+            throw "Windows candidate commit does not match the Linux candidate"
+          }
+          cargo build --manifest-path (Join-Path $source "Cargo.toml") --release --locked -p fastvep-cli
+          $candidate = Join-Path $source "target\release\fastvep.exe"
+          & $candidate --version | Set-Content -LiteralPath (Join-Path $work "candidate-fastvep-version.txt")
+          $binaryHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash.ToLowerInvariant()
+          @(
+            "$binaryHash  $candidate"
+            "$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $source 'Cargo.lock')).Hash.ToLowerInvariant())  Cargo.lock"
+          ) | Set-Content -LiteralPath (Join-Path $work "candidate-build-hashes.sha256")
+          "CANDIDATE_FASTVEP=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "sha256=$binaryHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Reproduce the previous-release cache
+        id: previous_cache
+        shell: pwsh
+        run: |
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $gff = Join-Path $work "downloads\Homo_sapiens.GRCh38.115.gff3.gz"
+          $reference = Join-Path $work "reference.fa"
+          $cacheA = Join-Path $work "v0.1.0-cache-a.cache"
+          & $env:OLD_FASTVEP cache --gff3 "Ensembl=$gff" --fasta $reference --output $cacheA --no-progress
+          if ($LASTEXITCODE) { throw "previous-release cache build failed" }
+          & $env:OLD_FASTVEP cache-verify --input $cacheA --require-primary-coding-sequences | Set-Content -LiteralPath (Join-Path $work "v0.1.0-cache-verification.json")
+          if ($LASTEXITCODE) { throw "previous-release cache verification failed" }
+          $hashA = (Get-FileHash -Algorithm SHA256 -LiteralPath $cacheA).Hash.ToLowerInvariant()
+          $bytesA = (Get-Item -LiteralPath $cacheA).Length
+          $entry = (Get-Content -LiteralPath fixtures/fastvep/previous-cache-compatibility.json -Raw | ConvertFrom-Json).releases[0]
+          $enrolled = $entry.status -eq "enrolled"
+          if ($enrolled -and ($hashA -ne $entry.expectedCacheSha256 -or $bytesA -ne $entry.expectedCacheBytes)) {
+            throw "previous-release cache differs from its enrolled identity"
+          }
+          [ordered]@{
+            schemaVersion = 1
+            annocatRelease = $entry.annocatRelease
+            builderSha256 = $entry.builder.sha256
+            cacheFormat = $entry.cacheFormat
+            cacheBytes = $bytesA
+            cacheSha256 = $hashA
+            matchedEnrolledIdentity = $enrolled
+            manifestStatus = $entry.status
+            qualifiesRelease = $enrolled
+          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $work "previous-cache-reproduction.json")
+          Set-ItemProperty -LiteralPath $cacheA -Name IsReadOnly -Value $true
+          "BASELINE_CACHE=$cacheA" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "baseline_sha256=$hashA" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "enrolled=$($enrolled.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build and verify the candidate production cache
+        shell: pwsh
+        run: |
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $gff = Join-Path $work "downloads\Homo_sapiens.GRCh38.115.gff3.gz"
+          $reference = Join-Path $work "reference.fa"
+          $cache = Join-Path $work "candidate-production.cache"
+          & $env:CANDIDATE_FASTVEP cache --gff3 "Ensembl=$gff" --fasta $reference --output $cache --no-progress
+          if ($LASTEXITCODE) { throw "candidate production cache build failed" }
+          & $env:CANDIDATE_FASTVEP cache-verify --input $cache --require-primary-coding-sequences | Set-Content -LiteralPath (Join-Path $work "candidate-cache-verification.json")
+          if ($LASTEXITCODE) { throw "candidate production cache verification failed" }
+          "CANDIDATE_CACHE=$cache" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Require Windows, old-cache, and official VEP concordance
+        id: windows_compatibility
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $work = "$env:RUNNER_TEMP\vep115-windows"
+          $linux = "$env:RUNNER_TEMP\vep115-linux"
+          $reference = Join-Path $work "reference.fa"
+          $status = 0
+          foreach ($corpus in @("legacy", "boundary", "clinvar-reviewed")) {
+            $inputVcf = "fixtures/fastvep/ensembl-115-$corpus.vcf"
+            $oldOutput = Join-Path $work "fastvep-previous-cache-$corpus.vcf"
+            $newOutput = Join-Path $work "fastvep-windows-$corpus.vcf"
+            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $oldOutput --transcript-cache $env:BASELINE_CACHE --fasta $reference --distance 5000 --hgvs --symbol --canonical --no-progress
+            if ($LASTEXITCODE) { $status = 1; continue }
+            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $newOutput --transcript-cache $env:CANDIDATE_CACHE --fasta $reference --distance 5000 --hgvs --symbol --canonical --no-progress
+            if ($LASTEXITCODE) { $status = 1; continue }
+            $comparisons = @(
+              @($oldOutput, (Join-Path $linux "vep-gff-$corpus.vcf"), "previous-cache-vs-vep"),
+              @($newOutput, (Join-Path $linux "vep-gff-$corpus.vcf"), "windows-vs-vep"),
+              @($oldOutput, $newOutput, "previous-cache-vs-current-cache"),
+              @($newOutput, (Join-Path $linux "fastvep-production-$corpus.vcf"), "windows-vs-linux")
+            )
+            foreach ($comparison in $comparisons) {
+              python scripts/compare-vep-concordance.py $comparison[0] $comparison[1] --oracle-format vcf --contract fixtures/fastvep/ensembl-115-gff-gff-contract.json --input $inputVcf --json (Join-Path $work "$($comparison[2])-$corpus.json")
+              if ($LASTEXITCODE) { $status = 1 }
+            }
+          }
+          $gff = Join-Path $work "downloads\Homo_sapiens.GRCh38.115.gff3.gz"
+          $candidateOutputs = @(Get-ChildItem -LiteralPath $work -Filter "fastvep-*.vcf" | ForEach-Object { $_.FullName })
+          python scripts/verify-vep-gff-projection.py --gff $gff --json (Join-Path $work "windows-gff-field-projection.json") $candidateOutputs
+          if ($LASTEXITCODE) { $status = 1 }
+          $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:BASELINE_CACHE).Hash.ToLowerInvariant()
+          if ($finalHash -ne "${{ steps.previous_cache.outputs.baseline_sha256 }}") {
+            throw "candidate changed the read-only previous-release cache"
+          }
+          exit $status
+
+      - name: Summarize Windows qualification
+        if: always()
+        shell: pwsh
+        env:
+          COMPATIBILITY: ${{ steps.windows_compatibility.outcome }}
+          CACHE_ENROLLED: ${{ steps.previous_cache.outputs.enrolled }}
+          CANDIDATE_SHA256: ${{ steps.windows_candidate.outputs.sha256 }}
+        run: |
+          @"
+          ## Windows and previous-cache qualification
+
+          | Lane | Outcome | Release gate |
+          | --- | --- | --- |
+          | Windows candidate and previous-cache concordance | $env:COMPATIBILITY | Yes |
+          | Previous-release cache enrolled | $env:CACHE_ENROLLED | Yes |
+
+          Candidate Windows binary SHA-256: $env:CANDIDATE_SHA256
+          "@ | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Windows reproducibility record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: annotation-concordance-windows-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}\vep115-windows\*.json
+            ${{ runner.temp }}\vep115-windows\*.txt
+            ${{ runner.temp }}\vep115-windows\*.sha256
+            ${{ runner.temp }}\vep115-windows\fastvep-*.vcf
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce Windows release qualification
+        if: always()
+        shell: pwsh
+        env:
+          COMPATIBILITY: ${{ steps.windows_compatibility.outcome }}
+          CACHE_ENROLLED: ${{ steps.previous_cache.outputs.enrolled }}
+        run: |
+          if ($env:COMPATIBILITY -ne "success") {
+            throw "Windows or previous-cache concordance failed"
+          }
+          if ($env:CACHE_ENROLLED -ne "true") {
+            throw "previous-release cache is reproducible but not enrolled; run enrollment, review the identity, and update the manifest"
+          }

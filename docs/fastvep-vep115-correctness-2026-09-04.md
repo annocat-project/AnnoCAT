@@ -1,7 +1,8 @@
 # fastVEP and Ensembl VEP 115 correctness work, 2026-09-04
 
-Status: Implemented and verified in the local fastVEP working tree. Not yet
-committed, pinned in AnnoCAT, packaged, or released.
+Status: Implemented, locally verified, and committed as fastVEP `0863825` on
+`codex/vep115-concordance`. Not yet pushed, source-matched qualified, pinned in
+AnnoCAT, packaged, or released.
 
 This record documents the consequence, coordinate, and HGVS corrections made
 on 2026-09-04. It records what changed, why it changed, what was compared, and
@@ -15,24 +16,25 @@ reviewed exception is approved.
 | Item | Value |
 | --- | --- |
 | fastVEP repository | `tools/fastVEP-concordance` |
-| Branch | `codex/port-upstream-correctness` |
+| Branch | `codex/vep115-concordance` |
 | Base commit | `78c870be81762f8cec0a020a76a0515cfdd1449c` |
-| Primary oracle | Ensembl VEP release 115 frozen REST responses |
+| Qualification oracle | Source-matched Ensembl VEP 115.2; GitHub run pending |
+| Original diagnostic oracle | Ensembl VEP release 115 frozen REST responses |
 | Transcript source | Ensembl release 115 GRCh38 GFF3 |
 | Reference | GRCh38 no-alt analysis-set FASTA |
-| Transcript cache | `ensembl-115-candidate-rebuilt.cache` |
-| Cache SHA-256 | `8A85E626F50CA61573403852576CE78D3244530ADDF806826679C02C762C78E4` |
-| Local release binary SHA-256 | `04814149707F624A0D8CDD783721CEC85C18F0F6FC8DFB09CCB7DE17EAAF1248` |
+| Transcript cache | Reproduced `v0.1.0` production cache |
+| Cache SHA-256 | `E5A82215F22B5FF7B20BB214873A24C5F22E9EAC8C1BC9FD403D9B22448BD4B2` |
+| Rebuilt local candidate SHA-256 | `CEA6C81D6BB921A5DDBCA0B0DE637BB22089EEA54B5DEE0CE93F89693F9676E1` |
 
 The local release binary was built for verification only. The AnnoCAT fastVEP
 pin and distributed binary were not changed.
 
-The follow-up release strategy is now specified in
+The follow-up release strategy is specified in
 [Source-matched Ensembl VEP 115.2 qualification](vep115-source-matched-qualification.md).
-That proposal makes official VEP 115.2 with the same GFF3 and FASTA the primary
-implementation oracle and retains archived REST as a separate compatibility
-lane. Its local workflow draft has not yet been run, so this record does not
-claim source-matched qualification.
+The locally implemented workflow makes official VEP 115.2 with the same GFF3
+and FASTA the primary implementation oracle and retains archived REST as a
+separate compatibility diagnostic. It has not yet been run on GitHub, so this
+record does not claim source-matched qualification.
 
 ## Problems found
 
@@ -247,22 +249,22 @@ changed as part of the VEP-concordance work.
 
 This working tree is not yet fully VEP-qualified.
 
-1. `FLAGS` still differs on 4,451 boundary and 590 ClinVar shared identities.
-   The public Ensembl 115 GFF3 does not carry all transcript-completeness
-   metadata represented by the VEP response. The decision for this work was not
-   to change the transcript-cache schema or require users to rebuild installed
-   data. `FLAGS` therefore remains unresolved rather than being silently
-   treated as concordant.
-2. The candidate has 16 boundary and 52 ClinVar allele-transcript identities
-   that are absent from the frozen REST responses. The same identities are
-   present in the release-equivalent and reviewed upstream outputs, so these
-   corrections did not introduce them. They still require either root-cause
-   resolution or exact reviewed compatibility-contract entries before a strict
-   identity-presence gate can pass.
-3. Passing the frozen corpora shows compatibility for their covered variants;
+1. The source-matched official VEP 115.2 and Windows compatibility jobs have
+   not run on GitHub. Local checks cannot award the qualification.
+2. The exact MANE fields still require oracle review. A proposed serialization
+   change was reverted because it altered AnnoCAT's public VCF/JSON contract;
+   the committed candidate retains the existing AnnoCAT-compatible output.
+3. `FLAGS` differences and the 16 boundary plus 52 ClinVar identities observed
+   against archived REST are compatibility diagnostics, not source-matched
+   failures, because REST uses a different transcript dataset. Their full
+   reports remain useful but do not determine the VEP 115.2 GFF verdict.
+4. Metamorphic and discovery cohorts, a frozen archived-REST response, durable
+   compact release evidence, and independently pinned real supplementary-source
+   subsets remain unimplemented.
+5. Passing the frozen corpora shows concordance only for their declared scope;
    it is not proof of correctness for every possible human variant.
-4. No AnnoCAT pin, packaged executable, release ZIP, commit, or remote branch
-   was updated by this work.
+6. No AnnoCAT pin, packaged executable, release ZIP, or remote branch was
+   updated by this work.
 
 ## Release follow-up
 
