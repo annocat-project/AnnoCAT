@@ -124,6 +124,7 @@ REST_FIELDS = (
     "TSL",
     "CCDS",
     "ENSP",
+    "HGVS_OFFSET",
 )
 ALL_FIELDS = PRODUCTION_FIELDS
 NORMALIZERS = {
@@ -298,6 +299,7 @@ def rest_row(row, feature_type, feature_key, fields=REST_FIELDS):
         "TSL": joined(row.get("tsl")),
         "CCDS": joined(row.get("ccds")),
         "ENSP": joined(row.get("protein_id")),
+        "HGVS_OFFSET": joined(row.get("hgvs_offset")),
     }
     return tuple(values[field] for field in fields)
 
@@ -832,6 +834,27 @@ def self_test():
             encoding="utf-8",
         )
         assert compare(left, rest)["passed"]
+
+        offset_values = values.copy()
+        offset_values["HGVS_OFFSET"] = "2"
+        offset_row = "|".join(offset_values[field] for field in ALL_FIELDS)
+        left.write_text(
+            header + f"1\t10\t.\tA\tG\t.\tPASS\tCSQ={offset_row}\n",
+            encoding="utf-8",
+        )
+        rest_document = json.loads(rest.read_text(encoding="utf-8"))
+        rest_document[0]["transcript_consequences"][0]["hgvs_offset"] = 2
+        rest.write_text(json.dumps(rest_document), encoding="utf-8")
+        assert compare(left, rest)["passed"]
+        rest_document[0]["transcript_consequences"][0]["hgvs_offset"] = 3
+        rest.write_text(json.dumps(rest_document), encoding="utf-8")
+        offset_failure = compare(left, rest)
+        assert offset_failure["identityComparison"]["mismatchesByField"] == {
+            "HGVS_OFFSET": 1
+        }
+        left.write_text(text, encoding="utf-8")
+        del rest_document[0]["transcript_consequences"][0]["hgvs_offset"]
+        rest.write_text(json.dumps(rest_document), encoding="utf-8")
 
         contract = Path(directory) / "contract.json"
         contract.write_text(

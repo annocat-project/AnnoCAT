@@ -21,6 +21,7 @@ PARAMETERS = {
     "tsl": 1,
 }
 MAX_BATCH = 200
+USER_AGENT = "AnnoCAT-annotation-concordance/1.0 (+https://github.com/annocat-project/AnnoCAT)"
 
 
 def variants(path):
@@ -46,7 +47,7 @@ def request_json(url, payload=None):
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "AnnoCAT-annotation-concordance",
+            "User-Agent": USER_AGENT,
         },
         method="GET" if body is None else "POST",
     )
