@@ -126,8 +126,6 @@ jobs:
           cat "$work/annotations.records.gff3" >> "$work/annotations.gff3"
           bgzip -f "$work/annotations.gff3"
           tabix -f -p gff "$work/annotations.gff3.gz"
-          ln "$work/annotations.gff3.gz" "$work/Ensembl"
-          ln "$work/annotations.gff3.gz.tbi" "$work/Ensembl.tbi"
 
           for chromosome in $(seq 1 22) X Y; do
             printf '%s\tchr%s\n' "$chromosome" "$chromosome"
@@ -197,7 +195,7 @@ jobs:
               --output_file "/data/vep-gff-$corpus.vcf" \
               --format vcf --vcf --force_overwrite --no_stats \
               --species homo_sapiens --assembly GRCh38 \
-              --gff /data/Ensembl \
+              --gff /data/annotations.gff3.gz \
               --fasta /data/reference.fa \
               --synonyms /data/chr_synonyms.txt \
               --terms SO --distance 5000 --hgvs --symbol --canonical \
