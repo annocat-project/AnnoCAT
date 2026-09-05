@@ -1,2 +1,4 @@
 third-party/*-rust-licenses.html linguist-generated=true -diff
 fixtures/fastvep/*.vcf text eol=lf
+scripts/build-vep-boundary-corpus.py text eol=lf
+scripts/select-vep-clinvar-corpus.py text eol=lf
