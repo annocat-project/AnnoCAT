@@ -27,15 +27,72 @@ FIELDS = (
     "Protein_position",
     "Amino_acids",
     "Codons",
+    "REF_ALLELE",
+    "UPLOADED_ALLELE",
+    "DISTANCE",
+    "STRAND",
+    "FLAGS",
+    "CANONICAL",
+    "MANE",
+    "MANE_SELECT",
+    "MANE_PLUS_CLINICAL",
+    "TSL",
+    "CCDS",
+    "ENSP",
+    "SOURCE",
+    "HGVS_OFFSET",
+)
+
+PRODUCTION_FIELDS = (
+    "Allele",
+    "Consequence",
+    "IMPACT",
+    "SYMBOL",
+    "Gene",
+    "Feature_type",
+    "Feature",
+    "BIOTYPE",
+    "EXON",
+    "INTRON",
+    "HGVSc",
+    "HGVSp",
+    "cDNA_position",
+    "CDS_position",
+    "Protein_position",
+    "Amino_acids",
+    "Codons",
+    "Existing_variation",
+    "REF_ALLELE",
+    "UPLOADED_ALLELE",
     "DISTANCE",
     "STRAND",
     "FLAGS",
     "CANONICAL",
     "SYMBOL_SOURCE",
     "HGNC_ID",
+    "MANE",
+    "MANE_SELECT",
+    "MANE_PLUS_CLINICAL",
     "TSL",
     "APPRIS",
+    "CCDS",
+    "ENSP",
     "SOURCE",
+    "HGVS_OFFSET",
+    "SIFT",
+    "PolyPhen",
+    "AF",
+    "CLIN_SIG",
+    "SOMATIC",
+    "PHENO",
+    "PUBMED",
+    "MOTIF_NAME",
+    "MOTIF_POS",
+    "HIGH_INF_POS",
+    "MOTIF_SCORE_CHANGE",
+    "TRANSCRIPTION_FACTORS",
+    "ACMG",
+    "ACMG_CRITERIA",
 )
 
 # The archive database adds HGNC provenance absent from Ensembl GFF3, does not
@@ -68,7 +125,7 @@ REST_FIELDS = (
     "CCDS",
     "ENSP",
 )
-ALL_FIELDS = tuple(dict.fromkeys(FIELDS + REST_FIELDS))
+ALL_FIELDS = PRODUCTION_FIELDS
 
 
 def sha256(path):
@@ -79,17 +136,63 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def normalized_info(value):
+    return tuple(
+        sorted(
+            item
+            for item in value.split(";")
+            if item and item != "." and not item.startswith("CSQ=")
+        )
+    )
+
+
+def record_value(columns):
+    return tuple(columns[:7]) + (normalized_info(columns[7]),) + tuple(columns[8:])
+
+
+def parse_input_vcf(path):
+    records = Counter()
+    samples = None
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if line.startswith("#CHROM"):
+                columns = line.rstrip("\n\r").split("\t")
+                samples = tuple(columns[9:]) if len(columns) > 8 else ()
+                continue
+            if line.startswith("#"):
+                continue
+            columns = line.rstrip("\n\r").split("\t")
+            if len(columns) < 8:
+                raise ValueError(f"{path}:{line_number}: invalid VCF row")
+            records[record_value(columns)] += 1
+    if samples is None:
+        raise ValueError(f"{path}: #CHROM header is missing")
+    if not records:
+        raise ValueError(f"{path}: no VCF records")
+    return records, samples
+
+
 def parse_vcf(path, fields=FIELDS):
     csq_fields = None
     variants = Counter()
     annotations = Counter()
+    records = Counter()
+    samples = None
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if line.startswith("##INFO=<ID=CSQ"):
+                if csq_fields is not None:
+                    raise ValueError(f"{path}:{line_number}: duplicate CSQ header")
                 match = re.search(r'Format: ([^">]+)', line)
                 if not match:
                     raise ValueError(f"{path}:{line_number}: CSQ format is missing")
                 csq_fields = match.group(1).split("|")
+                if len(csq_fields) != len(set(csq_fields)):
+                    raise ValueError(f"{path}:{line_number}: duplicate CSQ field name")
+                continue
+            if line.startswith("#CHROM"):
+                columns = line.rstrip("\n\r").split("\t")
+                samples = tuple(columns[9:]) if len(columns) > 8 else ()
                 continue
             if line.startswith("#"):
                 continue
@@ -100,17 +203,27 @@ def parse_vcf(path, fields=FIELDS):
                 raise ValueError(f"{path}: CSQ header is missing")
             key = tuple(columns[index] for index in (0, 1, 3, 4))
             variants[key] += 1
-            csq_value = next(
-                (item[4:] for item in columns[7].split(";") if item.startswith("CSQ=")),
-                "",
-            )
+            records[record_value(columns)] += 1
+            csq_values = [
+                item[4:] for item in columns[7].split(";") if item.startswith("CSQ=")
+            ]
+            if len(csq_values) > 1:
+                raise ValueError(f"{path}:{line_number}: duplicate CSQ INFO value")
+            csq_value = csq_values[0] if csq_values else ""
             for encoded in filter(None, csq_value.split(",")):
                 values = encoded.split("|")
+                if len(values) != len(csq_fields):
+                    raise ValueError(
+                        f"{path}:{line_number}: CSQ row has {len(values)} values; "
+                        f"header declares {len(csq_fields)}"
+                    )
                 row = dict(zip(csq_fields, values))
                 annotations[(key, tuple(row.get(field, "") for field in fields))] += 1
     if csq_fields is None:
         raise ValueError(f"{path}: CSQ header is missing")
-    return variants, annotations, set(csq_fields)
+    if samples is None:
+        raise ValueError(f"{path}: #CHROM header is missing")
+    return variants, annotations, set(csq_fields), records, samples
 
 
 def csq_escape(value):
@@ -201,20 +314,7 @@ def parse_rest(path, fields=REST_FIELDS):
     return variants, annotations
 
 
-def load_contract(path, fields):
-    if path is None:
-        return set(), {}, None
-    document = json.loads(path.read_text(encoding="utf-8"))
-    if document.get("schemaVersion") != 1:
-        raise ValueError(f"{path}: unsupported contract schema")
-
-    ignored = set()
-    for item in document.get("ignoredFields", []):
-        field = item.get("field", "")
-        if field not in fields or not item.get("reason"):
-            raise ValueError(f"{path}: invalid ignored field {field!r}")
-        ignored.add(field)
-
+def allowed_extras(document, path):
     allowed = {}
     for item in document.get("allowedExtraIdentities", []):
         variant = item.get("variant")
@@ -229,12 +329,89 @@ def load_contract(path, fields):
         if not all(identity[1:]) or identity in allowed:
             raise ValueError(f"{path}: duplicate or incomplete allowed extra identity")
         allowed[identity] = int(item.get("count", 1))
+        if allowed[identity] < 1:
+            raise ValueError(f"{path}: allowed extra count must be positive")
+    return allowed
 
-    return ignored, allowed, {
-        "path": str(path),
-        "sha256": sha256(path),
-        "ignoredFields": sorted(ignored),
-        "allowedExtraIdentities": len(allowed),
+
+def load_contract(path, default_fields):
+    if path is None:
+        return {
+            "fields": tuple(default_fields),
+            "candidateFields": set(default_fields),
+            "oracleFields": set(default_fields),
+            "candidateEmptyFields": set(),
+            "allowedExtras": {},
+            "report": None,
+        }
+    document = json.loads(path.read_text(encoding="utf-8"))
+    schema = document.get("schemaVersion")
+    if schema == 1:
+        ignored = set()
+        for item in document.get("ignoredFields", []):
+            field = item.get("field", "")
+            if field not in default_fields or not item.get("reason"):
+                raise ValueError(f"{path}: invalid ignored field {field!r}")
+            ignored.add(field)
+        fields = tuple(field for field in default_fields if field not in ignored)
+        report = {
+            "path": str(path),
+            "sha256": sha256(path),
+            "schemaVersion": schema,
+            "ignoredFields": sorted(ignored),
+        }
+        candidate_fields = set(fields)
+        oracle_fields = set(fields)
+        empty_fields = set()
+    elif schema == 2:
+        entries = document.get("fields")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"{path}: schema 2 contract requires fields")
+        names = []
+        dispositions = {}
+        empty_fields = set()
+        for item in entries:
+            name = item.get("name", "") if isinstance(item, dict) else ""
+            disposition = item.get("disposition", "") if isinstance(item, dict) else ""
+            if name not in PRODUCTION_FIELDS or name in dispositions:
+                raise ValueError(f"{path}: invalid or duplicate production field {name!r}")
+            if disposition not in {"exact", "input-derived", "source-derived", "excluded"}:
+                raise ValueError(f"{path}: invalid disposition for {name!r}")
+            if disposition != "exact" and not item.get("reason"):
+                raise ValueError(f"{path}: {name!r} requires a disposition reason")
+            if item.get("requireCandidateEmpty"):
+                empty_fields.add(name)
+            names.append(name)
+            dispositions[name] = disposition
+        if tuple(names) != PRODUCTION_FIELDS:
+            raise ValueError(f"{path}: fields must exactly match fastVEP production order")
+        fields = tuple(
+            name
+            for name in names
+            if dispositions[name] in {"exact", "input-derived"}
+        )
+        if not {"Allele", "Feature_type", "Feature"}.issubset(fields):
+            raise ValueError(f"{path}: comparison identity fields must be exact")
+        candidate_fields = set(names)
+        oracle_fields = set(fields)
+        report = {
+            "path": str(path),
+            "sha256": sha256(path),
+            "schemaVersion": schema,
+            "fieldDispositions": dispositions,
+        }
+    else:
+        raise ValueError(f"{path}: unsupported contract schema")
+
+    allowed = allowed_extras(document, path)
+    report["allowedExtraIdentities"] = len(allowed)
+    return {
+        "fields": fields,
+        "candidateFields": candidate_fields,
+        "oracleFields": oracle_fields,
+        "candidateEmptyFields": empty_fields,
+        "allowedExtras": allowed,
+        "report": report,
     }
 
 
@@ -286,6 +463,32 @@ def examples(counter, fields, limit=10):
     return rows
 
 
+def annotation_rows(counter, fields):
+    rows = []
+    for (key, values), count in sorted(counter.items()):
+        rows.append(
+            {
+                "variant": list(key),
+                "count": count,
+                "fields": dict(zip(fields, values)),
+            }
+        )
+    return rows
+
+
+def record_rows(counter):
+    names = ("CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO")
+    rows = []
+    for values, count in sorted(counter.items(), key=lambda item: repr(item[0])):
+        fixed = dict(zip(names, values[:8]))
+        fixed["INFO"] = list(fixed["INFO"])
+        if len(values) > 8:
+            fixed["FORMAT"] = values[8]
+            fixed["samples"] = list(values[9:])
+        rows.append({"count": count, "record": fixed})
+    return rows
+
+
 def field_mismatches(candidate, oracle, fields):
     identity_indexes = tuple(fields.index(field) for field in ("Allele", "Feature_type", "Feature"))
 
@@ -300,24 +503,38 @@ def field_mismatches(candidate, oracle, fields):
     oracle_rows = indexed(oracle)
     shared = candidate_rows.keys() & oracle_rows.keys()
     mismatches = Counter()
-    comparable = 0
+    ambiguous = 0
     for identity in shared:
         left = candidate_rows[identity]
         right = oracle_rows[identity]
         if len(left) != 1 or len(right) != 1:
-            continue
-        comparable += 1
-        for field, candidate_value, oracle_value in zip(fields, left[0], right[0]):
-            if candidate_value != oracle_value:
+            ambiguous += 1
+        for index, field in enumerate(fields):
+            if Counter(row[index] for row in left) != Counter(row[index] for row in right):
                 mismatches[field] += 1
     return {
         "candidateIdentities": len(candidate_rows),
         "oracleIdentities": len(oracle_rows),
         "sharedIdentities": len(shared),
-        "comparableUniqueIdentities": comparable,
+        "comparedIdentities": len(shared),
+        "ambiguousMultirowIdentities": ambiguous,
         "missingIdentities": len(oracle_rows.keys() - candidate_rows.keys()),
         "extraIdentities": len(candidate_rows.keys() - oracle_rows.keys()),
         "mismatchesByField": dict(sorted(mismatches.items())),
+    }
+
+
+def nonempty_candidate_fields(annotations, fields, required_empty):
+    indexes = {field: fields.index(field) for field in required_empty if field in fields}
+    found = {field: Counter() for field in indexes}
+    for (_key, values), count in annotations.items():
+        for field, index in indexes.items():
+            if values[index]:
+                found[field][values[index]] += count
+    return {
+        field: [{"value": value, "count": count} for value, count in sorted(values.items())]
+        for field, values in found.items()
+        if values
     }
 
 
@@ -350,27 +567,97 @@ def identity_differences(candidate, oracle, fields):
     }
 
 
-def compare(candidate, oracle, oracle_format="auto", contract=None):
+def compare(candidate, oracle, oracle_format="auto", contract=None, input_path=None):
     if oracle_format == "auto":
         oracle_format = "rest-json" if oracle.suffix.lower() == ".json" else "vcf"
-    fields = REST_FIELDS if oracle_format == "rest-json" else FIELDS
-    ignored_fields, allowed_extras, contract_report = load_contract(contract, fields)
-    fields = tuple(field for field in fields if field not in ignored_fields)
-    candidate_variants, candidate_annotations, candidate_fields = parse_vcf(candidate, fields)
+    default_fields = REST_FIELDS if oracle_format == "rest-json" else FIELDS
+    contract_data = load_contract(contract, default_fields)
+    fields = contract_data["fields"]
+    (
+        candidate_variants,
+        candidate_annotations,
+        candidate_fields,
+        candidate_records,
+        candidate_samples,
+    ) = parse_vcf(candidate, fields)
     if oracle_format == "rest-json":
         oracle_variants, oracle_annotations = parse_rest(oracle, fields)
         oracle_fields = set(fields)
+        oracle_records = None
+        oracle_samples = None
     else:
-        oracle_variants, oracle_annotations, oracle_fields = parse_vcf(oracle, fields)
+        (
+            oracle_variants,
+            oracle_annotations,
+            oracle_fields,
+            oracle_records,
+            oracle_samples,
+        ) = parse_vcf(oracle, fields)
     candidate_annotations, applied_extras, unused_extras = apply_allowed_extras(
-        candidate_annotations, oracle_annotations, fields, allowed_extras
+        candidate_annotations,
+        oracle_annotations,
+        fields,
+        contract_data["allowedExtras"],
     )
     missing_variants = oracle_variants - candidate_variants
     extra_variants = candidate_variants - oracle_variants
     missing_annotations = oracle_annotations - candidate_annotations
     extra_annotations = candidate_annotations - oracle_annotations
-    missing_candidate_fields = sorted(set(fields) - candidate_fields)
-    missing_oracle_fields = sorted(set(fields) - oracle_fields)
+    missing_candidate_fields = sorted(contract_data["candidateFields"] - candidate_fields)
+    missing_oracle_fields = sorted(contract_data["oracleFields"] - oracle_fields)
+
+    nonempty_fields = {}
+    if contract_data["candidateEmptyFields"]:
+        _, all_candidate_annotations, _, _, _ = parse_vcf(candidate, PRODUCTION_FIELDS)
+        nonempty_fields = nonempty_candidate_fields(
+            all_candidate_annotations,
+            PRODUCTION_FIELDS,
+            contract_data["candidateEmptyFields"],
+        )
+
+    record_report = None
+    record_failures = []
+    if oracle_records is not None:
+        missing_records = oracle_records - candidate_records
+        extra_records = candidate_records - oracle_records
+        record_failures.extend((missing_records, extra_records))
+        record_report = {
+            "candidateVsOracle": {
+                "missing": record_rows(missing_records),
+                "extra": record_rows(extra_records),
+            },
+            "sampleNames": {
+                "candidate": list(candidate_samples),
+                "oracle": list(oracle_samples),
+                "match": candidate_samples == oracle_samples,
+            },
+        }
+        record_failures.append(candidate_samples != oracle_samples)
+    if input_path is not None:
+        input_records, input_samples = parse_input_vcf(input_path)
+        candidate_missing_input = input_records - candidate_records
+        candidate_extra_input = candidate_records - input_records
+        record_failures.extend((candidate_missing_input, candidate_extra_input))
+        if record_report is None:
+            record_report = {}
+        record_report["input"] = {"path": str(input_path), "sha256": sha256(input_path)}
+        record_report["candidateVsInput"] = {
+            "missing": record_rows(candidate_missing_input),
+            "extra": record_rows(candidate_extra_input),
+        }
+        record_report["candidateSampleNamesMatchInput"] = candidate_samples == input_samples
+        record_failures.append(candidate_samples != input_samples)
+        if oracle_records is not None:
+            oracle_missing_input = input_records - oracle_records
+            oracle_extra_input = oracle_records - input_records
+            record_failures.extend((oracle_missing_input, oracle_extra_input))
+            record_report["oracleVsInput"] = {
+                "missing": record_rows(oracle_missing_input),
+                "extra": record_rows(oracle_extra_input),
+            }
+            record_report["oracleSampleNamesMatchInput"] = oracle_samples == input_samples
+            record_failures.append(oracle_samples != input_samples)
+
     passed = not any(
         (
             missing_candidate_fields,
@@ -380,10 +667,12 @@ def compare(candidate, oracle, oracle_format="auto", contract=None):
             missing_annotations,
             extra_annotations,
             unused_extras,
+            nonempty_fields,
+            *record_failures,
         )
     ) and bool(candidate_variants and candidate_annotations)
     report = {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "oracleFormat": oracle_format,
         "candidate": {"path": str(candidate), "sha256": sha256(candidate)},
         "oracle": {"path": str(oracle), "sha256": sha256(oracle)},
@@ -402,8 +691,13 @@ def compare(candidate, oracle, oracle_format="auto", contract=None):
         "requiredFields": list(fields),
         "missingCandidateFields": missing_candidate_fields,
         "missingOracleFields": missing_oracle_fields,
+        "nonemptyExcludedCandidateFields": nonempty_fields,
         "missingAnnotationExamples": examples(missing_annotations, fields),
         "extraAnnotationExamples": examples(extra_annotations, fields),
+        "annotationDifferences": {
+            "missing": annotation_rows(missing_annotations, fields),
+            "extra": annotation_rows(extra_annotations, fields),
+        },
         "identityComparison": field_mismatches(
             candidate_annotations, oracle_annotations, fields
         ),
@@ -412,7 +706,10 @@ def compare(candidate, oracle, oracle_format="auto", contract=None):
         ),
         "passed": passed,
     }
-    if contract_report is not None:
+    if record_report is not None:
+        report["recordIntegrity"] = record_report
+    if contract_data["report"] is not None:
+        contract_report = dict(contract_data["report"])
         contract_report.update(
             appliedExtraRows=applied_extras,
             unusedAllowedExtraIdentities=unused_extras,
@@ -446,12 +743,39 @@ def self_test():
         left.write_text(text, encoding="utf-8")
         right.write_text(text, encoding="utf-8")
         assert compare(left, right)["passed"]
+
+        input_vcf = Path(directory) / "input.vcf"
+        input_vcf.write_text(
+            "##fileformat=VCFv4.2\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+            "1\t10\t.\tA\tG\t.\tPASS\t.\n",
+            encoding="utf-8",
+        )
+        assert compare(left, right, input_path=input_vcf)["passed"]
+        mutated_record = text.replace("1\t10\t.\tA\tG", "1\t10\trs-mutated\tA\tG")
+        left.write_text(mutated_record, encoding="utf-8")
+        failed = compare(left, right, input_path=input_vcf)
+        assert not failed["passed"]
+        assert failed["recordIntegrity"]["candidateVsInput"]["missing"]
+        assert failed["recordIntegrity"]["candidateVsInput"]["extra"]
+        left.write_text(text, encoding="utf-8")
+
         right.write_text(text.replace("missense_variant", "synonymous_variant"), encoding="utf-8")
         failed = compare(left, right)
         assert not failed["passed"]
         assert failed["annotationRows"]["missing"] == 1
         assert failed["annotationRows"]["extra"] == 1
         assert failed["identityDifferences"] == {"missing": [], "extra": []}
+        assert len(failed["annotationDifferences"]["missing"]) == 1
+        assert len(failed["annotationDifferences"]["extra"]) == 1
+
+        right.write_text(text, encoding="utf-8")
+        left.write_text(text.rstrip() + f",{row}\n", encoding="utf-8")
+        duplicate = compare(left, right)
+        assert not duplicate["passed"]
+        assert duplicate["annotationRows"]["extra"] == 1
+        assert duplicate["identityComparison"]["ambiguousMultirowIdentities"] == 1
+        left.write_text(text, encoding="utf-8")
 
         rest = Path(directory) / "oracle.json"
         rest.write_text(
@@ -511,6 +835,48 @@ def self_test():
         contract.write_text(json.dumps(contract_document), encoding="utf-8")
         assert not compare(left, rest, contract=contract)["passed"]
 
+        exact = set(FIELDS)
+        v2_contract = Path(directory) / "field-contract.json"
+        v2_contract.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 2,
+                    "fields": [
+                        {
+                            "name": field,
+                            "disposition": "exact" if field in exact else "excluded",
+                            **(
+                                {}
+                                if field in exact
+                                else {"reason": "not emitted by the source-matched oracle"}
+                            ),
+                            **(
+                                {"requireCandidateEmpty": True}
+                                if field == "Existing_variation"
+                                else {}
+                            ),
+                        }
+                        for field in PRODUCTION_FIELDS
+                    ],
+                    "allowedExtraIdentities": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        left.write_text(text, encoding="utf-8")
+        right.write_text(text, encoding="utf-8")
+        assert compare(left, right, contract=v2_contract)["passed"]
+        populated = values.copy()
+        populated["Existing_variation"] = "rs1"
+        populated_row = "|".join(populated[field] for field in ALL_FIELDS)
+        left.write_text(
+            header + f"1\t10\t.\tA\tG\t.\tPASS\tCSQ={populated_row}\n",
+            encoding="utf-8",
+        )
+        excluded = compare(left, right, contract=v2_contract)
+        assert not excluded["passed"]
+        assert "Existing_variation" in excluded["nonemptyExcludedCandidateFields"]
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -518,6 +884,7 @@ def main():
     parser.add_argument("oracle", nargs="?", type=Path)
     parser.add_argument("--json", type=Path)
     parser.add_argument("--contract", type=Path)
+    parser.add_argument("--input", type=Path, help="original VCF for record-integrity checks")
     parser.add_argument(
         "--oracle-format", choices=("auto", "vcf", "rest-json"), default="auto"
     )
@@ -529,7 +896,13 @@ def main():
         return
     if not args.candidate or not args.oracle:
         parser.error("candidate and oracle VCF files are required")
-    report = compare(args.candidate, args.oracle, args.oracle_format, args.contract)
+    report = compare(
+        args.candidate,
+        args.oracle,
+        args.oracle_format,
+        args.contract,
+        args.input,
+    )
     rendered = json.dumps(report, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n", encoding="utf-8")

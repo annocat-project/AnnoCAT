@@ -286,7 +286,7 @@
         "archiveFormat": "gzip",
         "rangeResume": true,
         "sizeCheckedAt": "2026-07-15T02:15:09-04:00",
-        "checksum": null,
+        "checksum": {"algorithm": "sha256", "value": "fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02"},
         "resolver": null
       }
     },
