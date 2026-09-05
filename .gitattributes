@@ -1,1 +1,2 @@
 third-party/*-rust-licenses.html linguist-generated=true -diff
+fixtures/fastvep/*.vcf text eol=lf

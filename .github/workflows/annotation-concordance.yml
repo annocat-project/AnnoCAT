@@ -181,8 +181,7 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/concordance"
           docker pull "$VEP_IMAGE"
-          docker image inspect --format '{{.Id}} {{join .RepoDigests " "}}' \
-            "$VEP_IMAGE" > "$work/vep-image.txt"
+          docker image inspect "$VEP_IMAGE" > "$work/vep-image.json"
           docker run --rm "$VEP_IMAGE" vep --version > "$work/vep-version.txt"
 
       - name: Annotate with official VEP using the shared GFF3 and FASTA
