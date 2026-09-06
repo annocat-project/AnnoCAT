@@ -60,6 +60,7 @@ struct PageQuery<'a> {
     limit: u64,
     request: &'a PageRequest,
     candidate_ids: Option<&'a [String]>,
+    gene_query: Option<&'a crate::phenotype::ActiveGeneQuery>,
 }
 
 fn evidence_read(evidence: &Path, files: Option<&[PathBuf]>) -> (String, Vec<SqlValue>) {
@@ -216,6 +217,7 @@ pub struct CanonicalSummary {
     pub rows: u64,
     pub records: u64,
     pub excluded_auxiliary_records: u64,
+    pub excluded_uncarried_alleles: u64,
     pub samples: Vec<String>,
     pub input_content_sha256: Option<String>,
     pub(crate) core_categorical: BTreeMap<String, BoundedCategoricalCounts>,
@@ -1026,6 +1028,12 @@ fn zygosity_label_and_sort(
         alt_index,
         alternate_count,
     );
+    zygosity_for_call(&call)
+}
+
+fn zygosity_for_call(
+    call: &annocat_core::sample_call::SampleCall,
+) -> (Option<String>, Option<i32>) {
     use annocat_core::sample_call::GenotypeRelation;
     match call.genotype_relation {
         GenotypeRelation::Reference => (Some("Reference".into()), Some(0)),
@@ -1039,6 +1047,55 @@ fn zygosity_label_and_sort(
         GenotypeRelation::Invalid => (Some("Invalid genotype".into()), None),
         GenotypeRelation::Unavailable => (None, None),
     }
+}
+
+fn retained_zygosity(
+    sample_names: &[String],
+    filter: &str,
+    format: Option<&str>,
+    sample_values: &[&str],
+    alt_index: usize,
+    alternate_count: usize,
+) -> Option<(Option<String>, Option<i32>)> {
+    use annocat_core::sample_call::AllelePresence;
+
+    let reference_call = filter
+        .split(';')
+        .any(|value| value.eq_ignore_ascii_case("RefCall"));
+    if sample_names.is_empty() {
+        return (!reference_call).then_some((None, None));
+    }
+    if sample_names.len() == 1 {
+        let call = annocat_core::sample_call::parse_sample_call(
+            &sample_names[0],
+            format,
+            sample_values.first().copied().unwrap_or("."),
+            alt_index,
+            alternate_count,
+        );
+        return match call.allele_presence {
+            AllelePresence::Carried => Some(zygosity_for_call(&call)),
+            AllelePresence::NotCarried => None,
+            AllelePresence::Unknown if reference_call => None,
+            AllelePresence::Unknown => Some(zygosity_for_call(&call)),
+        };
+    }
+    let mut carried = false;
+    let mut absent_from_all_samples = true;
+    for (index, name) in sample_names.iter().enumerate() {
+        let presence = annocat_core::sample_call::parse_sample_call(
+            name,
+            format,
+            sample_values.get(index).copied().unwrap_or("."),
+            alt_index,
+            alternate_count,
+        )
+        .allele_presence;
+        carried |= presence == AllelePresence::Carried;
+        absent_from_all_samples &= presence == AllelePresence::NotCarried;
+    }
+    (carried || !reference_call && !absent_from_all_samples)
+        .then(|| (Some("Multiple sample calls".into()), None))
 }
 
 fn parse_variant_record(
@@ -1087,6 +1144,17 @@ fn parse_variant_record(
         if !annocat_core::vcf::is_variant_alternate(alternate) {
             continue;
         }
+        let format = columns.get(8).and_then(|value| optional_vcf(value));
+        let Some((zygosity, zygosity_sort)) = retained_zygosity(
+            sample_names,
+            columns[6],
+            format.as_deref(),
+            columns.get(9..).unwrap_or_default(),
+            alt_offset + 1,
+            alternate_count,
+        ) else {
+            continue;
+        };
         let canonical = &input.canonical_alleles[alt_offset];
         let matching = matching_consequences(&consequences, columns[3], alternate, columns[4]);
         let best = best_consequence(&matching);
@@ -1140,15 +1208,6 @@ fn parse_variant_record(
             .mane_select
             .push(best_value(&["MANE_SELECT", "mane_select", "MANE", "mane"]));
         batch.sample_names_json.push(sample_names_json.to_owned());
-        let format = columns.get(8).and_then(|value| optional_vcf(value));
-        let (zygosity, zygosity_sort) = zygosity_label_and_sort(
-            sample_names.first().map(String::as_str),
-            format.as_deref(),
-            columns.get(9).copied(),
-            sample_names.len(),
-            alt_offset + 1,
-            alternate_count,
-        );
         batch.format.push(format);
         batch.samples_json.push(samples_json.clone());
         batch.zygosity.push(zygosity);
@@ -1633,6 +1692,7 @@ struct StructuredRecord {
     line_number: usize,
     line: String,
     canonical_alleles: BTreeMap<String, CanonicalAllele>,
+    retained_alt_indices: Option<BTreeSet<usize>>,
 }
 
 #[derive(Deserialize)]
@@ -1704,7 +1764,7 @@ impl ParsedStructuredRecord {
 fn canonical_structured_alleles(
     line_number: usize,
     identity: &StructuredIdentity,
-    canonical_record: Option<&[CanonicalAllele]>,
+    canonical_record: Option<&CanonicalVcfRecord>,
     reference_source: Option<&mut IndexedReference>,
 ) -> Result<BTreeMap<String, CanonicalAllele>, String> {
     let alleles = identity.allele_string.split('/').collect::<Vec<_>>();
@@ -1712,12 +1772,12 @@ fn canonical_structured_alleles(
         return Ok(BTreeMap::new());
     }
     if let Some(record) = canonical_record
-        && record.len() != alleles.len() - 1
+        && record.canonical_alleles.len() != alleles.len() - 1
     {
         return Err(format!(
             "structured record {line_number} has {} alternate alleles but the canonical VCF record has {}",
             alleles.len() - 1,
-            record.len()
+            record.canonical_alleles.len()
         ));
     }
     let mut reference_source = reference_source;
@@ -1727,7 +1787,7 @@ fn canonical_structured_alleles(
             continue;
         }
         let allele = if let Some(record) = canonical_record {
-            record[alternate_index].clone()
+            record.canonical_alleles[alternate_index].clone()
         } else if let Some(source) = reference_source.as_deref_mut() {
             let start = u64::try_from(identity.start)
                 .map_err(|_| format!("structured record {line_number} has an invalid start"))?;
@@ -1798,10 +1858,16 @@ fn canonical_structured_alleles(
     Ok(canonical)
 }
 
+struct CanonicalVcfRecord {
+    canonical_alleles: Vec<CanonicalAllele>,
+    retained_alt_indices: BTreeSet<usize>,
+}
+
 struct CanonicalVcfRecords {
     lines: std::io::Lines<Box<dyn BufRead>>,
     line_number: usize,
     reference: IndexedReference,
+    sample_names: Vec<String>,
 }
 
 impl CanonicalVcfRecords {
@@ -1812,21 +1878,49 @@ impl CanonicalVcfRecords {
             reference: IndexedReference::open(fasta).map_err(|error| {
                 format!("cannot initialize canonical VCF allele normalization: {error}")
             })?,
+            sample_names: Vec::new(),
         })
     }
 
-    fn next(&mut self) -> Result<Option<Vec<CanonicalAllele>>, String> {
+    fn next(&mut self) -> Result<Option<CanonicalVcfRecord>, String> {
         for line in self.lines.by_ref() {
             self.line_number += 1;
             let line =
                 line.map_err(|error| format!("cannot read canonical annotated VCF: {error}"))?;
+            if line.starts_with("#CHROM\t") {
+                self.sample_names = line.split('\t').skip(9).map(str::to_owned).collect();
+                continue;
+            }
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
             let canonical_alleles =
                 canonical_alleles_for_vcf_line(self.line_number, &line, Some(&mut self.reference))?;
-            if canonical_alleles.is_some() {
-                return Ok(canonical_alleles);
+            if let Some(canonical_alleles) = canonical_alleles {
+                let columns = line.split('\t').collect::<Vec<_>>();
+                let alternate_count = columns[4].split(',').count();
+                let format = columns.get(8).and_then(|value| optional_vcf(value));
+                let retained_alt_indices = columns[4]
+                    .split(',')
+                    .enumerate()
+                    .filter_map(|(index, alternate)| {
+                        (annocat_core::vcf::is_variant_alternate(alternate)
+                            && retained_zygosity(
+                                &self.sample_names,
+                                columns[6],
+                                format.as_deref(),
+                                columns.get(9..).unwrap_or_default(),
+                                index + 1,
+                                alternate_count,
+                            )
+                            .is_some())
+                        .then_some(index)
+                    })
+                    .collect();
+                return Ok(Some(CanonicalVcfRecord {
+                    canonical_alleles,
+                    retained_alt_indices,
+                }));
             }
         }
         Ok(None)
@@ -1875,6 +1969,18 @@ fn parse_structured_record_mode(
         .copied()
         .filter(|alternate| annocat_core::vcf::is_variant_alternate(alternate))
         .collect::<Vec<_>>();
+    let retained_alternates = alleles[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, alternate)| {
+            (annocat_core::vcf::is_variant_alternate(alternate)
+                && record
+                    .retained_alt_indices
+                    .as_ref()
+                    .is_none_or(|retained| retained.contains(&index)))
+            .then_some(*alternate)
+        })
+        .collect::<Vec<_>>();
     let is_variant = alleles.len() > 1 && !real_alternates.is_empty();
     if !is_variant {
         return Ok(ParsedStructuredRecord {
@@ -1897,7 +2003,7 @@ fn parse_structured_record_mode(
     for (key, value) in &extra_fields {
         if !TOP_LEVEL_FIELDS.contains(&key.as_str()) {
             let source_id = structured_source_alias(source_aliases, key).unwrap_or(key);
-            for alternate in &real_alternates {
+            for alternate in &retained_alternates {
                 let id = record
                     .canonical_alleles
                     .get(*alternate)
@@ -2004,6 +2110,9 @@ fn parse_structured_record_mode(
                 )
             })?;
         if !annocat_core::vcf::is_variant_alternate(alternate) {
+            continue;
+        }
+        if !retained_alternates.contains(&alternate) {
             continue;
         }
         let id = record
@@ -2187,6 +2296,9 @@ fn parse_structured_record_mode(
                 record.line_number
             ));
         }
+        if !retained_alternates.contains(&alternate.as_str()) {
+            continue;
+        }
         if !seen_supplementary_alleles.insert(alternate.clone()) {
             return Err(format!(
                 "structured record {} has duplicate supplementary allele {alternate}",
@@ -2333,7 +2445,7 @@ fn parse_structured_record_mode(
 
     Ok(ParsedStructuredRecord {
         is_variant: true,
-        alleles: record.canonical_alleles.len() as u64,
+        alleles: retained_alternates.len() as u64,
         consequences,
         evidence,
         catalog,
@@ -2622,13 +2734,17 @@ fn convert_structured_with_workers(
         let canonical_alleles = canonical_structured_alleles(
             record_index + 1,
             &identity,
-            canonical_record.as_deref(),
+            canonical_record.as_ref(),
             reference_source.as_mut(),
         )?;
+        let retained_alt_indices = canonical_record
+            .as_ref()
+            .map(|record| record.retained_alt_indices.clone());
         records.push(StructuredRecord {
             line_number: record_index + 1,
             line,
             canonical_alleles,
+            retained_alt_indices,
         });
         if records.len() < STRUCTURED_CHUNK_RECORDS {
             continue;
@@ -2969,6 +3085,7 @@ fn convert_vcf_inner(
     let mut record_number = 0_i64;
     let mut processed_records = 0_u64;
     let mut excluded_auxiliary_records = 0_u64;
+    let mut candidate_alleles = 0_u64;
     let mut rows = 0_u64;
     let mut core_categorical = ["filter", "zygosity", "consequence", "impact"]
         .into_iter()
@@ -3010,6 +3127,14 @@ fn convert_vcf_inner(
                 excluded_auxiliary_records += 1;
                 continue;
             };
+            candidate_alleles = candidate_alleles.saturating_add(
+                line.split('\t')
+                    .nth(4)
+                    .into_iter()
+                    .flat_map(|value| value.split(','))
+                    .filter(|alternate| annocat_core::vcf::is_variant_alternate(alternate))
+                    .count() as u64,
+            );
             record_number += 1;
             records.push(VariantRecord {
                 line_number: line_index + 1,
@@ -3103,6 +3228,7 @@ fn convert_vcf_inner(
         rows,
         records: record_number as u64,
         excluded_auxiliary_records,
+        excluded_uncarried_alleles: candidate_alleles.saturating_sub(rows),
         samples: sample_names,
         input_content_sha256,
         core_categorical,
@@ -4112,6 +4238,7 @@ fn page_json_internal(
         limit,
         request,
         candidate_ids,
+        gene_query: None,
     };
     serde_json::to_string(&page_result_internal(&connection, &query)?)
         .map_err(|error| error.to_string())
@@ -4580,9 +4707,8 @@ fn matched_row_cache_key(
     query: &PageQuery<'_>,
     filters: &CorePageFilters,
 ) -> Result<Option<String>, String> {
-    if query.candidate_ids.is_some()
-        || query.request.included_allele_ids.is_some()
-        || page_request_is_unfiltered(query.request, filters)
+    if query.request.included_allele_ids.is_some()
+        || (query.candidate_ids.is_none() && page_request_is_unfiltered(query.request, filters))
     {
         return Ok(None);
     }
@@ -4602,6 +4728,18 @@ fn matched_row_cache_key(
         serde_json::to_vec(&request)
             .map_err(|error| format!("cannot identify result query: {error}"))?,
     );
+    if let Some(gene_query) = query.gene_query {
+        digest.update(gene_query.fingerprint().as_bytes());
+    }
+    if let Some(candidate_ids) = query.candidate_ids {
+        let mut candidate_ids = candidate_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        candidate_ids.sort_unstable();
+        candidate_ids.dedup();
+        digest.update(
+            serde_json::to_vec(&candidate_ids)
+                .map_err(|error| format!("cannot identify candidate query: {error}"))?,
+        );
+    }
     let mut paths = vec![query.variants.to_path_buf()];
     if let Some(files) = query.evidence_files {
         paths.extend(files.iter().cloned());
@@ -4872,6 +5010,8 @@ struct SelectedEvidenceColumn {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvidenceResolutionStrategy {
+    ActiveAlleleGene,
+    ActiveGene,
     Allele,
     AlleleGeneDirect,
     DerivedMaximum,
@@ -4995,6 +5135,12 @@ fn append_evidence_field_parameters(
 }
 
 fn evidence_sort_parameters(sort: &EvidenceSortSpec) -> Vec<SqlValue> {
+    if matches!(
+        sort.field.resolution,
+        EvidenceResolutionStrategy::ActiveGene | EvidenceResolutionStrategy::ActiveAlleleGene
+    ) {
+        return Vec::new();
+    }
     let mut parameters = sort.evidence_parameters.clone();
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect
         || (!is_query_projection(Path::new(&sort.evidence))
@@ -5015,7 +5161,10 @@ fn evidence_sort_sql(sort: &EvidenceSortSpec, sql: String) -> String {
 }
 
 fn evidence_sort_join(sort: &EvidenceSortSpec, variant: &str, evidence: &str) -> String {
-    if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
+    if matches!(
+        sort.field.resolution,
+        EvidenceResolutionStrategy::GeneDirect | EvidenceResolutionStrategy::ActiveGene
+    ) {
         format!("upper({variant}.gene_symbol)={evidence}.gene_symbol")
     } else if is_query_projection(Path::new(&sort.evidence)) {
         format!(
@@ -5028,6 +5177,34 @@ fn evidence_sort_join(sort: &EvidenceSortSpec, variant: &str, evidence: &str) ->
 }
 
 fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
+    if sort.field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene {
+        return if sort.field.field_path == "phenotypeRank" {
+            "(SELECT min(active_gene.phenotype_rank)
+               FROM annocat_active_allele_genes active_matched
+               JOIN annocat_active_genes active_gene USING(gene_key)
+              WHERE active_matched.allele_id=v.allele_id)"
+                .into()
+        } else {
+            "(SELECT first(active_item.item_label
+                           ORDER BY active_item.item_order, active_item.item_label,
+                                    active_item.item_type, active_item.item_id)
+               FROM annocat_active_allele_genes active_matched
+               JOIN annocat_active_gene_matches active_item USING(gene_key)
+              WHERE active_matched.allele_id=v.allele_id)"
+                .into()
+        };
+    }
+    if sort.field.resolution == EvidenceResolutionStrategy::ActiveGene {
+        return format!(
+            "(SELECT {} FROM annocat_active_gene_aliases active_alias
+               JOIN annocat_active_gene_fields ev_sort USING(gene_key)
+              WHERE active_alias.gene_symbol=upper(trim(coalesce(v.gene_symbol, '')))
+                AND active_alias.gene_id=upper(trim(coalesce(v.gene_id, '')))
+                AND ev_sort.field_path='{}' LIMIT 1)",
+            sort.value_expression,
+            sort.field.field_path.replace('\'', "''")
+        );
+    }
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
         if sort.field.field_path == "phenotypeRelevance" {
             return evidence_sort_sql(sort, "(SELECT coalesce(
@@ -5107,6 +5284,43 @@ fn evidence_sort_expression(sort: &EvidenceSortSpec) -> String {
 }
 
 fn evidence_sort_cte(sort: &EvidenceSortSpec) -> String {
+    if sort.field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene {
+        let value = if sort.field.field_path == "phenotypeRank" {
+            "min(active_gene.phenotype_rank)"
+        } else {
+            "first(active_item.item_label
+                   ORDER BY active_item.item_order, active_item.item_label,
+                            active_item.item_type, active_item.item_id)"
+        };
+        let join = if sort.field.field_path == "phenotypeRank" {
+            "JOIN annocat_active_genes active_gene USING(gene_key)"
+        } else {
+            "JOIN annocat_active_gene_matches active_item USING(gene_key)"
+        };
+        return format!(
+            "WITH scored_evidence AS (
+               SELECT active_matched.allele_id, {value} AS sort_value
+               FROM annocat_active_allele_genes active_matched
+               {join}
+               GROUP BY active_matched.allele_id
+               HAVING sort_value IS NOT NULL
+             )"
+        );
+    }
+    if sort.field.resolution == EvidenceResolutionStrategy::ActiveGene {
+        return format!(
+            "WITH scored_evidence AS (
+               SELECT active_alias.gene_symbol, first({}) AS sort_value
+               FROM annocat_active_gene_aliases active_alias
+               JOIN annocat_active_gene_fields ev_sort USING(gene_key)
+               WHERE ev_sort.field_path='{}'
+               GROUP BY active_alias.gene_symbol
+               HAVING sort_value IS NOT NULL
+             )",
+            sort.value_expression,
+            sort.field.field_path.replace('\'', "''")
+        );
+    }
     if sort.field.resolution == EvidenceResolutionStrategy::GeneDirect {
         if sort.field.field_path == "phenotypeRelevance" {
             return evidence_sort_sql(sort, "WITH scored_evidence AS (
@@ -5393,6 +5607,35 @@ fn filtered_evidence_sorted_page_rows(
             excluded_params,
         );
         parameters.extend(evidence_sort_parameters(sort));
+        parameters.push((limit as i64).into());
+        parameters.push((offset as i64).into());
+        return query_result_rows(connection, &sql, &parameters);
+    }
+    if matches!(
+        sort.field.resolution,
+        EvidenceResolutionStrategy::ActiveGene | EvidenceResolutionStrategy::ActiveAlleleGene
+    ) {
+        let cte = evidence_sort_cte(sort);
+        let join = evidence_sort_join(sort, "v", "ev_order");
+        let sql = format!(
+            "{cte}, matched_variants AS MATERIALIZED (
+               SELECT v.* FROM annocat_variants(?) v WHERE {where_sql}
+             )
+             SELECT {RESULT_PAGE_COLUMNS}
+             FROM matched_variants v
+             LEFT JOIN scored_evidence ev_order ON {join}
+             ORDER BY ev_order.sort_value {direction} NULLS LAST,
+                      v.record_number ASC, v.alt_index ASC
+             LIMIT ? OFFSET ?"
+        );
+        let mut parameters = filtered_page_params(
+            path,
+            request,
+            filters,
+            core_rule_params,
+            evidence_rule_params,
+            excluded_params,
+        );
         parameters.push((limit as i64).into());
         parameters.push((offset as i64).into());
         return query_result_rows(connection, &sql, &parameters);
@@ -5913,6 +6156,134 @@ fn evidence_filter_rules_sql(
                 field.field_path
             ));
         }
+        if field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene {
+            let (relation, expression) = match field.field_path.as_str() {
+                "geneMatch" => (
+                    "annocat_active_allele_genes active_match".to_owned(),
+                    "true".to_owned(),
+                ),
+                "phenotypeRank" | "phenotypeRankDetails" => (
+                    "(SELECT matched.allele_id, gene.phenotype_rank, gene.phenotype_rank_details,
+                             row_number() OVER (
+                               PARTITION BY matched.allele_id
+                               ORDER BY gene.phenotype_rank ASC NULLS LAST,
+                                        gene.gene_symbol, gene.gene_key
+                             ) AS rank_order
+                       FROM annocat_active_allele_genes matched
+                       JOIN annocat_active_genes gene USING(gene_key)) active_match"
+                        .to_owned(),
+                    if field.field_path == "phenotypeRank" {
+                        "active_match.phenotype_rank".to_owned()
+                    } else {
+                        "active_match.phenotype_rank_details".to_owned()
+                    },
+                ),
+                "matchedItemTypes" => (
+                    "annocat_active_allele_genes matched
+                     JOIN annocat_active_gene_matches active_match USING(gene_key)"
+                        .to_owned(),
+                    "active_match.item_type".to_owned(),
+                ),
+                "geneMatchDetails" => (
+                    "annocat_active_allele_genes matched
+                     JOIN annocat_active_genes gene USING(gene_key)
+                     JOIN annocat_active_gene_matches active_match USING(gene_key)"
+                        .to_owned(),
+                    "concat_ws(' ', gene.gene_symbol, active_match.item_id,
+                                      active_match.item_label, active_match.item_type,
+                                      active_match.relation,
+                                      matched.matched_consequence)"
+                        .to_owned(),
+                ),
+                _ => (
+                    "annocat_active_allele_genes matched
+                     JOIN annocat_active_gene_matches active_match USING(gene_key)"
+                        .to_owned(),
+                    "active_match.item_label".to_owned(),
+                ),
+            };
+            let negative = matches!(
+                filter.operator.as_str(),
+                "not_equals" | "not_contains" | "not_in"
+            );
+            let positive = match filter.operator.as_str() {
+                "not_equals" => "equals",
+                "not_contains" => "contains",
+                "not_in" => "in",
+                operator => operator,
+            };
+            let (condition, values) = comparison_sql(&expression, kind, positive, &filter.value)?;
+            sql.push_str(if negative {
+                " AND NOT EXISTS ("
+            } else {
+                " AND EXISTS ("
+            });
+            sql.push_str("SELECT 1 FROM ");
+            sql.push_str(&relation);
+            sql.push_str(" WHERE ");
+            sql.push_str(
+                if matches!(
+                    field.field_path.as_str(),
+                    "phenotypeRank" | "phenotypeRankDetails"
+                ) {
+                    "active_match.allele_id=v.allele_id AND active_match.rank_order=1"
+                } else if field.field_path == "geneMatch" {
+                    "active_match.allele_id=v.allele_id"
+                } else {
+                    "matched.allele_id=v.allele_id"
+                },
+            );
+            sql.push_str(" AND (");
+            sql.push_str(&condition);
+            sql.push_str(") LIMIT 1)");
+            parameters.extend(values);
+            continue;
+        }
+        if field.resolution == EvidenceResolutionStrategy::ActiveGene {
+            let expression = match kind {
+                FilterValueKind::Number => {
+                    "coalesce(active_field.number_value, CAST(active_field.integer_value AS DOUBLE))"
+                }
+                FilterValueKind::Boolean => "active_field.boolean_value",
+                FilterValueKind::Json => "active_field.json_value",
+                FilterValueKind::Text => {
+                    "coalesce(active_field.string_value,
+                              CAST(active_field.integer_value AS VARCHAR),
+                              CAST(active_field.number_value AS VARCHAR),
+                              CAST(active_field.boolean_value AS VARCHAR),
+                              active_field.json_value, '')"
+                }
+            };
+            let negative = matches!(
+                filter.operator.as_str(),
+                "not_equals" | "not_contains" | "not_in"
+            );
+            let positive = match filter.operator.as_str() {
+                "not_equals" => "equals",
+                "not_contains" => "contains",
+                "not_in" => "in",
+                operator => operator,
+            };
+            let (condition, values) = comparison_sql(expression, kind, positive, &filter.value)?;
+            sql.push_str(if negative {
+                " AND NOT EXISTS ("
+            } else {
+                " AND EXISTS ("
+            });
+            sql.push_str(
+                "SELECT 1
+                 FROM annocat_active_gene_aliases active_alias
+                 JOIN annocat_active_gene_fields active_field USING(gene_key)
+                 WHERE active_alias.gene_symbol=upper(trim(coalesce(v.gene_symbol, '')))
+                   AND active_alias.gene_id=upper(trim(coalesce(v.gene_id, '')))
+                   AND active_field.field_path=? AND (",
+            );
+            sql.push_str(&condition);
+            sql.push_str(") LIMIT 1)");
+            parameters.push(field.field_path.into());
+            parameters.extend(values);
+            continue;
+        }
         if field.resolution == EvidenceResolutionStrategy::GeneDirect
             || (field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
                 && !is_query_projection(evidence))
@@ -6174,6 +6545,10 @@ fn displayed_field_search_sql(
             let (gene_fields, fields): (Vec<_>, Vec<_>) = fields
                 .into_iter()
                 .partition(|field| field.resolution == EvidenceResolutionStrategy::GeneDirect);
+            let (active_allele_fields, fields): (Vec<_>, Vec<_>) =
+                fields.into_iter().partition(|field| {
+                    field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene
+                });
             let (allele_gene_fields, fields): (Vec<_>, Vec<_>) =
                 fields.into_iter().partition(|field| {
                     field.resolution == EvidenceResolutionStrategy::AlleleGeneDirect
@@ -6258,6 +6633,51 @@ fn displayed_field_search_sql(
                         params_from_iter(search_parameters.iter()),
                     )
                     .map_err(|error| format!("cannot search gene match fields: {error}"))?;
+            }
+            if !active_allele_fields.is_empty() {
+                let conditions = active_allele_fields
+                    .iter()
+                    .map(|field| {
+                        let value = match field.field_path.as_str() {
+                            "phenotypeRank" => "cast(active_gene.phenotype_rank AS VARCHAR)",
+                            "phenotypeRankDetails" => {
+                                "coalesce(active_gene.phenotype_rank_details, '')"
+                            }
+                            "matchedItemTypes" => "coalesce(active_item.item_type, '')",
+                            "geneMatch" => "'true'",
+                            "geneMatchDetails" => {
+                                "concat_ws(' ', active_gene.gene_symbol,
+                                           coalesce(active_item.item_id, ''),
+                                           coalesce(active_item.item_label, ''),
+                                           coalesce(active_item.item_type, ''),
+                                           coalesce(active_item.relation, ''),
+                                           coalesce(active_matched.matched_consequence, ''))"
+                            }
+                            _ => "coalesce(active_item.item_label, '')",
+                        };
+                        format!(
+                            "contains(replace(replace(lower({value}), '_', ' '), '-', ' '), lower(?))"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                let search_parameters = active_allele_fields
+                    .iter()
+                    .map(|_| SqlValue::from(search.to_owned()))
+                    .collect::<Vec<_>>();
+                connection
+                    .execute(
+                        &format!(
+                            "INSERT OR IGNORE INTO displayed_evidence_search
+                             SELECT DISTINCT active_matched.allele_id
+                             FROM annocat_active_allele_genes active_matched
+                             JOIN annocat_active_genes active_gene USING(gene_key)
+                             LEFT JOIN annocat_active_gene_matches active_item USING(gene_key)
+                             WHERE {conditions}"
+                        ),
+                        params_from_iter(search_parameters.iter()),
+                    )
+                    .map_err(|error| format!("cannot search active gene fields: {error}"))?;
             }
             if !raw.is_empty() {
                 let (read_sql, mut search_parameters) = evidence_read_for_fields(
@@ -6354,6 +6774,7 @@ fn displayed_field_search_sql(
     Ok((sql, parameters))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn page_json_with_evidence(
     variants: &Path,
     evidence: Option<&Path>,
@@ -6439,6 +6860,7 @@ fn requested_resolution_fields(
         .collect()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn page_json_with_evidence_internal(
     variants: &Path,
     evidence: Option<&Path>,
@@ -6469,6 +6891,7 @@ fn page_json_with_evidence_internal(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn page_json_with_evidence_once(
     variants: &Path,
     evidence: Option<&Path>,
@@ -6490,6 +6913,7 @@ fn page_json_with_evidence_once(
         limit,
         request,
         candidate_ids,
+        gene_query: None,
     };
     serde_json::to_string(&page_with_evidence_result(&connection, &query)?)
         .map_err(|error| error.to_string())
@@ -6520,6 +6944,15 @@ fn page_with_evidence_result(
         .iter()
         .filter_map(|row| row["alleleId"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
+    let representative_genes = rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["alleleId"].as_str()?.to_owned(),
+                row["geneSymbol"].as_str()?.to_owned(),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
     let allele_placeholders = std::iter::repeat_n("?", allele_ids.len())
         .collect::<Vec<_>>()
         .join(",");
@@ -6677,6 +7110,241 @@ fn page_with_evidence_result(
             let entry = target.entry((allele_id, index)).or_default();
             if !entry.contains(&value) {
                 entry.push(value);
+            }
+        }
+    }
+
+    let active_gene_fields = selected
+        .iter()
+        .filter(|field| field.resolution == EvidenceResolutionStrategy::ActiveGene)
+        .collect::<Vec<_>>();
+    if !active_gene_fields.is_empty() {
+        let allele_pairs = rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    (
+                        row["geneSymbol"].as_str()?.trim().to_ascii_uppercase(),
+                        row["geneId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_ascii_uppercase(),
+                    ),
+                    row["alleleId"].as_str()?.to_owned(),
+                ))
+            })
+            .fold(
+                HashMap::<(String, String), Vec<String>>::new(),
+                |mut pairs, (pair, allele)| {
+                    pairs.entry(pair).or_default().push(allele);
+                    pairs
+                },
+            );
+        if !allele_pairs.is_empty() {
+            let pair_placeholders = std::iter::repeat_n("(?, ?)", allele_pairs.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let field_placeholders = std::iter::repeat_n("?", active_gene_fields.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT alias.gene_symbol, alias.gene_id, field.field_path,
+                        coalesce(field.string_value, cast(field.integer_value AS VARCHAR),
+                                 cast(field.number_value AS VARCHAR),
+                                 cast(field.boolean_value AS VARCHAR), field.json_value)
+                 FROM annocat_active_gene_aliases alias
+                 JOIN annocat_active_gene_fields field USING(gene_key)
+                 WHERE (alias.gene_symbol, alias.gene_id) IN ({pair_placeholders})
+                   AND field.field_path IN ({field_placeholders})"
+            );
+            let mut parameters = Vec::<SqlValue>::new();
+            for (symbol, gene_id) in allele_pairs.keys() {
+                parameters.push(symbol.clone().into());
+                parameters.push(gene_id.clone().into());
+            }
+            parameters.extend(
+                active_gene_fields
+                    .iter()
+                    .map(|field| field.field_path.clone().into()),
+            );
+            let lookup = active_gene_fields
+                .iter()
+                .map(|field| (field.field_path.as_str(), field.index))
+                .collect::<HashMap<_, _>>();
+            let mut statement = connection
+                .prepare(&sql)
+                .map_err(|error| format!("cannot prepare active gene fields: {error}"))?;
+            let mapped = statement
+                .query_map(params_from_iter(parameters.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(|error| format!("cannot read active gene fields: {error}"))?;
+            for row in mapped {
+                let (symbol, gene_id, field_path, value) =
+                    row.map_err(|error| error.to_string())?;
+                let (Some(index), Some(value), Some(alleles)) = (
+                    lookup.get(field_path.as_str()),
+                    value,
+                    allele_pairs.get(&(symbol, gene_id)),
+                ) else {
+                    continue;
+                };
+                for allele in alleles {
+                    values.insert((allele.clone(), *index), vec![value.clone()]);
+                }
+            }
+        }
+    }
+
+    let active_allele_fields = selected
+        .iter()
+        .filter(|field| field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene)
+        .collect::<Vec<_>>();
+    if !active_allele_fields.is_empty() {
+        struct ActiveAlleleRow {
+            allele_id: String,
+            gene_symbol: String,
+            canonical_gene_id: Option<String>,
+            result_gene_id: Option<String>,
+            identity_status: String,
+            phenotype_rank: Option<i64>,
+            phenotype_rank_details: Option<String>,
+            matched_consequence: String,
+            item_order: Option<i64>,
+            item_type: Option<String>,
+            item_id: Option<String>,
+            item_label: Option<String>,
+            relation: Option<String>,
+        }
+        let sql = format!(
+            "SELECT matched.allele_id, gene.gene_symbol, gene.canonical_gene_id,
+                    gene.result_gene_id, gene.identity_status, gene.phenotype_rank,
+                    gene.phenotype_rank_details, matched.matched_consequence,
+                    item.item_order, item.item_type, item.item_id, item.item_label,
+                    item.relation
+             FROM annocat_active_allele_genes matched
+             JOIN annocat_active_genes gene USING(gene_key)
+             LEFT JOIN annocat_active_gene_matches item USING(gene_key)
+             WHERE matched.allele_id IN ({allele_placeholders})
+             ORDER BY matched.allele_id, item.item_order NULLS LAST,
+                      item.item_label NULLS LAST, gene.gene_symbol, gene.gene_key"
+        );
+        let parameters = allele_ids
+            .iter()
+            .cloned()
+            .map(SqlValue::from)
+            .collect::<Vec<_>>();
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("cannot prepare active allele genes: {error}"))?;
+        let mapped = statement
+            .query_map(params_from_iter(parameters.iter()), |row| {
+                Ok(ActiveAlleleRow {
+                    allele_id: row.get(0)?,
+                    gene_symbol: row.get(1)?,
+                    canonical_gene_id: row.get(2)?,
+                    result_gene_id: row.get(3)?,
+                    identity_status: row.get(4)?,
+                    phenotype_rank: row.get(5)?,
+                    phenotype_rank_details: row.get(6)?,
+                    matched_consequence: row.get(7)?,
+                    item_order: row.get(8)?,
+                    item_type: row.get(9)?,
+                    item_id: row.get(10)?,
+                    item_label: row.get(11)?,
+                    relation: row.get(12)?,
+                })
+            })
+            .map_err(|error| format!("cannot read active allele genes: {error}"))?;
+        let mut allele_matches = BTreeMap::<String, Vec<ActiveAlleleRow>>::new();
+        for row in mapped {
+            let mut row = row.map_err(|error| error.to_string())?;
+            let allele_id = std::mem::take(&mut row.allele_id);
+            allele_matches.entry(allele_id).or_default().push(row);
+        }
+        for (allele_id, matches) in allele_matches {
+            let mut compact = BTreeMap::<(i64, String, String), (String, String)>::new();
+            let mut details = Vec::new();
+            for matched in &matches {
+                let (Some(order), Some(item_type), Some(item_id), Some(label), Some(relation)) = (
+                    matched.item_order,
+                    matched.item_type.as_ref(),
+                    matched.item_id.as_ref(),
+                    matched.item_label.as_ref(),
+                    matched.relation.as_ref(),
+                ) else {
+                    continue;
+                };
+                compact
+                    .entry((order, item_type.clone(), item_id.clone()))
+                    .or_insert((item_type.clone(), label.clone()));
+                details.push(json!({
+                    "alleleId": allele_id,
+                    "geneSymbol": matched.gene_symbol,
+                    "canonicalGeneId": matched.canonical_gene_id,
+                    "resultGeneId": matched.result_gene_id,
+                    "identityStatus": matched.identity_status,
+                    "consequence": matched.matched_consequence,
+                    "representativeGene": representative_genes.get(&allele_id),
+                    "selectedItemId": item_id,
+                    "selectedItem": label,
+                    "itemType": item_type,
+                    "relation": relation,
+                }));
+            }
+            let compact = compact.into_values().collect::<Vec<_>>();
+            if compact.is_empty() {
+                continue;
+            }
+            let display = if compact.len() == 1 {
+                compact[0].1.clone()
+            } else {
+                format!("{} +{}", compact[0].1, compact.len() - 1)
+            };
+            let labels = compact
+                .iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            let item_types = compact
+                .iter()
+                .map(|(item_type, _)| item_type.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let details = serde_json::to_string(&details)
+                .map_err(|error| format!("cannot serialize active gene matches: {error}"))?;
+            let best = matches.iter().min_by(|left, right| {
+                left.phenotype_rank
+                    .unwrap_or(i64::MAX)
+                    .cmp(&right.phenotype_rank.unwrap_or(i64::MAX))
+                    .then(left.gene_symbol.cmp(&right.gene_symbol))
+            });
+            for field in &active_allele_fields {
+                let value = match field.field_path.as_str() {
+                    "geneMatches" => Some(display.clone()),
+                    "geneMatch" => Some("true".into()),
+                    "matchedSelectedItems" => Some(labels.clone()),
+                    "matchedItemTypes" => Some(item_types.clone()),
+                    "geneMatchDetails" => Some(details.clone()),
+                    "phenotypeRank" => {
+                        best.and_then(|gene| gene.phenotype_rank.map(|rank| rank.to_string()))
+                    }
+                    "phenotypeRankDetails" => {
+                        best.and_then(|gene| gene.phenotype_rank_details.as_ref().cloned())
+                    }
+                    _ => None,
+                };
+                if let Some(value) = value {
+                    values.insert((allele_id.clone(), field.index), vec![value]);
+                }
             }
         }
     }
@@ -6976,6 +7644,7 @@ fn page_with_evidence_result(
     Ok(page)
 }
 
+#[allow(dead_code)]
 pub fn page_json_with_details(
     query_key: &str,
     variants: &Path,
@@ -6984,6 +7653,22 @@ pub fn page_json_with_details(
     offset: u64,
     limit: u64,
     request: &PageRequest,
+) -> Result<String, String> {
+    page_json_with_active_gene_query(
+        query_key, variants, evidence, catalog, offset, limit, request, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_json_with_active_gene_query(
+    query_key: &str,
+    variants: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    offset: u64,
+    limit: u64,
+    request: &PageRequest,
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
 ) -> Result<String, String> {
     page_json_with_details_query(
         query_key,
@@ -6996,11 +7681,13 @@ pub fn page_json_with_details(
             limit,
             request,
             candidate_ids: None,
+            gene_query,
         },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn page_json_with_details_for_candidates(
     query_key: &str,
     variants: &Path,
@@ -7010,6 +7697,31 @@ pub fn page_json_with_details_for_candidates(
     limit: u64,
     request: &PageRequest,
     candidate_ids: &[String],
+) -> Result<String, String> {
+    page_json_with_active_gene_query_for_candidates(
+        query_key,
+        variants,
+        evidence,
+        catalog,
+        offset,
+        limit,
+        request,
+        candidate_ids,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn page_json_with_active_gene_query_for_candidates(
+    query_key: &str,
+    variants: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    offset: u64,
+    limit: u64,
+    request: &PageRequest,
+    candidate_ids: &[String],
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
 ) -> Result<String, String> {
     page_json_with_details_query(
         query_key,
@@ -7022,6 +7734,7 @@ pub fn page_json_with_details_for_candidates(
             limit,
             request,
             candidate_ids: Some(candidate_ids),
+            gene_query,
         },
     )
 }
@@ -7063,6 +7776,9 @@ fn page_json_with_details_query_once(
     let (connection, _guard) =
         cancellable_page_connection(&session_key, query.request.request_generation)?;
     register_report_variants(&connection, query.variants)?;
+    if let Some(gene_query) = query.gene_query {
+        crate::phenotype::register_active_query(&connection, query.variants, gene_query)?;
+    }
     let page = page_with_evidence_result(&connection, &query)?;
     serde_json::to_string(&page).map_err(|error| error.to_string())
 }
@@ -7122,7 +7838,13 @@ fn selected_evidence_columns(
                             == Some(contract_id.as_str())
                     });
             let resolution_policy = field["resolutionPolicy"].as_str();
-            let resolution = if resolution_policy == Some("derivedSpliceAiMaximum") {
+            let resolution = if field["storageRelation"].as_str() == Some("activeGeneQuery")
+                && resolution_policy == Some("alleleGeneDirect")
+            {
+                EvidenceResolutionStrategy::ActiveAlleleGene
+            } else if field["storageRelation"].as_str() == Some("activeGeneQuery") {
+                EvidenceResolutionStrategy::ActiveGene
+            } else if resolution_policy == Some("derivedSpliceAiMaximum") {
                 EvidenceResolutionStrategy::DerivedMaximum
             } else if resolution_policy == Some("alleleGeneDirect") {
                 EvidenceResolutionStrategy::AlleleGeneDirect
@@ -7366,7 +8088,12 @@ fn append_legacy_spliceai_maximum(catalog: &mut Value) -> Result<(), String> {
 }
 
 fn query_projection_field_is_eligible(field: &SelectedEvidenceColumn) -> bool {
-    field.resolution != EvidenceResolutionStrategy::GeneDirect
+    !matches!(
+        field.resolution,
+        EvidenceResolutionStrategy::GeneDirect
+            | EvidenceResolutionStrategy::ActiveGene
+            | EvidenceResolutionStrategy::ActiveAlleleGene
+    )
 }
 
 fn catalog_source_is(source_id: &str, expected: &str) -> bool {
@@ -7671,6 +8398,50 @@ fn remove_legacy_query_projections(root: &Path) {
             }
         }
     }
+}
+
+pub(crate) fn remove_obsolete_gene_query_projections(catalog: &Path) -> Result<(), String> {
+    if !catalog.is_file() {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_slice(
+        &fs::read(catalog).map_err(|error| format!("cannot read query field catalog: {error}"))?,
+    )
+    .map_err(|error| format!("invalid query field catalog: {error}"))?;
+    let indices = value["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, field)| {
+            field["storageRelation"] == "geneEvidence"
+                || field["storageRelation"] == "activeGeneQuery"
+                || field["sourceId"] == "hpo"
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let Some(root) = catalog.parent() else {
+        return Ok(());
+    };
+    if let Ok(entries) = fs::read_dir(root) {
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let obsolete = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.ends_with(".parquet")
+                        && indices.iter().any(|index| {
+                            name.starts_with(&format!("{QUERY_PROJECTION_PREFIX}{index}-"))
+                        })
+                });
+            if obsolete {
+                fs::remove_file(&path).map_err(|error| {
+                    format!("cannot remove obsolete Genes query projection: {error}")
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn query_projection_is_valid(path: &Path) -> bool {
@@ -8066,6 +8837,29 @@ pub fn export_filtered_rows_with_details_and_labels(
     columns: &[String],
     column_labels: &[String],
 ) -> Result<u64, String> {
+    export_filtered_rows_with_active_gene_query_and_labels(
+        parquet,
+        evidence,
+        catalog,
+        destination,
+        request,
+        columns,
+        column_labels,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_filtered_rows_with_active_gene_query_and_labels(
+    parquet: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    destination: &Path,
+    request: &PageRequest,
+    columns: &[String],
+    column_labels: &[String],
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
+) -> Result<u64, String> {
     let mut request = request.clone();
     request
         .evidence_columns
@@ -8093,6 +8887,7 @@ pub fn export_filtered_rows_with_details_and_labels(
                 &request,
                 columns,
                 column_labels,
+                gene_query,
             )
         },
     )
@@ -8117,6 +8912,7 @@ fn export_filtered_rows_with_details_once(
         request,
         columns,
         &[],
+        None,
     )
 }
 
@@ -8130,6 +8926,7 @@ fn export_filtered_rows_with_details_once_with_labels(
     request: &PageRequest,
     columns: &[String],
     column_labels: &[String],
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
 ) -> Result<u64, String> {
     let filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
@@ -8172,6 +8969,9 @@ fn export_filtered_rows_with_details_once_with_labels(
         .flatten();
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
+    if let Some(gene_query) = gene_query {
+        crate::phenotype::register_active_query(&connection, parquet, gene_query)?;
+    }
     let included_sql =
         install_candidate_alleles(&connection, request.included_allele_ids.as_deref())?;
     let (search_sql, mut search_params) = displayed_field_search_sql(
@@ -8209,6 +9009,67 @@ fn export_filtered_rows_with_details_once_with_labels(
     for (ordinal, field) in evidence_fields.iter().enumerate() {
         let alias = format!("export_evidence_{ordinal}");
         evidence_selects.push_str(&format!(", {alias}.value"));
+        if field.resolution == EvidenceResolutionStrategy::ActiveAlleleGene {
+            match field.field_path.as_str() {
+                "geneMatches" => evidence_joins.push_str(&format!(
+                    " LEFT JOIN (
+                         SELECT allele_id,
+                                CASE count(*) WHEN 1 THEN
+                                     arg_min(item_label, struct_pack(item_order := item_order,
+                                         item_label := item_label, item_type := item_type,
+                                         item_id := item_id))
+                                ELSE concat(arg_min(item_label,
+                                         struct_pack(item_order := item_order,
+                                             item_label := item_label, item_type := item_type,
+                                             item_id := item_id)), ' +', count(*) - 1) END AS value
+                         FROM (
+                             SELECT matched.allele_id, item.item_type, item.item_id,
+                                    min(item.item_order) AS item_order,
+                                    min(item.item_label) AS item_label
+                             FROM annocat_active_allele_genes matched
+                             JOIN annocat_active_gene_matches item USING(gene_key)
+                             GROUP BY matched.allele_id, item.item_type, item.item_id
+                         ) selected_items
+                         GROUP BY allele_id
+                      ) {alias} USING(allele_id)"
+                )),
+                "phenotypeRank" => evidence_joins.push_str(&format!(
+                    " LEFT JOIN (
+                         SELECT matched.allele_id,
+                                cast(min(gene.phenotype_rank) AS VARCHAR) AS value
+                         FROM annocat_active_allele_genes matched
+                         JOIN annocat_active_genes gene USING(gene_key)
+                         GROUP BY matched.allele_id
+                      ) {alias} USING(allele_id)"
+                )),
+                _ => {
+                    return Err(format!(
+                        "{} is an internal active Genes query field and cannot be exported as a column",
+                        field.field_path
+                    ));
+                }
+            }
+            continue;
+        }
+        if field.resolution == EvidenceResolutionStrategy::ActiveGene {
+            evidence_joins.push_str(&format!(
+                " LEFT JOIN (
+                     SELECT alias.gene_symbol, alias.gene_id,
+                            string_agg(DISTINCT coalesce(field.string_value,
+                                cast(field.integer_value AS VARCHAR),
+                                cast(field.number_value AS VARCHAR),
+                                cast(field.boolean_value AS VARCHAR), field.json_value), '; ') AS value
+                     FROM annocat_active_gene_aliases alias
+                     JOIN annocat_active_gene_fields field USING(gene_key)
+                     WHERE field.source_id=? AND field.field_path=?
+                     GROUP BY alias.gene_symbol, alias.gene_id
+                  ) {alias} ON {alias}.gene_symbol=upper(trim(v.gene_symbol))
+                             AND {alias}.gene_id=upper(trim(v.gene_id))"
+            ));
+            join_params.push(field.source_id.clone().into());
+            join_params.push(field.field_path.clone().into());
+            continue;
+        }
         if field.resolution == EvidenceResolutionStrategy::GeneDirect {
             let gene_evidence =
                 gene_evidence_path(catalog.ok_or("annotation columns require a field catalog")?)?
@@ -8385,6 +9246,7 @@ pub(crate) struct ReportGeneOccurrence {
     pub gene_id: String,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn report_gene_occurrences(
     parquet: &Path,
     selected_symbols: &HashSet<String>,
@@ -8475,52 +9337,50 @@ pub(crate) fn report_gene_occurrences(
     Ok(genes)
 }
 
-pub(crate) fn report_gene_identities_from_occurrences(
-    occurrences: &[ReportGeneOccurrence],
-) -> Vec<(String, String)> {
-    let mut identities = BTreeMap::<String, HashSet<String>>::new();
-    for occurrence in occurrences {
-        identities
-            .entry(occurrence.gene_symbol.clone())
-            .or_default()
-            .insert(occurrence.gene_id.clone());
-    }
-    identities
-        .into_iter()
-        .filter_map(|(symbol, ids)| {
-            let nonempty = ids
-                .into_iter()
-                .filter(|id| !id.is_empty())
-                .collect::<Vec<_>>();
-            (nonempty.len() == 1).then(|| (symbol, nonempty.into_iter().next().unwrap()))
-        })
-        .collect()
+pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, String)>, String> {
+    report_gene_identities_for_scope(parquet, true)
 }
 
-pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, String)>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<(String, String)>>>>> = OnceLock::new();
+pub(crate) fn report_gene_identities_for_scope(
+    parquet: &Path,
+    include_upstream_downstream: bool,
+) -> Result<Vec<(String, String)>, String> {
+    type CacheEntry = ((PathBuf, bool), Arc<Vec<(String, String)>>);
+    static CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
     let path = parquet
         .canonicalize()
         .unwrap_or_else(|_| parquet.to_path_buf());
-    let mut cache = CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "result gene cache is unavailable")?;
-    if let Some(genes) = cache.get(&path).cloned() {
-        return Ok((*genes).clone());
+    let cache_key = (path.clone(), include_upstream_downstream);
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let cache = cache
+            .lock()
+            .map_err(|_| "result gene cache is unavailable")?;
+        if let Some((_, genes)) = cache.as_ref().filter(|(cached, _)| cached == &cache_key) {
+            return Ok((**genes).clone());
+        }
     }
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     let consequences = parquet.with_file_name("consequences.parquet");
     let (sql, source) = if consequences.is_file() {
-        (
+        let sql = if include_upstream_downstream {
             "SELECT upper(trim(gene_symbol)) AS symbol,
                     coalesce(nullif(trim(gene_id), ''), '') AS gene_id
              FROM read_parquet(?)
              WHERE gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
              GROUP BY symbol, gene_id
-             ORDER BY symbol, gene_id",
-            consequences,
-        )
+             ORDER BY symbol, gene_id"
+        } else {
+            "SELECT upper(trim(gene_symbol)) AS symbol,
+                    coalesce(nullif(trim(gene_id), ''), '') AS gene_id
+             FROM read_parquet(?)
+             WHERE gene_symbol IS NOT NULL AND trim(gene_symbol) <> ''
+               AND coalesce(primary_consequence, '') NOT IN
+                   ('upstream_gene_variant', 'downstream_gene_variant')
+             GROUP BY symbol, gene_id
+             ORDER BY symbol, gene_id"
+        };
+        (sql, consequences)
     } else {
         register_report_variants(&connection, parquet)?;
         (
@@ -8558,7 +9418,17 @@ pub(crate) fn report_gene_identities(parquet: &Path) -> Result<Vec<(String, Stri
         })
         .collect();
     let genes = Arc::new(identities);
-    cache.insert(path, genes.clone());
+    let genes = {
+        let mut cache = cache
+            .lock()
+            .map_err(|_| "result gene cache is unavailable")?;
+        if let Some((_, cached)) = cache.as_ref().filter(|(cached, _)| cached == &cache_key) {
+            cached.clone()
+        } else {
+            *cache = Some((cache_key, genes.clone()));
+            genes
+        }
+    };
     Ok((*genes).clone())
 }
 
@@ -8578,6 +9448,24 @@ pub fn export_filtered_genes_with_details(
     destination: &Path,
     request: &PageRequest,
 ) -> Result<u64, String> {
+    export_filtered_genes_with_active_gene_query(
+        parquet,
+        evidence,
+        catalog,
+        destination,
+        request,
+        None,
+    )
+}
+
+pub(crate) fn export_filtered_genes_with_active_gene_query(
+    parquet: &Path,
+    evidence: Option<&Path>,
+    catalog: Option<&Path>,
+    destination: &Path,
+    request: &PageRequest,
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
+) -> Result<u64, String> {
     prepare_sample_call_projection(parquet, request)?;
     prepare_requested_evidence_resolution(parquet, evidence, catalog, request)?;
     with_query_evidence(evidence, catalog, request, |query_evidence, query_files| {
@@ -8588,6 +9476,7 @@ pub fn export_filtered_genes_with_details(
             catalog,
             destination,
             request,
+            gene_query,
         )
     })
 }
@@ -8599,6 +9488,7 @@ fn export_filtered_genes_with_details_once(
     catalog: Option<&Path>,
     destination: &Path,
     request: &PageRequest,
+    gene_query: Option<&crate::phenotype::ActiveGeneQuery>,
 ) -> Result<u64, String> {
     let filters = validated_core_page_filters(request)?;
     let (core_rule_sql, core_rule_params) = core_filter_rules_sql(request)?;
@@ -8607,6 +9497,9 @@ fn export_filtered_genes_with_details_once(
     let (excluded_sql, excluded_params) = excluded_alleles_sql(request)?;
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     register_report_variants(&connection, parquet)?;
+    if let Some(gene_query) = gene_query {
+        crate::phenotype::register_active_query(&connection, parquet, gene_query)?;
+    }
     let included_sql =
         install_candidate_alleles(&connection, request.included_allele_ids.as_deref())?;
     let (search_sql, mut search_params) = displayed_field_search_sql(
@@ -8965,7 +9858,11 @@ fn evidence_sort_spec(
     let field = selected.pop().ok_or("unknown evidence sort column")?;
     let projected = is_query_projection(evidence);
     let resolved = uses_resolution_sidecar(field.resolution);
-    let evidence_path = if projected {
+    let active = matches!(
+        field.resolution,
+        EvidenceResolutionStrategy::ActiveGene | EvidenceResolutionStrategy::ActiveAlleleGene
+    );
+    let evidence_path = if active || projected {
         evidence.to_path_buf()
     } else if matches!(
         field.resolution,
@@ -9016,8 +9913,11 @@ fn evidence_sort_spec(
             )))
     .then_some(evidence_files)
     .flatten();
-    let (evidence_read, evidence_parameters) =
-        evidence_read_for_fields(&evidence_path, direct_files, [field.index]);
+    let (evidence_read, evidence_parameters) = if active {
+        (String::new(), Vec::new())
+    } else {
+        evidence_read_for_fields(&evidence_path, direct_files, [field.index])
+    };
     Ok(EvidenceSortSpec {
         evidence: evidence_path.to_string_lossy().into_owned(),
         evidence_read,
@@ -9219,92 +10119,6 @@ fn supplemental_evidence_rows(evidence: &Path, allele_id: &str) -> Result<Vec<Va
     Ok(rows)
 }
 
-fn gene_evidence_rows(catalog: &Path, gene_symbol: &str) -> Result<Vec<Value>, String> {
-    let Some(evidence) = gene_evidence_path(catalog)? else {
-        return Ok(Vec::new());
-    };
-    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
-    let mut statement = connection
-        .prepare(
-            "SELECT scope, source_id, field_path, value_type,
-                    string_value, integer_value, number_value, boolean_value, json_value
-             FROM read_parquet(?)
-             WHERE upper(gene_symbol)=upper(?)
-             ORDER BY source_id, field_path LIMIT 101",
-        )
-        .map_err(|error| format!("cannot prepare gene evidence detail query: {error}"))?;
-    statement
-        .query_map(
-            params![evidence.to_string_lossy().as_ref(), gene_symbol],
-            |row| {
-                let value_type = row.get::<_, String>(3)?;
-                let value = match value_type.as_str() {
-                    "string" => row.get::<_, Option<String>>(4)?.map(Value::String),
-                    "integer" => row
-                        .get::<_, Option<i64>>(5)?
-                        .map(|value| Value::Number(value.into())),
-                    "number" => row
-                        .get::<_, Option<f64>>(6)?
-                        .and_then(serde_json::Number::from_f64)
-                        .map(Value::Number),
-                    "boolean" => row.get::<_, Option<bool>>(7)?.map(Value::Bool),
-                    "json" => row
-                        .get::<_, Option<String>>(8)?
-                        .map(|value| serde_json::from_str(&value).unwrap_or(Value::String(value))),
-                    _ => None,
-                }
-                .unwrap_or(Value::Null);
-                Ok(json!({
-                    "consequenceId": Value::Null,
-                    "scope": row.get::<_, String>(0)?,
-                    "sourceId": row.get::<_, String>(1)?,
-                    "fieldPath": row.get::<_, String>(2)?,
-                    "valueType": value_type,
-                    "value": value,
-                }))
-            },
-        )
-        .map_err(|error| format!("cannot read gene evidence details: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
-}
-
-fn append_gene_evidence(
-    detail: &mut Value,
-    catalog: Option<&Path>,
-    gene_symbol: Option<&str>,
-) -> Result<(), String> {
-    let (Some(catalog), Some(gene_symbol)) =
-        (catalog, gene_symbol.filter(|value| !value.is_empty()))
-    else {
-        return Ok(());
-    };
-    let rows = gene_evidence_rows(catalog, gene_symbol)?;
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let object = detail
-        .as_object_mut()
-        .ok_or("variant detail response is not an object")?;
-    let available = 5000usize.saturating_sub(
-        object
-            .get("evidence")
-            .and_then(Value::as_array)
-            .ok_or("variant detail response has no evidence array")?
-            .len(),
-    );
-    let truncated = rows.len() > available;
-    object
-        .get_mut("evidence")
-        .and_then(Value::as_array_mut)
-        .ok_or("variant detail response has no evidence array")?
-        .extend(rows.into_iter().take(available));
-    if truncated {
-        object.insert("evidenceTruncated".into(), Value::Bool(true));
-    }
-    Ok(())
-}
-
 pub fn detail_json(
     consequences_parquet: &Path,
     evidence_parquet: &Path,
@@ -9373,7 +10187,7 @@ pub fn complete_detail_json_at(
     variants_parquet: &Path,
     consequences_parquet: Option<&Path>,
     evidence_parquet: Option<&Path>,
-    field_catalog: Option<&Path>,
+    _field_catalog: Option<&Path>,
     allele_id: &str,
     record_number: Option<i64>,
     alt_index: Option<i32>,
@@ -9414,8 +10228,6 @@ pub fn complete_detail_json_at(
                         .as_object_mut()
                         .ok_or("variant detail response is not an object")?
                         .insert("variant".into(), indexed.variant);
-                    let gene_symbol = detail["variant"]["geneSymbol"].as_str().map(str::to_owned);
-                    append_gene_evidence(&mut detail, field_catalog, gene_symbol.as_deref())?;
                     return serialize_complete_detail(detail);
                 }
             }
@@ -9491,8 +10303,6 @@ pub fn complete_detail_json_at(
         .as_object_mut()
         .ok_or("variant detail response is not an object")?
         .insert("variant".into(), context);
-    let gene_symbol = detail["variant"]["geneSymbol"].as_str().map(str::to_owned);
-    append_gene_evidence(&mut detail, field_catalog, gene_symbol.as_deref())?;
     serialize_complete_detail(detail)
 }
 
@@ -11830,6 +12640,7 @@ mod tests {
                 limit: 200,
                 request: &request,
                 candidate_ids: None,
+                gene_query: None,
             },
             &filters,
         )
@@ -11851,6 +12662,7 @@ mod tests {
                 limit: 200,
                 request: &request,
                 candidate_ids: None,
+                gene_query: None,
             },
             &filters,
         )
@@ -11868,11 +12680,65 @@ mod tests {
                 limit: 200,
                 request: &request,
                 candidate_ids: None,
+                gene_query: None,
             },
             &filters,
         )
         .unwrap();
         assert_ne!(second, changed);
+
+        request.search = "stop".into();
+        let filters = validated_core_page_filters(&request).unwrap();
+        let candidate_ids = vec!["2:20:A:G".to_owned(), "1:10:C:T".to_owned()];
+        let candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&candidate_ids),
+                gene_query: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        let reversed_candidate_ids = candidate_ids.iter().rev().cloned().collect::<Vec<_>>();
+        let reversed_candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&reversed_candidate_ids),
+                gene_query: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_eq!(candidate_key, reversed_candidate_key);
+        let different_candidate_ids = vec!["3:30:G:A".to_owned()];
+        let different_candidate_key = matched_row_cache_key(
+            &PageQuery {
+                variants: &variants,
+                evidence: None,
+                evidence_files: None,
+                catalog: None,
+                offset: 0,
+                limit: 200,
+                request: &request,
+                candidate_ids: Some(&different_candidate_ids),
+                gene_query: None,
+            },
+            &filters,
+        )
+        .unwrap();
+        assert_ne!(candidate_key, different_candidate_key);
 
         let evidence_dir = root.join("query-evidence");
         fs::create_dir_all(&evidence_dir).unwrap();
@@ -11891,6 +12757,7 @@ mod tests {
                     limit: 200,
                     request: &request,
                     candidate_ids: None,
+                    gene_query: None,
                 },
                 &filters,
             )
@@ -12308,6 +13175,7 @@ mod tests {
                 limit: 100,
                 request: &remembered_search,
                 candidate_ids: None,
+                gene_query: None,
             },
             &remembered_filters,
         )
@@ -12366,6 +13234,45 @@ mod tests {
         assert_eq!(
             report_gene_identities(&parquet).unwrap(),
             Vec::<(String, String)>::new()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn report_gene_lookup_excludes_proximity_only_genes_by_default() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-report-gene-scope-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let variants = root.join("variants.parquet");
+        let consequences = root.join("consequences.parquet");
+        let destination = consequences.to_string_lossy().replace('\'', "''");
+        Connection::open_in_memory()
+            .unwrap()
+            .execute_batch(&format!(
+                "COPY (SELECT * FROM (VALUES
+                    ('allele-1', 'DIRECT', 'ENSG1', 'missense_variant'),
+                    ('allele-2', 'NEAR', 'ENSG2', 'downstream_gene_variant')
+                 ) AS t(allele_id, gene_symbol, gene_id, primary_consequence))
+                 TO '{destination}' (FORMAT PARQUET)"
+            ))
+            .unwrap();
+
+        assert_eq!(
+            report_gene_identities_for_scope(&variants, false).unwrap(),
+            vec![("DIRECT".into(), "ENSG1".into())]
+        );
+        assert_eq!(
+            report_gene_identities_for_scope(&variants, true).unwrap(),
+            vec![
+                ("DIRECT".into(), "ENSG1".into()),
+                ("NEAR".into(), "ENSG2".into())
+            ]
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -12647,6 +13554,67 @@ mod tests {
     }
 
     #[test]
+    fn result_conversion_omits_reference_calls_without_dropping_unknown_variants() {
+        let root = std::env::temp_dir().join(format!(
+            "annocat-carried-alleles-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("input.vcf");
+        fs::write(
+            &input,
+            concat!(
+                "##fileformat=VCFv4.2\n",
+                "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature\">\n",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tCASE\n",
+                "1\t100\t.\tA\tG\t50\tRefCall\tCSQ=G|missense_variant|MODERATE|REF|ENSG0|ENST0\tGT\t0/0\n",
+                "1\t101\t.\tA\tC,G\t50\tPASS\tCSQ=C|missense_variant|MODERATE|CARRIED|ENSG1|ENST1,G|missense_variant|MODERATE|OTHER|ENSG2|ENST2\tGT\t0/1\n",
+                "1\t102\t.\tA\tT\t50\tPASS\tCSQ=T|missense_variant|MODERATE|UNKNOWN|ENSG3|ENST3\tGT\t./.\n",
+                "1\t103\t.\tA\tG\t0\tRefCall\tCSQ=G|missense_variant|MODERATE|REF_UNKNOWN|ENSG4|ENST4\tGT\t./.\n",
+                "1\t104\t.\tA\tC\t50\tRefCall\tCSQ=C|missense_variant|MODERATE|CONFLICT|ENSG5|ENST5\tGT\t0/1\n"
+            ),
+        )
+        .unwrap();
+        let variants = root.join("variants.parquet");
+        let summary = convert_vcf(&input, &variants, || false, |_, _, _, _, _| {}).unwrap();
+        assert_eq!(summary.records, 5);
+        assert_eq!(summary.rows, 3);
+        assert_eq!(summary.excluded_uncarried_alleles, 3);
+
+        let connection = Connection::open_in_memory().unwrap();
+        let path = variants.to_string_lossy();
+        let retained = connection
+            .prepare(
+                "SELECT original_position, original_alternate, zygosity
+                 FROM read_parquet(?) ORDER BY original_position",
+            )
+            .unwrap()
+            .query_map(params![path.as_ref()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            retained,
+            vec![
+                (101, "C".into(), Some("Heterozygous".into())),
+                (102, "T".into(), Some("Not called".into())),
+                (104, "C".into(), Some("Heterozygous".into())),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn validation_accepts_full_vcf_terms_and_missing_placeholders() {
         let root = std::env::temp_dir().join(format!(
             "annocat-consequence-validation-{}-{}",
@@ -12803,6 +13771,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.consequences.len(), 2);
@@ -12820,6 +13789,50 @@ mod tests {
         );
         assert!(
             parsed.consequences.consequence_json[1].contains("\"feature_type\":\"regulatory\"")
+        );
+    }
+
+    #[test]
+    fn structured_conversion_uses_the_same_retained_alternates_as_the_variant_table() {
+        let record = StructuredRecord {
+            line_number: 1,
+            line: json!({
+                "allele_string": "A/G/T",
+                "start": 100,
+                "seq_region_name": "1",
+                "alleles": [{
+                    "allele": "G",
+                    "gnomad": {"allAf": 0.001}
+                }, {
+                    "allele": "T",
+                    "gnomad": {"allAf": 0.002}
+                }],
+                "transcript_consequences": [{
+                    "variant_allele": "G",
+                    "transcript_id": "ENST1",
+                    "consequence_terms": ["missense_variant"]
+                }, {
+                    "variant_allele": "T",
+                    "transcript_id": "ENST2",
+                    "consequence_terms": ["missense_variant"]
+                }]
+            })
+            .to_string(),
+            canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: Some([0].into_iter().collect()),
+        };
+
+        let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
+        assert_eq!(parsed.alleles, 1);
+        assert_eq!(parsed.consequences.len(), 1);
+        assert_eq!(parsed.consequences.transcript_id, [Some("ENST1".into())]);
+        let expected_allele = allele_id("1", 100, "A", "G");
+        assert!(
+            parsed
+                .evidence
+                .allele_id
+                .iter()
+                .all(|allele| allele == &expected_allele)
         );
     }
 
@@ -12867,6 +13880,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -12987,6 +14001,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -13071,6 +14086,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let aliases = structured_source_aliases(&["spliceai".into()]).unwrap();
         let parsed = parse_structured_record(&record, &aliases).unwrap();
@@ -13300,6 +14316,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
 
         let parsed = parse_structured_record(&record, &BTreeMap::new()).unwrap();
@@ -13333,6 +14350,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         assert_eq!(
             parse_structured_record(&multiallelic, &BTreeMap::new())
@@ -13352,6 +14370,7 @@ mod tests {
             })
             .to_string(),
             canonical_alleles: BTreeMap::new(),
+            retained_alt_indices: None,
         };
         let parsed = parse_structured_record(&biallelic, &BTreeMap::new()).unwrap();
         assert_eq!(parsed.consequences.len(), 1);
@@ -13382,7 +14401,12 @@ mod tests {
         })
         .to_string();
         let identity: StructuredIdentity = serde_json::from_str(&line).unwrap();
-        let mapped = canonical_structured_alleles(1, &identity, Some(&canonical), None).unwrap();
+        let canonical_record = CanonicalVcfRecord {
+            canonical_alleles: canonical.clone(),
+            retained_alt_indices: [0, 1].into_iter().collect(),
+        };
+        let mapped =
+            canonical_structured_alleles(1, &identity, Some(&canonical_record), None).unwrap();
 
         assert_eq!(mapped["G"], canonical[0]);
         assert_eq!(mapped["T"], canonical[1]);
@@ -14811,6 +15835,28 @@ mod tests {
     fn source_cache_parity_fixture_survives_result_projection() {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/source-cache-parity");
+        let structured_input = std::env::var_os("ANNOCAT_SOURCE_PARITY_STRUCTURED")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fixture.join("expected.ndjson"));
+        let sources = std::env::var("ANNOCAT_SOURCE_PARITY_SOURCES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                [
+                    "clinvar", "gnomad", "dbsnp", "spliceai", "cadd", "phylop", "revel", "dbnsfp",
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            });
+        assert!(!sources.is_empty(), "source parity test requires a source");
+        let enabled = |source: &str| sources.iter().any(|value| value == source);
         let root = std::env::temp_dir().join(format!(
             "annocat-source-cache-parity-{}-{}",
             std::process::id(),
@@ -14853,17 +15899,9 @@ mod tests {
             (40000, vec![("A", "GENEN", "ENST40000", "X/Y")]),
         ]);
         let mut projected_lines = Vec::new();
-        for line in fs::read_to_string(fixture.join("expected.ndjson"))
-            .unwrap()
-            .lines()
-        {
+        for line in fs::read_to_string(&structured_input).unwrap().lines() {
             let mut record: Value = serde_json::from_str(line).unwrap();
             let position = record["start"].as_i64().unwrap();
-            if position == 20000 {
-                for allele in record["alleles"].as_array_mut().unwrap() {
-                    allele["dbsnp"]["id"] = json!("rs900001");
-                }
-            }
             let consequences = consequence_specs[&position]
                 .iter()
                 .map(|(alternate, gene, transcript, amino_acids)| {
@@ -14926,10 +15964,6 @@ mod tests {
         let variant_summary =
             convert_vcf(&annotated_vcf, &variants, || false, |_, _, _, _, _| {}).unwrap();
         assert_eq!(variant_summary.rows, 10);
-        let sources = [
-            "clinvar", "gnomad", "dbsnp", "spliceai", "cadd", "phylop", "revel", "dbnsfp",
-        ]
-        .map(str::to_owned);
         let aliases = structured_source_aliases(&sources).unwrap();
         let mut progress = |_, _, _, _, _| {};
         convert_structured_mode(
@@ -14960,30 +15994,43 @@ mod tests {
                 .unwrap_or_else(|error| panic!("missing {scope} {source}.{field} for {allele}: {error}"))
         };
         let first = allele_id("1", 10001, "A", "G");
-        assert_eq!(number(&first, "cadd", "phred", "allele"), 12.4);
-        assert_eq!(number(&first, "phylop", "value", "allele"), 3.14);
-        assert_eq!(number(&first, "dbnsfp", "REVEL_score", "selected"), 0.91);
-        assert_eq!(
-            number(&first, "dbnsfp", "AlphaMissense_score", "selected"),
-            0.81
-        );
-        let dbnsfp_records: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM read_parquet(?)
-                 WHERE allele_id=? AND source_id='dbnsfp'
-                   AND scope='source_records' AND field_path='__recordList'",
-                params![evidence_path.as_ref(), first],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(dbnsfp_records, 1);
+        if enabled("cadd") {
+            assert_eq!(number(&first, "cadd", "phred", "allele"), 12.4);
+        }
+        if enabled("phylop") {
+            assert_eq!(number(&first, "phylop", "value", "allele"), 3.14);
+        }
+        if enabled("dbnsfp") {
+            assert_eq!(number(&first, "dbnsfp", "REVEL_score", "selected"), 0.91);
+            assert_eq!(
+                number(&first, "dbnsfp", "AlphaMissense_score", "selected"),
+                0.81
+            );
+            let dbnsfp_records: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM read_parquet(?)
+                     WHERE allele_id=? AND source_id='dbnsfp'
+                       AND scope='source_records' AND field_path='__recordList'",
+                    params![evidence_path.as_ref(), first],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(dbnsfp_records, 1);
+        }
 
         let population_a = allele_id("1", 20000, "C", "A");
         let population_t = allele_id("1", 20000, "C", "T");
-        assert_eq!(number(&population_a, "gnomad", "allAf", "allele"), 0.005);
-        assert_eq!(number(&population_t, "gnomad", "allAf", "allele"), 0.01);
-        assert_eq!(number(&population_a, "dbsnp", "globalMaf", "allele"), 0.005);
-        assert_eq!(number(&population_t, "dbsnp", "globalMaf", "allele"), 0.01);
+        let gnomad_source = enabled("gnomad-genomes")
+            .then_some("gnomad-genomes")
+            .or_else(|| enabled("gnomad").then_some("gnomad"));
+        if let Some(source) = gnomad_source {
+            assert_eq!(number(&population_a, source, "allAf", "allele"), 0.005);
+            assert_eq!(number(&population_t, source, "allAf", "allele"), 0.01);
+        }
+        if enabled("dbsnp") {
+            assert_eq!(number(&population_a, "dbsnp", "globalMaf", "allele"), 0.005);
+            assert_eq!(number(&population_t, "dbsnp", "globalMaf", "allele"), 0.01);
+        }
 
         let neighbor = allele_id("1", 25000, "A", "G");
         let leaked: i64 = connection
@@ -14997,159 +16044,199 @@ mod tests {
 
         let splice_a = allele_id("1", 30000, "C", "A");
         let splice_t = allele_id("1", 30000, "C", "T");
-        assert_eq!(number(&splice_a, "spliceai", "dsAg", "selected"), 0.5);
-        assert_eq!(number(&splice_t, "spliceai", "dsDl", "selected"), 0.92);
-        assert_eq!(number(&splice_t, "spliceai", "dpAl", "selected"), -5.0);
         let ambiguous_splice = allele_id("1", 40000, "N", "A");
-        assert_eq!(
-            number(&ambiguous_splice, "spliceai", "dsDg", "selected"),
-            0.3
-        );
-        assert_eq!(
-            number(&ambiguous_splice, "spliceai", "dpAg", "selected"),
-            -12.0
-        );
+        if enabled("spliceai") {
+            assert_eq!(number(&splice_a, "spliceai", "dsAg", "selected"), 0.5);
+            assert_eq!(number(&splice_t, "spliceai", "dsDl", "selected"), 0.92);
+            assert_eq!(number(&splice_t, "spliceai", "dpAl", "selected"), -5.0);
+            assert_eq!(
+                number(&ambiguous_splice, "spliceai", "dsDg", "selected"),
+                0.3
+            );
+            assert_eq!(
+                number(&ambiguous_splice, "spliceai", "dpAg", "selected"),
+                -12.0
+            );
+        }
 
         let revel_a = allele_id("1", 35142, "G", "A");
         let revel_c = allele_id("1", 35142, "G", "C");
-        assert_eq!(number(&revel_a, "revel", "score", "selected"), 0.027);
-        assert_eq!(number(&revel_c, "revel", "score", "selected"), 0.035);
+        if enabled("revel") {
+            assert_eq!(number(&revel_a, "revel", "score", "selected"), 0.027);
+            assert_eq!(number(&revel_c, "revel", "score", "selected"), 0.035);
+        }
 
         let catalog_value: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
         let fields = catalog_value["fields"].as_array().unwrap();
-        let clinvar_index = fields
-            .iter()
-            .position(|field| {
-                field["sourceId"] == "clinvar" && field["fieldPath"] == "significance"
-            })
-            .unwrap();
-        let cadd_index = fields
-            .iter()
-            .position(|field| field["sourceId"] == "cadd" && field["fieldPath"] == "phred")
-            .unwrap();
-        let phylop_index = fields
-            .iter()
-            .position(|field| field["sourceId"] == "phylop" && field["fieldPath"] == "value")
-            .unwrap();
-        let pathogenic: Value = serde_json::from_str(
-            &page_json_with_evidence(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                0,
-                10,
-                &PageRequest {
-                    exact_total: true,
-                    evidence_filters: vec![EvidenceFilterRequest {
-                        index: clinvar_index,
-                        operator: "in".into(),
-                        value: String::new(),
-                        value2: String::new(),
-                        values: Some(vec!["Pathogenic".into()]),
-                        include_missing: Some(false),
-                    }],
-                    ..PageRequest::default()
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(pathogenic["total"], 1);
-
-        let (rsid_projection, rsid_index) =
-            export_reference_snp_projection(Some(&evidence), Some(&catalog))
-                .unwrap()
+        let field_index = |source: &str, field: &str| {
+            fields
+                .iter()
+                .position(|entry| entry["sourceId"] == source && entry["fieldPath"] == field)
+                .unwrap_or_else(|| panic!("missing {source}.{field} fixture field"))
+        };
+        let verify_projection =
+            |source: &str, field: &str, expected_allele: &str, position: i64, expected: &str| {
+                let index = field_index(source, field);
+                let sorted: Value = serde_json::from_str(
+                    &page_json_with_evidence(
+                        &variants,
+                        Some(&evidence),
+                        Some(&catalog),
+                        0,
+                        10,
+                        &PageRequest {
+                            exact_total: true,
+                            evidence_columns: vec![index],
+                            sort_evidence: Some(index),
+                            direction: "desc".into(),
+                            ..PageRequest::default()
+                        },
+                    )
+                    .unwrap(),
+                )
                 .unwrap();
-        let projected_rsid: String = connection
-            .query_row(
-                "SELECT string_value FROM read_parquet(?) WHERE field_index=? LIMIT 1",
-                params![
-                    rsid_projection.to_string_lossy().as_ref(),
-                    rsid_index as i64
-                ],
-                |row| row.get(0),
+                assert_eq!(sorted["rows"][0]["alleleId"], expected_allele);
+
+                let exported = root.join(format!("{source}-{field}.csv"));
+                let label = format!("{source}.{field}");
+                assert!(
+                    export_filtered_rows_with_details_and_labels(
+                        &variants,
+                        Some(&evidence),
+                        Some(&catalog),
+                        &exported,
+                        &PageRequest {
+                            position_min: Some(position),
+                            position_max: Some(position),
+                            ..PageRequest::default()
+                        },
+                        &[
+                            "chromosome".into(),
+                            "position".into(),
+                            format!("evidence:{index}"),
+                        ],
+                        &["Chr".into(), "Pos".into(), label.clone()],
+                    )
+                    .unwrap()
+                        > 0
+                );
+                let exported = fs::read_to_string(exported).unwrap();
+                assert!(exported.contains(&format!("\"{label}\"")));
+                assert!(exported.contains(expected));
+
+                let detail: Value = serde_json::from_str(
+                    &detail_json(&consequences, &evidence, expected_allele).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    detail["evidence"].as_array().unwrap().iter().any(|entry| {
+                        entry["sourceId"] == source && entry["fieldPath"] == field
+                    })
+                );
+            };
+
+        if enabled("clinvar") {
+            let clinvar_index = field_index("clinvar", "significance");
+            let pathogenic: Value = serde_json::from_str(
+                &page_json_with_evidence(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    0,
+                    10,
+                    &PageRequest {
+                        exact_total: true,
+                        evidence_filters: vec![EvidenceFilterRequest {
+                            index: clinvar_index,
+                            operator: "in".into(),
+                            value: String::new(),
+                            value2: String::new(),
+                            values: Some(vec!["Pathogenic".into()]),
+                            include_missing: Some(false),
+                        }],
+                        ..PageRequest::default()
+                    },
+                )
+                .unwrap(),
             )
             .unwrap();
-        assert_eq!(projected_rsid, "rs900001");
-        let joined_rsid_rows: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM read_parquet(?) v
-                 JOIN read_parquet(?) p USING(record_number, alt_index)
-                 WHERE v.position=20000 AND p.field_index=?",
-                params![
-                    variants.to_string_lossy().as_ref(),
-                    rsid_projection.to_string_lossy().as_ref(),
-                    rsid_index as i64
-                ],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(joined_rsid_rows, 2);
+            assert_eq!(pathogenic["total"], 1);
+            verify_projection("clinvar", "significance", &first, 10001, "Pathogenic");
+        }
 
-        let exported = root.join("dbsnp-rsid.csv");
-        assert_eq!(
-            export_filtered_rows_with_details(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                &exported,
-                &PageRequest {
-                    position_min: Some(20000),
-                    position_max: Some(20000),
-                    ..PageRequest::default()
-                },
-                &["chromosome".into(), "position".into()],
-            )
-            .unwrap(),
-            2
-        );
-        let exported = fs::read_to_string(exported).unwrap();
-        assert_eq!(exported.matches("rs900001").count(), 2);
-        assert!(exported.starts_with("\u{feff}\"Chr\",\"Position\",\"rsID\"\r\n"));
+        if enabled("dbsnp") {
+            let (rsid_projection, rsid_index) =
+                export_reference_snp_projection(Some(&evidence), Some(&catalog))
+                    .unwrap()
+                    .unwrap();
+            let projected_rsid: String = connection
+                .query_row(
+                    "SELECT string_value FROM read_parquet(?) WHERE field_index=? LIMIT 1",
+                    params![
+                        rsid_projection.to_string_lossy().as_ref(),
+                        rsid_index as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(projected_rsid, "rs900001");
+            let joined_rsid_rows: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM read_parquet(?) v
+                     JOIN read_parquet(?) p USING(record_number, alt_index)
+                     WHERE v.position=20000 AND p.field_index=?",
+                    params![
+                        variants.to_string_lossy().as_ref(),
+                        rsid_projection.to_string_lossy().as_ref(),
+                        rsid_index as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(joined_rsid_rows, 2);
 
-        let exported = root.join("filtered-visible-columns.csv");
-        let columns = vec![
-            "chromosome".into(),
-            "position".into(),
-            "rsid".into(),
-            format!("evidence:{cadd_index}"),
-            format!("evidence:{phylop_index}"),
-        ];
-        let labels = vec![
-            "Chr".into(),
-            "Pos".into(),
-            "rsID".into(),
-            "CADD PHRED score".into(),
-            "phyloP 100-way score".into(),
-        ];
-        assert_eq!(
-            export_filtered_rows_with_details_and_labels(
-                &variants,
-                Some(&evidence),
-                Some(&catalog),
-                &exported,
-                &PageRequest {
-                    position_min: Some(10001),
-                    position_max: Some(10001),
-                    ..PageRequest::default()
-                },
-                &columns,
-                &labels,
-            )
-            .unwrap(),
-            1
-        );
-        let exported = fs::read_to_string(exported).unwrap();
-        assert!(exported.starts_with(
-            "\u{feff}\"Chr\",\"Pos\",\"rsID\",\"CADD PHRED score\",\"phyloP 100-way score\"\r\n"
-        ));
-        assert!(exported.contains("\"12.4\",\"3.14\""));
+            let exported = root.join("dbsnp-rsid.csv");
+            assert_eq!(
+                export_filtered_rows_with_details(
+                    &variants,
+                    Some(&evidence),
+                    Some(&catalog),
+                    &exported,
+                    &PageRequest {
+                        position_min: Some(20000),
+                        position_max: Some(20000),
+                        ..PageRequest::default()
+                    },
+                    &["chromosome".into(), "position".into()],
+                )
+                .unwrap(),
+                2
+            );
+            let exported = fs::read_to_string(exported).unwrap();
+            assert_eq!(exported.matches("rs900001").count(), 2);
+            assert!(exported.starts_with("\u{feff}\"Chr\",\"Position\",\"rsID\"\r\n"));
+            verify_projection("dbsnp", "globalMaf", &population_t, 20000, "0.01");
+        }
 
-        let detail: Value =
-            serde_json::from_str(&detail_json(&consequences, &evidence, &first).unwrap()).unwrap();
-        assert!(detail["evidence"].as_array().unwrap().iter().any(|entry| {
-            entry["sourceId"] == "cadd" && entry["fieldPath"] == "phred" && entry["value"] == 12.4
-        }));
+        if let Some(source) = gnomad_source {
+            verify_projection(source, "allAf", &population_t, 20000, "0.01");
+        }
+        if enabled("spliceai") {
+            verify_projection("spliceai", "dsDl", &splice_t, 30000, "0.92");
+        }
+        if enabled("cadd") {
+            verify_projection("cadd", "phred", &first, 10001, "12.4");
+        }
+        if enabled("phylop") {
+            verify_projection("phylop", "value", &first, 10001, "3.14");
+        }
+        if enabled("revel") {
+            let revel_high = allele_id("1", 35143, "C", "A");
+            verify_projection("revel", "score", &revel_high, 35143, "0.842");
+        }
+        if enabled("dbnsfp") {
+            verify_projection("dbnsfp", "REVEL_score", &first, 10001, "0.91");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -17330,6 +18417,7 @@ mod tests {
             Some(&catalog),
             &canonical_genes,
             &export_request,
+            None,
         )
         .unwrap();
         let projected_count = export_filtered_genes_with_details_once(
@@ -17339,6 +18427,7 @@ mod tests {
             Some(&catalog),
             &projected_genes,
             &export_request,
+            None,
         )
         .unwrap();
         assert_eq!(canonical_count, projected_count);

@@ -39,6 +39,10 @@ estimate causality.
 Save a resolved list when it will be reused. Unresolved identifiers remain
 visible so they can be corrected instead of being silently discarded.
 
+The [phenotype and gene-resolution reference](phenotype-and-gene-resolution.md)
+defines HPO, MONDO, Reactome, and HGNC search, expansion, matching, and Variant
+Details behavior.
+
 ## Online annotations
 
 FAVOR annotations are requested only after you select **Get annotations**.

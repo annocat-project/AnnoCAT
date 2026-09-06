@@ -1,1 +1,7 @@
 third-party/*-rust-licenses.html linguist-generated=true -diff
+fixtures/fastvep/*.vcf text eol=lf
+scripts/build-vep-boundary-corpus.py text eol=lf
+scripts/select-vep-clinvar-corpus.py text eol=lf
+config/ensembl-115-readthrough-transcripts.txt text eol=lf
+scripts/generate-ensembl-readthrough-transcripts.py text eol=lf
+scripts/verify-transcript-exclusion.py text eol=lf

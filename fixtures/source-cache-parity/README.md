@@ -25,3 +25,8 @@ Run it with the fastVEP binary pinned by `config/fastvep-pin.json`:
 ```text
 python scripts/verify-supplementary-cache-parity.py --fastvep path/to/fastvep
 ```
+
+Use `--source SOURCE` to validate one contract. Use `--structured-output PATH`
+to retain the verified OSA2 output for AnnoCAT's result-projection test. The
+`gnomad-genomes` source ID exercises the same logical fields as `gnomad` while
+preserving AnnoCAT's separate installed-source identity.

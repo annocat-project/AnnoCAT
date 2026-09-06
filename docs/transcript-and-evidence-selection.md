@@ -61,6 +61,41 @@ are considered. Gene-first grouping prevents a severe consequence in one gene
 from disappearing because an unrelated transcript in another gene has higher
 transcript preference.
 
+## Variant Details transcript selector
+
+The main result table contains one row per alternate allele and displays the
+representative gene and transcript chosen by the rules above. That display
+choice does not discard the allele's other retained transcript consequences.
+Variant Details initially opens on the representative context, and its existing
+transcript selector lets the user inspect the other consequence contexts for
+the same allele.
+
+A Genes query matches against eligible consequences for every resolved gene,
+not only the representative gene displayed in the table. A result row can
+therefore display one gene while **Gene matches** identifies another selected or
+association-derived gene. To inspect that match, open Variant Details and use
+the transcript selector to choose a transcript belonging to the matched gene.
+The detail view then uses that transcript's consequence and matching
+transcript-scoped evidence. Changing the selector does not change the allele's
+filter membership, the representative values in the main table, or the saved
+Genes query.
+
+By default, an allele is not retained for a selected gene when that gene has
+only an `upstream_gene_variant` or `downstream_gene_variant` consequence. If the
+user applies **Include upstream/downstream variants (VEP 5 kb)**, those
+proximity-only matches become eligible. The main table may still display a
+different representative gene. The user must choose a transcript for the
+matched gene in Variant Details to inspect the upstream/downstream annotation.
+
+The 5 kb distance is the default of AnnoCAT's exact pinned fastVEP revision;
+AnnoCAT does not currently override it on the annotation command. Release
+validation checks that implicit boundary. These variants can be biologically
+relevant, but proximity alone does not show that they affect the selected gene.
+Transcript selection shows the retained annotation context; it does not
+establish causality, pathogenicity, or regulatory effect. The checkbox,
+tooltip, saved-query field, and filtering rules are defined in
+[Phenotype, condition, pathway, and gene resolution](phenotype-and-gene-resolution.md#upstreamdownstream-variant-checkbox).
+
 ## Query consistency
 
 Display, search, filtering, sorting, Variant Details, and export use the same

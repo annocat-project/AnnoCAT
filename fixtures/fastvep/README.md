@@ -23,5 +23,9 @@ selenocysteine substitution `ENST00000380903.7:c.2001A>C`
 (`ENSP00000370288.2:p.Sec667Cys`). Alleles used for HGVS concordance are on
 independently normalized lines, as recommended by Ensembl for multiallelic
 HGVS. Reference alleles come from the pinned Ensembl 115 chromosome FASTA
-files. The archived Ensembl 115 VEP REST service is the consequence oracle;
-the records contain no sample data.
+files. Source-matched official Ensembl VEP 115.2, run with the same pinned GFF3
+and FASTA, is the consequence and HGVS implementation oracle. The archived
+Ensembl 115 REST service uses a different transcript dataset and is retained
+only as a compatibility diagnostic. The records contain no sample data. See
+[`docs/vep115-source-matched-qualification.md`](../../docs/vep115-source-matched-qualification.md)
+for the qualification scope and oracle hierarchy.

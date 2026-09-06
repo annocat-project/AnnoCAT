@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "ensembl-115-legacy",
+  "role": "historical-regression",
+  "assembly": "GRCh38",
+  "provenanceStatus": "reviewed fixed fixture; original population sampling provenance is unavailable",
+  "statisticalUse": "none",
+  "selection": "Historical rsID regression records plus explicit X, Y, MT, MNV, indel, multiallelic, and intergenic probes.",
+  "output": {
+    "path": "fixtures/fastvep/ensembl-115-legacy.vcf",
+    "records": 197,
+    "alleles": 199,
+    "sha256": "b846a65bf671ddc7afcf9e6729d35bd85c31dc3f089cee3a7ce81926fa39b9d5"
+  },
+  "limitations": "This corpus is a permanent regression fixture only. It cannot support prevalence, accuracy, or genome-wide concordance estimates."
+}

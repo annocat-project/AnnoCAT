@@ -41,17 +41,84 @@ export function summarizeGeneMatchRow({
   }
   const matches = Array.isArray(details) ? details : [];
   const tooltip = matches.length
-    ? matches.map(match => [
-      match.selectedItem,
-      match.itemType,
-      match.geneSymbol,
-      match.relation,
-    ].filter(Boolean).join(' · ')).join('\n')
+    ? matches.map(match => {
+      const provenance = [
+        [match.selectedItemId, match.selectedItem].filter(Boolean).join(' '),
+        match.itemType,
+        match.geneSymbol,
+        match.relation,
+      ].filter(Boolean).join(' · ');
+      const proximity = ['upstream_gene_variant', 'downstream_gene_variant']
+        .includes(match.consequence);
+      if (!proximity) return provenance;
+      const consequence = match.consequence.replaceAll('_', ' ');
+      const representative = match.representativeGene &&
+        match.representativeGene.toUpperCase() !== match.geneSymbol?.toUpperCase()
+        ? ` The representative row gene is ${match.representativeGene}.`
+        : '';
+      return `${provenance}. Matched gene: ${match.geneSymbol}. Consequence: ${consequence}.${representative} Open Variant Details and select the ${match.geneSymbol} transcript.`;
+    }).join('\n')
     : [dependencyValue('matchedSelectedItems'), dependencyValue('matchedItemTypes')]
       .filter(Boolean).join(' · ');
   return {
     display: value && value !== 'Not reported' ? String(value) : 'No match',
     tooltip: tooltip || 'No selected item matches this variant gene.',
+  };
+}
+
+export function phenotypeRankDependencyIndexes(catalog, index) {
+  const field = catalog[index] || {};
+  const dependencies = new Set(field.presentationDependencies || []);
+  return catalog.flatMap((candidate, candidateIndex) =>
+    dependencies.has(candidate?.fieldPath) && candidate?.sourceId === field.sourceId
+      ? [candidateIndex]
+      : [],
+  );
+}
+
+export function summarizePhenotypeRankRow({
+  catalog,
+  rowEvidence,
+  index,
+  value,
+  decode = item => item,
+}) {
+  const detailsIndex = phenotypeRankDependencyIndexes(catalog, index)
+    .find(candidate => catalog[candidate]?.fieldPath === 'phenotypeRankDetails');
+  let details = detailsIndex === undefined ? null : decode(rowEvidence?.[detailsIndex]);
+  if (typeof details === 'string') {
+    try { details = JSON.parse(details); } catch { details = null; }
+  }
+  const rank = Number(value ?? details?.rank);
+  const denominator = Number(details?.denominator);
+  if (!Number.isInteger(rank) || rank < 1 || !Number.isInteger(denominator) || denominator < 1) {
+    return {
+      display: 'Not ranked',
+      tooltip: 'No eligible HPO disease profile was available for this gene.',
+    };
+  }
+  const ties = Math.max(1, Number(details?.tieCount) || 1);
+  const featureCount = Math.max(0, Number(details?.queryTermCount) || 0);
+  const gene = details?.geneSymbol || 'Variant gene';
+  const featureText = featureCount === 1
+    ? 'Based on 1 selected HPO feature; broad features may produce many ties.'
+    : `Based on ${featureCount.toLocaleString()} selected HPO features.`;
+  const disease = details?.bestDisease
+    ? `Best-matching disease: ${details.bestDisease}${details.bestDiseaseId ? ` (${details.bestDiseaseId})` : ''}.`
+    : '';
+  const tied = ties > 1 ? `${ties.toLocaleString()} genes share this rank.` : '';
+  const release = details?.hpoRelease ? `HPO release: ${details.hpoRelease}.` : '';
+  return {
+    display: `${rank.toLocaleString()} of ${denominator.toLocaleString()}${ties > 1 ? ` · ${ties.toLocaleString()} tied` : ''}`,
+    tooltip: [
+      `${gene} — Rank ${rank.toLocaleString()} of ${denominator.toLocaleString()}${ties > 1 ? ` · ${ties.toLocaleString()} tied` : ''}.`,
+      featureText,
+      disease,
+      tied,
+      'Method: Resnik query-to-disease best-match average.',
+      release,
+      'This is a relative phenotype-similarity rank. It is not a diagnostic probability, pathogenicity classification, or the reason this gene was included.',
+    ].filter(Boolean).join(' '),
   };
 }
 
@@ -192,14 +259,47 @@ export function formatGeneListSections(sections) {
     .map(section => ({
       label: String(section.label || 'Gene list').replace(/[\[\]\r\n]+/g, ' ').trim(),
       genes: section.genes || [],
+      alwaysHeading: Boolean(section.alwaysHeading),
     }))
-    .filter(section => section.genes.length);
-  if (populated.length <= 1) {
-    return populated[0]?.genes.map(gene => gene.label).join(', ') || '';
+    .filter(section => section.genes.length || section.alwaysHeading);
+  if (populated.length <= 1 && !populated[0]?.alwaysHeading) {
+    return populated[0]?.genes.map(gene => gene.symbol || gene.label).join(', ') || '';
   }
   return populated.map(section =>
-    `[${section.label}]\n${section.genes.map(gene => gene.label).join(', ')}`,
+    `[${section.label}]\n${section.genes.map(gene => gene.symbol || gene.label).join(', ')}`,
   ).join('\n\n');
+}
+
+export const POLYGENIC_ASSOCIATIONS_TOOLTIP = 'By default, HPO features and MONDO conditions include only Mendelian disease-gene associations. Turn this on to also include associations labeled POLYGENIC. Mendelian associations remain included.';
+export const UPSTREAM_DOWNSTREAM_TOOLTIP = "Off by default. Includes VEP upstream/downstream matches within 5 kb of a transcript for a selected gene, which is VEP's default distance. These variants can be biologically relevant, but proximity alone does not show that they affect the selected gene. A row may display a different representative gene. Open Variant Details and use the transcript selector to view the selected gene's upstream/downstream annotation. See Transcript and evidence selection in the documentation.";
+export const PHENOTYPE_SEARCH_PENDING = 'Searching…';
+export const PHENOTYPE_SEARCH_EMPTY = 'No matching feature, condition, pathway, or gene';
+
+export function activeGeneSettingCount(profile = {}) {
+  return Number(Boolean(profile.includePolygenic)) +
+    Number(Boolean(profile.includeUpstreamDownstream));
+}
+
+export function summarizeGenePreviewScope(preview) {
+  if (!preview) return { canApply: false, html: '' };
+  if (preview.includedGenes === 0) {
+    return {
+      canApply: false,
+      html: 'No associated genes were found for this selection in the installed HPO/MONDO data.',
+    };
+  }
+  const includedInResult = preview.includedGenesInResult ??
+    Math.min(preview.includedGenes, preview.genesInResult);
+  const withoutVariants = Math.max(0, preview.includedGenes - includedInResult);
+  const viewMissing = withoutVariants
+    ? ` <button type="button" class="fui-button fui-button--subtle" data-view-missing-genes>View ${withoutVariants.toLocaleString()} without variants</button>`
+    : '';
+  return {
+    canApply: includedInResult > 0,
+    html: includedInResult === 0
+      ? `None of the ${preview.includedGenes.toLocaleString()} associated ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${viewMissing}`
+      : `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} associated ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${viewMissing}`,
+  };
 }
 
 export function createPhenotypeFeature({
@@ -216,6 +316,11 @@ export function createPhenotypeFeature({
   let activeIndex = -1;
   let timer = null;
   let request = null;
+  let searchText = '';
+  let searchLoading = false;
+  let searchComplete = false;
+  let searchAnnouncement = '';
+  let geneSettingsOpen = false;
   let message = '';
   let applying = false;
   let applyStartedAt = 0;
@@ -225,6 +330,8 @@ export function createPhenotypeFeature({
   let previewError = '';
   let previewTimer = null;
   let previewRequest = null;
+  let previewRevision = 0;
+  let resolutionAnnouncementTimer = null;
   let pasteTimer = null;
   let pasteRequest = null;
   let pasteRevision = 0;
@@ -239,11 +346,14 @@ export function createPhenotypeFeature({
   let missingGenesHasMore = false;
   let missingGenesRequest = null;
   let missingGenesTimer = null;
+  let missingGenesInvoker = null;
+  let profileLoadError = '';
 
   function resetDraftState() {
     clearTimeout(timer);
     clearTimeout(previewTimer);
     clearTimeout(pasteTimer);
+    clearTimeout(resolutionAnnouncementTimer);
     request?.abort();
     previewRequest?.abort();
     pasteRequest?.abort();
@@ -254,33 +364,34 @@ export function createPhenotypeFeature({
     profile = emptyProfile();
     message = '';
     results = [];
+    searchText = '';
+    searchLoading = false;
+    searchComplete = false;
+    searchAnnouncement = '';
     activeIndex = -1;
     preview = null;
     previewError = '';
     previewLoading = false;
+    previewRevision += 1;
     pasteText = '';
     pasteResolution = null;
     geneListDraft = [];
     geneSections = [];
     selectedGeneListName = '';
+    profileLoadError = '';
     pasteRevision += 1;
   }
 
   function emptyProfile() {
     return {
       observed: [],
-      excluded: [],
       conditions: [],
       pathways: [],
       genes: [],
-      excludedGenes: [],
-      combination: 'any',
+      includePolygenic: false,
+      includeUpstreamDownstream: false,
       showMatchesOnly: false,
-      addAsAbsent: false,
-      limitToLinkedGenes: false,
       mondoRelease: null,
-      monarchSuggestions: null,
-      monarchError: null,
     };
   }
 
@@ -288,17 +399,12 @@ export function createPhenotypeFeature({
     return {
       ...value,
       observed: Array.isArray(value.observed) ? value.observed : [],
-      excluded: Array.isArray(value.excluded) ? value.excluded : [],
       conditions: Array.isArray(value.conditions) ? value.conditions : [],
       pathways: Array.isArray(value.pathways) ? value.pathways : [],
       genes: Array.isArray(value.genes) ? value.genes : [],
-      excludedGenes: Array.isArray(value.excludedGenes) ? value.excludedGenes : [],
-      combination: value.combination === 'every' ? 'every' : 'any',
+      includePolygenic: Boolean(value.includePolygenic),
+      includeUpstreamDownstream: Boolean(value.includeUpstreamDownstream),
       showMatchesOnly: Boolean(value.showMatchesOnly),
-      addAsAbsent: false,
-      limitToLinkedGenes: Boolean(value.limitToLinkedGenes),
-      monarchSuggestions: value.monarchSuggestions || null,
-      monarchError: value.monarchError || null,
     };
   }
 
@@ -307,7 +413,7 @@ export function createPhenotypeFeature({
     if (popover) return popover;
     document.body.insertAdjacentHTML(
       'beforeend',
-      '<section id="phenotype-popover" class="phenotype-popover fui-popover fui-popover--dialog fui-popover--nested-content hidden" role="dialog" aria-label="Genes"></section>',
+      '<section id="phenotype-popover" class="phenotype-popover fui-popover fui-popover--dialog fui-popover--nested-content hidden" role="dialog" aria-labelledby="phenotype-popover-title"></section>',
     );
     popover = $('#phenotype-popover');
     popover.addEventListener('click', handleClick);
@@ -345,6 +451,8 @@ export function createPhenotypeFeature({
       missingGenesRequest?.abort();
       missingGenesRequest = null;
       clearTimeout(missingGenesTimer);
+      missingGenesInvoker?.focus();
+      missingGenesInvoker = null;
     });
     return dialog;
   }
@@ -353,7 +461,7 @@ export function createPhenotypeFeature({
     const dialog = missingGenesDialog();
     const list = dialog.querySelector('[data-missing-gene-list]');
     list.innerHTML = missingGenes.length
-      ? missingGenes.map(gene => `<div class="fui-list-row fui-list-row--two-column"><strong>${escapeHtml(gene.symbol)}</strong><span>${escapeHtml([gene.geneId, ...(gene.sources || [])].filter(Boolean).join(' · '))}</span></div>`).join('')
+      ? missingGenes.map(gene => `<div class="fui-list-row fui-list-row--two-column"><strong>${escapeHtml(gene.symbol)}</strong><span>${escapeHtml([...new Set([gene.canonicalGeneId, gene.resultGeneId, ...(gene.sources || [])].filter(Boolean))].join(' · '))}</span></div>`).join('')
       : '<p class="fui-caption">No genes found.</p>';
     dialog.querySelector('[data-load-more-missing-genes]')
       ?.classList.toggle('hidden', !missingGenesHasMore);
@@ -400,6 +508,7 @@ export function createPhenotypeFeature({
 
   function openMissingGenes() {
     const dialog = missingGenesDialog();
+    missingGenesInvoker = document.activeElement;
     missingGenes = [];
     missingGenesHasMore = false;
     dialog.querySelector('[data-search-missing-genes]').value = '';
@@ -415,6 +524,22 @@ export function createPhenotypeFeature({
     return items.map(({ id, label }) => ({ id, label }));
   }
 
+  function cleanGenes(items) {
+    return items.map(gene => ({
+      symbol: gene.symbol || gene.label,
+      canonicalGeneId: gene.canonicalGeneId || null,
+      resultGeneId: gene.resultGeneId || null,
+      identityStatus: gene.identityStatus,
+    }));
+  }
+
+  function savedGeneValue(gene) {
+    return {
+      id: gene.canonicalGeneId || gene.resultGeneId || gene.id || gene.symbol || gene.label,
+      label: gene.symbol || gene.label,
+    };
+  }
+
   function hasPositiveInput() {
     return Boolean(
       terms('observed').length ||
@@ -428,15 +553,12 @@ export function createPhenotypeFeature({
     return {
       action,
       observed: cleanTerms(profile.observed),
-      excluded: cleanTerms(profile.excluded),
       conditions: cleanTerms(profile.conditions),
       pathways: cleanTerms(profile.pathways),
-      genes: cleanTerms(profile.genes),
-      excludedGenes: profile.excludedGenes,
-      combination: profile.combination,
+      genes: cleanGenes(profile.genes),
+      includePolygenic: profile.includePolygenic,
+      includeUpstreamDownstream: profile.includeUpstreamDownstream,
       showMatchesOnly: action === 'apply' ? true : profile.showMatchesOnly,
-      limitToLinkedGenes: false,
-      requestMonarchSuggestions: false,
       ...(action === 'apply' ? { previewFingerprint: preview?.fingerprint } : {}),
     };
   }
@@ -447,6 +569,7 @@ export function createPhenotypeFeature({
   }
 
   function invalidatePreview(delay = 180, syncGeneList = true) {
+    previewRevision += 1;
     profile.activeGeneration = null;
     preview = null;
     previewError = '';
@@ -468,6 +591,21 @@ export function createPhenotypeFeature({
     );
   }
 
+  function announceResolutionWhile(current) {
+    clearTimeout(resolutionAnnouncementTimer);
+    resolutionAnnouncementTimer = setTimeout(() => {
+      if (!current()) return;
+      message = 'Resolving genes…';
+      if (!host().classList.contains('hidden')) render();
+    }, 250);
+  }
+
+  function clearResolutionAnnouncement() {
+    clearTimeout(resolutionAnnouncementTimer);
+    resolutionAnnouncementTimer = null;
+    if (message === 'Resolving genes…') message = '';
+  }
+
   async function requestPreview({
     allSymbols = false,
     syncGeneList = false,
@@ -479,9 +617,11 @@ export function createPhenotypeFeature({
     }
     previewRequest?.abort();
     const controller = new AbortController();
+    const revision = previewRevision;
     previewRequest = controller;
     previewLoading = true;
     previewError = '';
+    announceResolutionWhile(() => revision === previewRevision && previewRequest === controller);
     if (renderDuring) render();
     try {
       const params = new URLSearchParams({
@@ -489,9 +629,7 @@ export function createPhenotypeFeature({
         limit: '50',
         q: '',
         presence: 'all',
-        ...(allSymbols && (!syncGeneList || geneSourceSections().length <= 1)
-          ? { allSymbols: '1' }
-          : {}),
+        ...(allSymbols ? { allSymbols: '1' } : {}),
       });
       const response = await fetch(
         `/api/runs/${encodeURIComponent(run.id)}/genes/preview?${params}`,
@@ -507,12 +645,15 @@ export function createPhenotypeFeature({
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Could not resolve genes');
+      if (revision !== previewRevision || previewRequest !== controller) return null;
       preview = body;
       if (syncGeneList) {
-        geneSections = await resolveGeneSections(body, controller.signal);
+        const sections = resolveGeneSections(body);
+        if (revision !== previewRevision || previewRequest !== controller) return null;
+        geneSections = sections;
         const unique = new Map();
         geneSections.flatMap(section => section.genes).forEach(gene => {
-          unique.set(gene.label.toUpperCase(), gene);
+          unique.set((gene.symbol || gene.label).toUpperCase(), gene);
         });
         geneListDraft = [...unique.values()];
         pasteText = formatGeneListSections(geneSections);
@@ -520,10 +661,11 @@ export function createPhenotypeFeature({
       }
       return body;
     } catch (error) {
-      if (error.name !== 'AbortError') previewError = error.message;
+      if (error.name !== 'AbortError' && revision === previewRevision && previewRequest === controller) previewError = error.message;
       return null;
     } finally {
       if (previewRequest !== controller) return null;
+      clearResolutionAnnouncement();
       previewRequest = null;
       previewLoading = false;
       if (renderDuring && !host().classList.contains('hidden')) {
@@ -533,65 +675,27 @@ export function createPhenotypeFeature({
     }
   }
 
-  function geneSourceSections() {
-    return [
-      ...terms('observed').map(term => ({ kind: 'observed', label: term.label, terms: [term] })),
-      ...terms('conditions').map(term => ({ kind: 'conditions', label: term.label, terms: [term] })),
-      ...terms('pathways').map(term => ({ kind: 'pathways', label: term.label, terms: [term] })),
-      ...(terms('genes').length ? [{
-        kind: 'genes',
-        label: terms('genes').length === 1 ? terms('genes')[0].label : 'Entered genes',
-        terms: terms('genes'),
-      }] : []),
-    ];
-  }
-
-  async function resolveGeneSections(overallPreview, signal) {
-    const sections = geneSourceSections();
-    if (sections.length <= 1) {
-      return sections.length ? [{
-        label: sections[0].label,
-        genes: overallPreview.allIncludedGenes || [],
-      }] : [];
+  function resolveGeneSections(overallPreview) {
+    if (Array.isArray(overallPreview.geneSections)) {
+      return overallPreview.geneSections.map(section => ({
+        label: section.label,
+        genes: section.genes || [],
+        alwaysHeading: true,
+      }));
     }
-    return Promise.all(sections.map(async section => {
-      const requestBody = {
-        ...draftRequest('preview'),
-        observed: [],
-        excluded: [],
-        conditions: [],
-        pathways: [],
-        genes: [],
-        excludedGenes: [],
-        [section.kind]: cleanTerms(section.terms),
-      };
-      const response = await fetch(
-        `/api/runs/${encodeURIComponent(run.id)}/genes/preview?offset=0&limit=1&q=&presence=all&allSymbols=1`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-AnnoCat-CSRF': '1',
-          },
-          body: JSON.stringify(requestBody),
-          signal,
-        },
-      );
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || `Could not resolve ${section.label}`);
-      return { label: section.label, genes: body.allIncludedGenes || [] };
-    }));
+    return overallPreview.allIncludedGenes?.length
+      ? [{ label: 'Gene list', genes: overallPreview.allIncludedGenes }]
+      : [];
   }
 
   function updateButton() {
     const button = $('#phenotypes');
     if (!button) return;
     const observed = terms('observed').length;
-    const excluded = terms('excluded').length;
     const conditions = terms('conditions').length;
     const pathways = terms('pathways').length;
     const genes = terms('genes').length;
-    const count = observed + excluded + conditions + pathways + genes;
+    const count = observed + conditions + pathways + genes;
     const label = button.querySelector('span:not([data-phenotype-count])');
     if (label) label.textContent = 'Genes';
     let badge = button.querySelector('[data-phenotype-count]');
@@ -606,7 +710,7 @@ export function createPhenotypeFeature({
     badge.classList.toggle('hidden', count === 0);
     button.setAttribute(
       'aria-label',
-      `Genes: ${observed} observed features, ${excluded} explicitly absent features, ${conditions} conditions, ${pathways} pathways, ${genes} entered genes`,
+      `Genes: ${observed} features, ${conditions} conditions, ${pathways} pathways, ${genes} entered genes`,
     );
   }
 
@@ -623,11 +727,11 @@ export function createPhenotypeFeature({
       ...terms('observed').map(term => ({ ...term, kind: 'observed', type: 'Feature' })),
       ...terms('conditions').map(term => ({ ...term, kind: 'conditions', type: 'Condition' })),
       ...terms('pathways').map(term => ({ ...term, kind: 'pathways', type: 'Pathway' })),
-      ...terms('excluded').map(term => ({ ...term, kind: 'excluded', type: 'Absent feature' })),
     ];
     const genes = terms('genes');
+    const geneId = gene => gene.canonicalGeneId || gene.resultGeneId || gene.symbol;
     const enteredGenes = genes.length
-      ? `<span ${genes.length === 1 ? `title="Gene · ${escapeHtml(genes[0].id)}"` : ''}><b>${escapeHtml(genes.length === 1 ? genes[0].label : `${genes.length.toLocaleString()} entered genes`)}</b>${genes.length === 1 ? `<small>${escapeHtml(genes[0].id)}</small>` : ''}<button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-clear-entered-genes aria-label="Remove entered genes">${prototypeIcon('close')}</button></span>`
+      ? `<span ${genes.length === 1 ? `title="Gene · ${escapeHtml(geneId(genes[0]))}"` : ''}><b>${escapeHtml(genes.length === 1 ? genes[0].symbol : `${genes.length.toLocaleString()} entered genes`)}</b>${genes.length === 1 ? `<small>${escapeHtml(geneId(genes[0]))}</small>` : ''}<button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-clear-entered-genes aria-label="Remove entered genes">${prototypeIcon('close')}</button></span>`
       : '';
     if (!items.length && !enteredGenes) return '';
     return `<section class="phenotype-selection"><div class="phenotype-chips">${items.map(term => `<span title="${escapeHtml(`${term.type} · ${term.id}${term.kind === 'conditions' ? `. ${conditionTitle(term)}` : ''}`)}"><b>${escapeHtml(term.label)}</b><small>${escapeHtml(term.id)}</small><button type="button" class="fui-button fui-button--small fui-button--icon fui-button--subtle" data-remove-phenotype="${escapeHtml(term.id)}" data-phenotype-kind="${term.kind}" aria-label="Remove ${escapeHtml(term.label)}">${prototypeIcon('close')}</button></span>`).join('')}${enteredGenes}</div></section>`;
@@ -635,10 +739,7 @@ export function createPhenotypeFeature({
 
   function resolvedPasteGenes() {
     if (!pasteResolution || unresolvedPasteCount()) return [];
-    return (pasteResolution.recognized || []).map(item => ({
-      id: item.matches[0].id,
-      label: item.matches[0].label,
-    }));
+    return (pasteResolution.recognized || []).map(item => cleanGenes([item.matches[0]])[0]);
   }
 
   function currentGeneListDraft() {
@@ -678,15 +779,52 @@ export function createPhenotypeFeature({
     return '';
   }
 
+  function resultDisabled(term) {
+    return Number(term.geneCount) === 0 &&
+      (term.termType === 'condition' || term.termType === 'pathway');
+  }
+
+  function firstSelectableResult() {
+    return results.findIndex(term => !resultDisabled(term));
+  }
+
   function renderResults() {
     const list = host().querySelector('[data-phenotype-results]');
     if (!list) return;
-    list.innerHTML = results
-      .map(
-        (term, index) =>
-          `<button type="button" role="option" aria-selected="${index === activeIndex}" class="fui-menu-item ${index === activeIndex ? 'active' : ''}" data-phenotype-result="${escapeHtml(term.id)}"><span class="fui-menu-item__content"><strong class="fui-menu-item__title">${escapeHtml(term.label)}</strong><small class="fui-menu-item__description">${escapeHtml([term.id, term.termType === 'condition' ? 'Condition' : term.termType === 'pathway' ? 'Pathway' : term.termType === 'gene' ? 'Gene' : 'Feature', Number.isInteger(term.geneCount) ? `${term.geneCount.toLocaleString()} genes` : '', matchDescription(term)].filter(Boolean).join(' · '))}</small></span></button>`,
-      )
-      .join('');
+    const statusRow = text =>
+      `<div role="option" aria-selected="false" aria-disabled="true" class="fui-menu-item phenotype-search-state"><span class="fui-menu-item__content"><span class="fui-menu-item__title">${escapeHtml(text)}</span></span></div>`;
+    if (searchLoading) {
+      list.innerHTML = '';
+    } else if (searchComplete && !results.length) {
+      list.innerHTML = statusRow(PHENOTYPE_SEARCH_EMPTY);
+    } else {
+      list.innerHTML = results.map((term, index) => {
+        const disabled = resultDisabled(term);
+        const count = Number.isInteger(term.geneCount)
+          ? `${term.geneCount.toLocaleString()} associated ${term.geneCount === 1 ? 'gene' : 'genes'}`
+          : '';
+        const description = [
+          term.id,
+          term.termType === 'condition' ? 'Condition' : term.termType === 'pathway' ? 'Pathway' : term.termType === 'gene' ? 'Gene' : 'Feature',
+          count,
+          matchDescription(term),
+        ].filter(Boolean).join(' · ');
+        return `<button id="phenotype-search-option-${index}" type="button" role="option" aria-selected="${!disabled && index === activeIndex}" aria-disabled="${disabled}" class="fui-menu-item ${!disabled && index === activeIndex ? 'active' : ''}" data-phenotype-result="${escapeHtml(term.id)}" ${disabled ? 'disabled' : ''}><span class="fui-menu-item__content"><strong class="fui-menu-item__title">${escapeHtml(term.label)}</strong><small class="fui-menu-item__description">${escapeHtml(description)}</small></span></button>`;
+      }).join('');
+    }
+    const input = host().querySelector('[data-phenotype-search]');
+    input?.setAttribute('aria-expanded', String(Boolean(list.innerHTML)));
+    const activeResult = results[activeIndex];
+    if (input && activeResult && !resultDisabled(activeResult)) {
+      input.setAttribute('aria-activedescendant', `phenotype-search-option-${activeIndex}`);
+    } else {
+      input?.removeAttribute('aria-activedescendant');
+    }
+    const live = host().querySelector('[data-phenotype-search-status]');
+    if (live) {
+      live.textContent = searchAnnouncement;
+      searchAnnouncement = '';
+    }
   }
 
   function render() {
@@ -697,21 +835,20 @@ export function createPhenotypeFeature({
     const reactomeReady = Boolean(resources.reactome?.ready);
     const hasSelection =
       terms('observed').length ||
-      terms('excluded').length ||
       terms('conditions').length ||
       terms('pathways').length ||
       terms('genes').length;
     const validProfile = hasPositiveInput();
     const previewReady = Boolean(preview?.fingerprint) && !previewLoading && !pasteLoading && !unresolvedPasteCount();
-    const includedInResult = preview
-      ? preview.includedGenesInResult ?? Math.min(preview.includedGenes, preview.genesInResult)
-      : 0;
-    const unmatchedGenes = preview ? Math.max(0, preview.includedGenes - includedInResult) : 0;
-    const scopeSummary = preview
-      ? `${includedInResult.toLocaleString()} of ${preview.includedGenes.toLocaleString()} ${preview.includedGenes === 1 ? 'gene has' : 'genes have'} variants in this result.${unmatchedGenes ? ` <button type="button" class="fui-button fui-button--subtle" data-view-missing-genes>View ${unmatchedGenes.toLocaleString()} without variants</button>` : ''}`
-      : '';
+    const { canApply, html: scopeSummary } = summarizeGenePreviewScope(preview);
+    const enabledSettingCount = activeGeneSettingCount(profile);
+    const settingsLabel = enabledSettingCount
+      ? `Gene settings, ${enabledSettingCount} enabled`
+      : 'Gene settings';
     popover.innerHTML = `<div class="phenotype-popover__content">
-        <label class="fui-field phenotype-search-field phenotype-popover__search"><span class="fui-field__label">Add a feature, condition, pathway, or gene</span><input class="fui-input" type="search" data-phenotype-search autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="phenotype-search-results" aria-expanded="false" placeholder="Search names or identifiers"><div id="phenotype-search-results" class="phenotype-search-results fui-popover fui-popover--listbox" data-phenotype-results role="listbox"></div></label>
+        <div class="phenotype-popover__heading"><h2 id="phenotype-popover-title">Add a feature, condition, pathway, or gene</h2><div class="fui-menu phenotype-settings-menu" data-gene-settings><button type="button" class="fui-button fui-button--icon phenotype-settings-menu__trigger ${enabledSettingCount ? 'has-active-settings' : ''}" data-gene-settings-toggle aria-label="${escapeHtml(settingsLabel)}" title="${escapeHtml(settingsLabel)}" aria-controls="phenotype-settings-popover" aria-expanded="${geneSettingsOpen}" aria-haspopup="dialog"><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span class="phenotype-settings-menu__indicator" aria-hidden="true"></span></button><div id="phenotype-settings-popover" class="fui-popover fui-popover--menu fui-menu__popover phenotype-settings-menu__popover ${geneSettingsOpen ? '' : 'hidden'}" role="dialog" aria-labelledby="phenotype-settings-title"><strong id="phenotype-settings-title" class="fui-menu-group__label">Gene settings</strong><label class="phenotype-setting-option" title="${escapeHtml(POLYGENIC_ASSOCIATIONS_TOOLTIP)}"><div class="phenotype-setting-option__label">Include polygenic associations for HPO and MONDO</div><input class="fui-switch" type="checkbox" role="switch" data-include-polygenic aria-describedby="phenotype-polygenic-description" ${profile.includePolygenic ? 'checked' : ''}></label><span id="phenotype-polygenic-description" class="phenotype-visually-hidden">${escapeHtml(POLYGENIC_ASSOCIATIONS_TOOLTIP)}</span><label class="phenotype-setting-option" title="${escapeHtml(UPSTREAM_DOWNSTREAM_TOOLTIP)}"><div class="phenotype-setting-option__label">Include upstream/downstream variants (VEP 5 kb)</div><input class="fui-switch" type="checkbox" role="switch" data-include-upstream-downstream aria-describedby="phenotype-upstream-downstream-description" ${profile.includeUpstreamDownstream ? 'checked' : ''}></label><span id="phenotype-upstream-downstream-description" class="phenotype-visually-hidden">${escapeHtml(UPSTREAM_DOWNSTREAM_TOOLTIP)}</span></div></div></div>
+        <label class="fui-field phenotype-search-field phenotype-popover__search"><span class="phenotype-visually-hidden">Search names or identifiers</span><input class="fui-input" type="search" data-phenotype-search value="${escapeHtml(searchText)}" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="phenotype-search-results" aria-expanded="false" placeholder="Search names or identifiers"><div id="phenotype-search-results" class="phenotype-search-results fui-popover fui-popover--listbox" data-phenotype-results role="listbox"></div></label>
+        <span class="phenotype-visually-hidden" data-phenotype-search-status role="status" aria-live="polite" aria-atomic="true"></span>
         ${hpoReady && profile.mondoRelease && reactomeReady
           ? ''
           : `<div class="fui-status-message fui-status-message--warning"><span>${escapeHtml([
@@ -724,7 +861,7 @@ export function createPhenotypeFeature({
         <p class="phenotype-scope-note">${scopeSummary}</p>
         ${message ? `<div class="phenotype-message" role="status"><span>${escapeHtml(message)}</span></div>` : ''}
       </div>
-      <footer class="phenotype-popover__footer result-filter-actions"><button type="button" class="fui-button" data-clear-phenotypes ${hasSelection && !applying ? '' : 'disabled'}>Clear</button><button type="button" class="fui-button fui-button--primary" data-apply-phenotypes ${validProfile && previewReady && !applying ? '' : 'disabled'}>${applying ? 'Applying…' : previewLoading || pasteLoading ? 'Resolving…' : 'Apply'}</button></footer>`;
+      <footer class="phenotype-popover__footer result-filter-actions"><button type="button" class="fui-button" data-clear-phenotypes ${(hasSelection || profileLoadError) && !applying ? '' : 'disabled'}>Clear</button><button type="button" class="fui-button fui-button--primary" data-apply-phenotypes ${validProfile && previewReady && canApply && !applying ? '' : 'disabled'}>${applying ? 'Applying…' : previewLoading || pasteLoading ? 'Resolving…' : 'Apply'}</button></footer>`;
     popover
       .querySelector('.phenotype-popover__content')
       ?.toggleAttribute('inert', applying);
@@ -738,7 +875,10 @@ export function createPhenotypeFeature({
     const button = $('#phenotypes');
     const popover = host();
     const rect = button.getBoundingClientRect();
-    const width = Math.min(560, window.innerWidth - 24);
+    const rootFontSize = Number.parseFloat(
+      window.getComputedStyle(document.documentElement).fontSize,
+    ) || 16;
+    const width = Math.min(51.25 * rootFontSize, window.innerWidth - 24);
     const preferredTop = rect.bottom + 8;
     let top = preferredTop;
     let maxHeight = Math.min(720, window.innerHeight - top - 12);
@@ -754,46 +894,64 @@ export function createPhenotypeFeature({
 
   async function search(query) {
     request?.abort();
-    request = new AbortController();
+    const controller = new AbortController();
+    request = controller;
+    searchLoading = true;
+    searchComplete = false;
+    results = [];
+    activeIndex = -1;
+    searchAnnouncement = PHENOTYPE_SEARCH_PENDING;
+    renderResults();
     try {
       const response = await fetch(
-        `/api/phenotypes/terms?q=${encodeURIComponent(query)}&limit=20&runId=${encodeURIComponent(run?.id || '')}`,
-        { signal: request.signal },
+        `/api/phenotypes/terms?q=${encodeURIComponent(query)}&limit=20&runId=${encodeURIComponent(run?.id || '')}&includePolygenic=${profile.includePolygenic}`,
+        { signal: controller.signal },
       );
       const body = await response.json();
       if (!response.ok) {
         throw new Error(body.error || 'Could not search genes');
       }
+      if (request !== controller) return;
       profile.mondoRelease = body.mondoRelease || null;
       results = body.terms || [];
-      activeIndex = results.length ? 0 : -1;
+      searchLoading = false;
+      searchComplete = true;
+      activeIndex = firstSelectableResult();
+      searchAnnouncement = results.length ? '' : PHENOTYPE_SEARCH_EMPTY;
       renderResults();
-      const input = host().querySelector('[data-phenotype-search]');
-      input?.setAttribute('aria-expanded', String(results.length > 0));
     } catch (error) {
-      if (error.name !== 'AbortError') {
+      if (error.name !== 'AbortError' && request === controller) {
         results = [];
+        searchLoading = false;
+        searchComplete = false;
+        searchAnnouncement = '';
         message = error.message;
         render();
       }
+    } finally {
+      if (request === controller) request = null;
     }
   }
 
   function add(term, rerender = true) {
-    const kind = term.termType === 'condition' ? 'conditions' : term.termType === 'pathway' ? 'pathways' : term.termType === 'gene' ? 'genes' : profile.addAsAbsent ? 'excluded' : 'observed';
-    if (kind === 'observed') profile.excluded = terms('excluded').filter(item => item.id !== term.id);
-    if (kind === 'excluded') profile.observed = terms('observed').filter(item => item.id !== term.id);
-    if (!terms(kind).some(item => item.id === term.id)) {
-      profile[kind].push({
+    const kind = term.termType === 'condition' ? 'conditions' : term.termType === 'pathway' ? 'pathways' : term.termType === 'gene' ? 'genes' : 'observed';
+    const selected = kind === 'genes' ? cleanGenes([term])[0] : {
         id: term.id,
         label: term.label,
         ...(term.subtypeCount !== undefined
           ? { subtypeCount: term.subtypeCount }
           : {}),
         ...(term.geneCount !== undefined ? { geneCount: term.geneCount } : {}),
-      });
+      };
+    const key = kind === 'genes' ? selected.canonicalGeneId || `SYMBOL:${selected.symbol}` : selected.id;
+    if (!terms(kind).some(item => (kind === 'genes' ? item.canonicalGeneId || `SYMBOL:${item.symbol}` : item.id) === key)) {
+      profile[kind].push(selected);
     }
     results = [];
+    searchText = '';
+    searchLoading = false;
+    searchComplete = false;
+    searchAnnouncement = '';
     activeIndex = -1;
     message = '';
     invalidatePreview();
@@ -806,12 +964,10 @@ export function createPhenotypeFeature({
 
   function makeManualGeneList(genes) {
     profile.observed = [];
-    profile.excluded = [];
     profile.conditions = [];
     profile.pathways = [];
-    profile.genes = cleanTerms(genes);
-    profile.excludedGenes = [];
-    profile.combination = 'any';
+    profile.genes = cleanGenes(genes);
+    profile.includePolygenic = false;
     profile.showMatchesOnly = true;
   }
 
@@ -822,6 +978,10 @@ export function createPhenotypeFeature({
     const selectionEnd = input?.selectionEnd ?? pasteText.length;
     const entries = splitGeneListEntries(pasteText);
     if (!entries.length) {
+      pasteRequest?.abort();
+      pasteRequest = null;
+      pasteLoading = false;
+      clearResolutionAnnouncement();
       pasteResolution = null;
       geneListDraft = [];
       geneSections = [];
@@ -840,6 +1000,7 @@ export function createPhenotypeFeature({
     pasteRequest = controller;
     pasteLoading = true;
     message = '';
+    announceResolutionWhile(() => revision === pasteRevision && pasteRequest === controller);
     try {
       const response = await fetch('/api/phenotypes/terms', {
         method: 'POST',
@@ -851,10 +1012,7 @@ export function createPhenotypeFeature({
       if (!response.ok) throw new Error(body.error || 'Could not review the pasted list');
       if (revision !== pasteRevision) return;
       pasteResolution = body;
-      geneListDraft = (body.recognized || []).map(item => ({
-        id: item.matches[0].id,
-        label: item.matches[0].label,
-      }));
+      geneListDraft = (body.recognized || []).map(item => cleanGenes([item.matches[0]])[0]);
       geneSections = geneListDraft.length
         ? [{ label: 'Gene list', genes: geneListDraft }]
         : [];
@@ -868,6 +1026,7 @@ export function createPhenotypeFeature({
       if (error.name !== 'AbortError') message = error.message;
     } finally {
       if (pasteRequest !== controller || revision !== pasteRevision) return;
+      clearResolutionAnnouncement();
       pasteRequest = null;
       pasteLoading = false;
       render();
@@ -892,13 +1051,13 @@ export function createPhenotypeFeature({
 
   function useGeneList(genes, name = '') {
     if (!genes.length) return;
-    makeManualGeneList(genes);
-    geneListDraft = cleanTerms(genes);
+    profile.includePolygenic = false;
+    geneListDraft = genes.map(savedGeneValue);
     geneSections = [{ label: name || 'Gene list', genes: geneListDraft }];
     pasteText = formatGeneListSections(geneSections);
     pasteResolution = null;
     message = `${genes.length.toLocaleString()} genes added${name ? ` from ${name}` : ''}.`;
-    invalidatePreview(0, false);
+    void resolvePaste();
     render();
   }
 
@@ -908,7 +1067,7 @@ export function createPhenotypeFeature({
     const response = await fetch('/api/gene-lists', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-AnnoCat-CSRF': '1' },
-      body: JSON.stringify({ action: 'save', name, genes }),
+      body: JSON.stringify({ action: 'save', name, genes: genes.map(savedGeneValue) }),
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || 'Could not save the gene list');
@@ -994,9 +1153,12 @@ export function createPhenotypeFeature({
       return;
     }
     profile = normalizeProfile(body);
+    profileLoadError = '';
+    message = '';
     preview = null;
     previewError = '';
     previewLoading = false;
+    previewRevision += 1;
     geneListDraft = [];
     geneSections = [];
     pasteText = '';
@@ -1017,6 +1179,7 @@ export function createPhenotypeFeature({
     preview = null;
     previewError = '';
     previewLoading = false;
+    previewRevision += 1;
     if (!hasPositiveInput()) {
       await clear({ closePopover: false });
       return;
@@ -1027,12 +1190,20 @@ export function createPhenotypeFeature({
   }
 
   function handleClick(event) {
+    const settingsToggle = event.target.closest('[data-gene-settings-toggle]');
+    if (settingsToggle) {
+      setGeneSettingsOpen(!geneSettingsOpen);
+      return;
+    }
+    if (geneSettingsOpen && !event.target.closest('[data-gene-settings]')) {
+      setGeneSettingsOpen(false);
+    }
     const result = event.target.closest('[data-phenotype-result]');
     if (result) {
       const term = results.find(
         item => item.id === result.dataset.phenotypeResult,
       );
-      if (term) add(term);
+      if (term && !resultDisabled(term)) add(term);
       return;
     }
     const remove = event.target.closest('[data-remove-phenotype]');
@@ -1052,7 +1223,6 @@ export function createPhenotypeFeature({
     if (event.target.closest('[data-clear-entered-genes]')) {
       const removeFromAppliedProfile = Boolean(profile.activeGeneration);
       profile.genes = [];
-      profile.excludedGenes = [];
       message = '';
       if (removeFromAppliedProfile) void applyRemoval();
       else {
@@ -1100,6 +1270,32 @@ export function createPhenotypeFeature({
   }
 
   function handleInput(event) {
+    if (event.target.matches('[data-include-polygenic]')) {
+      profile.includePolygenic = event.target.checked;
+      clearTimeout(timer);
+      request?.abort();
+      request = null;
+      results = [];
+      searchLoading = false;
+      searchComplete = false;
+      searchAnnouncement = '';
+      activeIndex = -1;
+      invalidatePreview(0, true);
+      render();
+      position();
+      const query = searchText.trim();
+      if (query.length >= 2) void search(query);
+      queueMicrotask(() => host().querySelector('[data-include-polygenic]')?.focus());
+      return;
+    }
+    if (event.target.matches('[data-include-upstream-downstream]')) {
+      profile.includeUpstreamDownstream = event.target.checked;
+      invalidatePreview(0, false);
+      render();
+      position();
+      queueMicrotask(() => host().querySelector('[data-include-upstream-downstream]')?.focus());
+      return;
+    }
     if (event.target.matches('[data-saved-gene-list]')) {
       selectedGeneListName = event.target.value;
       render();
@@ -1107,8 +1303,14 @@ export function createPhenotypeFeature({
     }
     if (event.target.matches('[data-paste-genes]')) {
       pasteText = event.target.value;
+      profile.includePolygenic = false;
+      const polygenic = host().querySelector('[data-include-polygenic]');
+      if (polygenic) polygenic.checked = false;
       pasteRevision += 1;
       pasteRequest?.abort();
+      pasteRequest = null;
+      pasteLoading = false;
+      clearResolutionAnnouncement();
       previewRequest?.abort();
       previewRequest = null;
       previewLoading = false;
@@ -1127,16 +1329,29 @@ export function createPhenotypeFeature({
     }
     if (!event.target.matches('[data-phenotype-search]')) return;
     clearTimeout(timer);
-    const query = event.target.value.trim();
+    request?.abort();
+    request = null;
+    searchText = event.target.value;
+    searchLoading = false;
+    searchComplete = false;
+    searchAnnouncement = '';
+    results = [];
+    activeIndex = -1;
+    renderResults();
+    const query = searchText.trim();
     if (query.length < 2) {
-      results = [];
-      renderResults();
       return;
     }
     timer = setTimeout(() => search(query), 220);
   }
 
   function handleKeydown(event) {
+    if (event.key === 'Escape' && geneSettingsOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      setGeneSettingsOpen(false, true);
+      return;
+    }
     if (event.key === 'Escape' && !results.length) {
       event.preventDefault();
       close(true);
@@ -1151,29 +1366,41 @@ export function createPhenotypeFeature({
     event.preventDefault();
     if (event.key === 'Escape') {
       results = [];
+      searchComplete = false;
+      activeIndex = -1;
       renderResults();
       return;
     }
+    const selectable = results
+      .map((term, index) => resultDisabled(term) ? -1 : index)
+      .filter(index => index >= 0);
+    if (!selectable.length) return;
+    const current = selectable.indexOf(activeIndex);
     if (event.key === 'ArrowDown') {
-      activeIndex = Math.min(results.length - 1, activeIndex + 1);
+      activeIndex = selectable[Math.min(selectable.length - 1, current + 1)];
     }
     if (event.key === 'ArrowUp') {
-      activeIndex = Math.max(0, activeIndex - 1);
+      activeIndex = selectable[Math.max(0, current < 0 ? 0 : current - 1)];
     }
     if (event.key === 'Enter') {
-      add(results[Math.max(0, activeIndex)]);
+      const term = results[activeIndex];
+      if (term && !resultDisabled(term)) add(term);
       return;
     }
     renderResults();
   }
 
   function close(returnFocus = false) {
+    clearTimeout(timer);
     clearTimeout(previewTimer);
     clearTimeout(pasteTimer);
+    request?.abort();
     previewRequest?.abort();
     pasteRequest?.abort();
+    request = null;
     pasteTimer = null;
     pasteRequest = null;
+    geneSettingsOpen = false;
     $('#phenotype-popover')?.classList.add('hidden');
     $('#phenotypes')?.setAttribute('aria-expanded', 'false');
     if (returnFocus) $('#phenotypes')?.focus();
@@ -1195,10 +1422,12 @@ export function createPhenotypeFeature({
     const body = await response.json();
     if (!response.ok) {
       profile = emptyProfile();
+      profileLoadError = body.error || 'Could not load the phenotype profile';
       updateButton();
-      throw new Error(body.error || 'Could not load the phenotype profile');
+      throw new Error(profileLoadError);
     }
     profile = normalizeProfile(body);
+    profileLoadError = '';
     updateButton();
     return profile;
   }
@@ -1215,23 +1444,39 @@ export function createPhenotypeFeature({
     resources = currentResources;
     message = '';
     results = [];
+    searchText = '';
+    searchLoading = false;
+    searchComplete = false;
+    searchAnnouncement = '';
+    geneSettingsOpen = false;
     activeIndex = -1;
     popover.classList.remove('hidden');
     $('#phenotypes')?.setAttribute('aria-expanded', 'true');
     position();
     render();
     try {
-      if (!alreadySynced) await sync(run, resources);
+      let syncError = profileLoadError ? new Error(profileLoadError) : null;
+      if (!alreadySynced) {
+        try {
+          await sync(run, resources);
+          syncError = null;
+        } catch (error) {
+          syncError = error;
+        }
+      }
       try {
         await loadGeneLists();
       } catch (error) {
-        message = error.message;
+        message = syncError
+          ? `${syncError.message} Saved gene lists could not be loaded: ${error.message}`
+          : error.message;
       }
+      if (syncError && !message) message = syncError.message;
       render();
       position();
-      if (pasteText.trim() && !pasteResolution && !geneListDraft.length) {
+      if (!syncError && pasteText.trim() && !pasteResolution && !geneListDraft.length) {
         await resolvePaste();
-      } else if (hasPositiveInput() && !preview) {
+      } else if (!syncError && hasPositiveInput() && !preview) {
         await requestPreview({ allSymbols: true, syncGeneList: true });
       }
       queueMicrotask(() =>
@@ -1242,6 +1487,15 @@ export function createPhenotypeFeature({
       message = error.message;
       render();
     }
+  }
+
+  function setGeneSettingsOpen(open, returnFocus = false) {
+    geneSettingsOpen = open;
+    const trigger = host().querySelector('[data-gene-settings-toggle]');
+    trigger?.setAttribute('aria-expanded', String(open));
+    host().querySelector('[data-gene-settings] .phenotype-settings-menu__popover')
+      ?.classList.toggle('hidden', !open);
+    if (returnFocus) trigger?.focus();
   }
 
   document.addEventListener('click', event => {

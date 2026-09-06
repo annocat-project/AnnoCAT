@@ -21,6 +21,7 @@ PARAMETERS = {
     "tsl": 1,
 }
 MAX_BATCH = 200
+USER_AGENT = "AnnoCAT-annotation-concordance/1.0 (+https://github.com/annocat-project/AnnoCAT)"
 
 
 def variants(path):
@@ -46,7 +47,7 @@ def request_json(url, payload=None):
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "AnnoCAT-annotation-concordance",
+            "User-Agent": USER_AGENT,
         },
         method="GET" if body is None else "POST",
     )
@@ -70,7 +71,10 @@ def main():
     parser.add_argument("--response", required=True, type=Path)
     parser.add_argument("--request", required=True, type=Path)
     parser.add_argument("--software", required=True, type=Path)
+    parser.add_argument("--batch-size", type=int, default=MAX_BATCH)
     args = parser.parse_args()
+    if not 1 <= args.batch_size <= MAX_BATCH:
+        parser.error(f"--batch-size must be between 1 and {MAX_BATCH}")
 
     software = request_json(f"{SERVER}/info/software")
     if software.get("release") != 115:
@@ -79,8 +83,8 @@ def main():
     input_variants = variants(args.input)
     endpoint = f"{SERVER}/vep/homo_sapiens/region?{urllib.parse.urlencode(PARAMETERS)}"
     batches = [
-        input_variants[index : index + MAX_BATCH]
-        for index in range(0, len(input_variants), MAX_BATCH)
+        input_variants[index : index + args.batch_size]
+        for index in range(0, len(input_variants), args.batch_size)
     ]
     responses = []
     for batch in batches:

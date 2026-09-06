@@ -1,0 +1,199 @@
+name: Source contract validation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/source-contract-validation.yml"
+      - "config/**"
+      - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/gene_identity.rs"
+      - "crates/annocat-cli/src/mondo.rs"
+      - "crates/annocat-cli/src/phenotype.rs"
+      - "crates/annocat-cli/src/phenotype_patient_validation.rs"
+      - "crates/annocat-cli/src/reactome.rs"
+      - "crates/annocat-cli/src/results.rs"
+      - "crates/annocat-core/src/source_catalog.rs"
+      - "fixtures/source-cache-parity/**"
+      - "scripts/verify-configured-urls.py"
+      - "scripts/verify-fastvep-distance-default.py"
+      - "scripts/verify-phenotype-known-cases.ps1"
+      - "scripts/verify-supplementary-cache-parity.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/source-contract-validation.yml"
+      - "config/**"
+      - "crates/annocat-cli/src/main.rs"
+      - "crates/annocat-cli/src/gene_identity.rs"
+      - "crates/annocat-cli/src/mondo.rs"
+      - "crates/annocat-cli/src/phenotype.rs"
+      - "crates/annocat-cli/src/phenotype_patient_validation.rs"
+      - "crates/annocat-cli/src/reactome.rs"
+      - "crates/annocat-cli/src/results.rs"
+      - "crates/annocat-core/src/source_catalog.rs"
+      - "fixtures/source-cache-parity/**"
+      - "scripts/verify-configured-urls.py"
+      - "scripts/verify-fastvep-distance-default.py"
+      - "scripts/verify-phenotype-known-cases.ps1"
+      - "scripts/verify-supplementary-cache-parity.py"
+
+permissions:
+  contents: read
+
+jobs:
+  urls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test configured URL validator
+        run: python scripts/verify-configured-urls.py --self-test
+      - name: Validate configured URLs
+        run: >-
+          python scripts/verify-configured-urls.py
+          --verify-sha256
+          --report "$RUNNER_TEMP/configured-urls.json"
+      - name: Upload URL validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: configured-url-validation
+          path: ${{ runner.temp }}/configured-urls.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  fastvep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup default 1.94.1
+      - name: Build validation binaries
+        run: |
+          commit=$(jq -r .commit config/fastvep-pin.json)
+          repository=$(jq -r .repository config/fastvep-pin.json)
+          git clone "$repository" "$RUNNER_TEMP/fastVEP"
+          git -C "$RUNNER_TEMP/fastVEP" checkout --detach "$commit"
+          cargo build --manifest-path "$RUNNER_TEMP/fastVEP/Cargo.toml" \
+            --release --locked -p fastvep-cli
+          mkdir "$RUNNER_TEMP/binary"
+          cp "$RUNNER_TEMP/fastVEP/target/release/fastvep" "$RUNNER_TEMP/binary/"
+          test_binary=$(cargo test -p annocat-cli --bin annocat --locked \
+            --no-run --message-format=json | \
+            jq -r 'select(.reason == "compiler-artifact" and .target.name == "annocat" and .executable != null) | .executable' | \
+            tail -n 1)
+          test -n "$test_binary"
+          cp "$test_binary" "$RUNNER_TEMP/binary/annocat-source-contract-tests"
+      - name: Validate implicit fastVEP 5 kb distance boundary
+        run: >-
+          python scripts/verify-fastvep-distance-default.py
+          --fastvep "$RUNNER_TEMP/binary/fastvep"
+      - name: Validate official rolling source resolvers
+        run: |
+          test_binary="$RUNNER_TEMP/binary/annocat-source-contract-tests"
+          test_name="profile_status_tests::official_rolling_source_resolvers_return_downloadable_artifacts"
+          matches=$("$test_binary" --list --format terse | \
+            awk -v expected="$test_name: test" '$0 == expected { count++ } END { print count + 0 }')
+          test "$matches" -eq 1
+          "$test_binary" --ignored --exact "$test_name" --test-threads=1
+      - name: Validate HPO, MONDO, HGNC, Reactome, and frozen known cases
+        shell: pwsh
+        env:
+          PATIENT_VALIDATION_MODE: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch') && 'full' || 'manifest' }}
+        run: |
+          ./scripts/verify-phenotype-known-cases.ps1 `
+            -TestBinary "$env:RUNNER_TEMP/binary/annocat-source-contract-tests" `
+            -PatientValidation "$env:PATIENT_VALIDATION_MODE" `
+            -ReportPath "$env:RUNNER_TEMP/phenotype-patient-validation.json" `
+            -GeneRanksPath "$env:RUNNER_TEMP/phenotype-gene-ranks.tsv"
+      - name: Upload phenotype patient validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phenotype-patient-validation
+          path: |
+            ${{ runner.temp }}/phenotype-patient-validation.json
+            ${{ runner.temp }}/phenotype-gene-ranks.tsv
+          if-no-files-found: warn
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-contract-binaries
+          path: ${{ runner.temp }}/binary/
+          if-no-files-found: error
+          retention-days: 1
+
+  source:
+    needs: fastvep
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        source:
+          - clinvar
+          - dbsnp
+          - gnomad
+          - gnomad-genomes
+          - dbnsfp
+          - cadd
+          - phylop
+          - revel
+          - spliceai
+          - all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-contract-binaries
+          path: ${{ runner.temp }}/binary
+      - name: Validate cache and structured-output contract
+        shell: bash
+        run: |
+          fastvep="$RUNNER_TEMP/binary/fastvep"
+          source_id="${{ matrix.source }}"
+          structured="$RUNNER_TEMP/$source_id.ndjson"
+          report="$RUNNER_TEMP/$source_id.json"
+          chmod +x "$fastvep"
+          arguments=()
+          if [[ "$source_id" != "all" ]]; then
+            arguments+=(--source "$source_id")
+          fi
+          python scripts/verify-supplementary-cache-parity.py \
+            --fastvep "$fastvep" "${arguments[@]}" \
+            --structured-output "$structured" --json "$report"
+          echo "ANNOCAT_SOURCE_PARITY_STRUCTURED=$structured" >> "$GITHUB_ENV"
+          sources=$(jq -r '.sources | join(",")' "$report")
+          test -n "$sources"
+          echo "ANNOCAT_SOURCE_PARITY_SOURCES=$sources" >> "$GITHUB_ENV"
+      - name: Validate AnnoCAT result projections
+        run: |
+          test_binary="$RUNNER_TEMP/binary/annocat-source-contract-tests"
+          test_name="results::tests::source_cache_parity_fixture_survives_result_projection"
+          chmod +x "$test_binary"
+          matches=$("$test_binary" --list --format terse | \
+            awk -v expected="$test_name: test" '$0 == expected { count++ } END { print count + 0 }')
+          test "$matches" -eq 1
+          "$test_binary" --exact "$test_name" --test-threads=1
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-contract-${{ matrix.source }}
+          path: ${{ runner.temp }}/${{ matrix.source }}.json
+          if-no-files-found: warn
+          retention-days: 14

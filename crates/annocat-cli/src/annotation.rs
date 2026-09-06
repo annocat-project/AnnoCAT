@@ -15,7 +15,7 @@ const PERFORMANCE_FILE: &str = "annotation-performance.json";
 const FASTVEP_PERFORMANCE_FILE: &str = "fastvep-performance.json";
 const PERFORMANCE_PROFILE_ENV: &str = "ANNOCAT_PROFILE_ANNOTATION";
 const CHECKPOINT_SCHEMA_VERSION: u16 = 2;
-const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v1";
+const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v2";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1274,6 +1274,15 @@ fn execute_vcf_review(
             return fail_staging(staging, format!("VCF review conversion failed: {error}"));
         }
     };
+    if canonical.excluded_uncarried_alleles > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} alternate alleles not carried by any sample",
+                canonical.excluded_uncarried_alleles
+            ),
+        );
+    }
 
     if let Ok(mut current) = state().lock() {
         current.records = Some(canonical.rows);
@@ -1387,6 +1396,10 @@ fn execute_vcf_review(
         super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
     );
     object.insert("inputContentSha256".into(), input_content_sha256.into());
+    object.insert(
+        "excludedUncarriedAlleleCount".into(),
+        canonical.excluded_uncarried_alleles.into(),
+    );
     fs::write(
         staging.join("manifest.json"),
         serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
@@ -1685,6 +1698,7 @@ fn execution_contract_sha256(
         },
         "referenceManifestSha256": super::fastvep::sha256_file(&reference_manifest)?,
         "transcriptManifestSha256": super::fastvep::sha256_file(&transcript_manifest)?,
+        "transcriptExclusionPolicy": super::fastvep::readthrough_transcript_policy(),
         "representativeSelectionContract": super::results::REPRESENTATIVE_SELECTION_CONTRACT,
     });
     Ok(format!(
@@ -1732,6 +1746,7 @@ fn run_fastvep(
     let executable = super::fastvep::readiness()
         .executable
         .ok_or("fastVEP executable disappeared")?;
+    let readthrough_transcripts = super::fastvep::readthrough_transcript_list()?;
     let stdout =
         File::create(staging.join("fastvep.stdout.log")).map_err(|error| error.to_string())?;
     let stderr =
@@ -1757,6 +1772,8 @@ fn run_fastvep(
         .arg(super::reference::fasta_path(resources))
         .arg("--transcript-cache")
         .arg(super::transcript::cache_path(resources))
+        .arg("--exclude-transcripts")
+        .arg(&readthrough_transcripts)
         .args([
             "--symbol",
             "--hgvs",
@@ -2151,6 +2168,15 @@ fn finalize_outputs(
             ),
         );
     }
+    if canonical.excluded_uncarried_alleles > 0 {
+        crate::terminal_log(
+            "annotation",
+            format!(
+                "{run_id} excluded {} alternate alleles not carried by any sample",
+                canonical.excluded_uncarried_alleles
+            ),
+        );
+    }
     check_cancel(staging)?;
     update_indexing_progress(
         "publishing",
@@ -2244,7 +2270,7 @@ fn finalize_outputs(
         "variantCount": canonical.rows,
         "vcfRecordCount": output_summary.records,
         "excludedAuxiliaryRecordCount": canonical.excluded_auxiliary_records,
-        "alleleCount": output_summary.alternate_alleles,
+        "alleleCount": canonical.rows,
         "csqEntryCount": output_summary.csq_entries,
         "structuredRecordCount": structured.records,
         "consequenceCount": structured.consequences,
@@ -2281,9 +2307,18 @@ fn finalize_outputs(
         "representativeSelectionContract".into(),
         super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
     );
+    object.insert(
+        "transcriptExclusionPolicy".into(),
+        serde_json::to_value(super::fastvep::readthrough_transcript_policy())
+            .map_err(|error| error.to_string())?,
+    );
     object.insert("inputName".into(), input_name.into());
     object.insert("inputBytes".into(), file_bytes(&request.input)?.into());
     object.insert("inputContentSha256".into(), input_content_sha256.into());
+    object.insert(
+        "excludedUncarriedAlleleCount".into(),
+        canonical.excluded_uncarried_alleles.into(),
+    );
     if let Some(profile) = request.requested_profile.as_deref() {
         object.insert("requestedProfile".into(), profile.into());
     }

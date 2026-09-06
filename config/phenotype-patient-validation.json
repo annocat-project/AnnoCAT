@@ -1,0 +1,1696 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "name": "Phenopacket Store",
+    "repository": "https://github.com/monarch-initiative/phenopacket-store.git",
+    "release": "0.1.27",
+    "commit": "3f3619800b2c949f8bfb457a122346c2fae7e482",
+    "phenopacketFileCount": 10377,
+    "phenopacketTreeHashAlgorithm": "sha256(relative-path + NUL + lowercase-file-sha256 + LF)-v1",
+    "phenopacketTreeSha256": "8bd5aca8a75999644ff2008bd05ff0f85b84d8a64adb6c27e56e2f365607579e"
+  },
+  "rankingAlgorithmVersion": "resnik-query-disease-v1",
+  "selection": {
+    "challengeCaseRule": "Eight predeclared, phenotypically diverse challenge cases retain their historical top-20 reference for transparent case-level diagnostics; no individual case is a release gate.",
+    "cohortRule": "Challenge cases plus 32 HGNC-distinct solved single-gene cases selected by SHA-256(commit + NUL + HGNC ID); within each gene use the eligible 3-25-positive-term case with the most terms, then lexical path.",
+    "releaseRule": "The exploratory search feature passes the first retrospective cohort gate only when observed gene-balanced mean reciprocal worst-tie rank strictly exceeds the predeclared 95th percentile of target-label derangements. Absolute top-k values establish telemetry for future non-regression; this is not clinical validation.",
+    "queryTermCountBins": [
+      3,
+      6,
+      11,
+      21
+    ],
+    "bootstrap": {
+      "replicates": 2000,
+      "seed": 1380010270
+    },
+    "targetLabelNull": {
+      "derangements": 1000,
+      "seed": 1380010271
+    },
+    "robustness": {
+      "seed": 1380010272,
+      "dropoutFraction": 0.2,
+      "noiseTermCount": 1
+    }
+  },
+  "cases": [
+    {
+      "id": "PMID_11603379_Patient_1",
+      "relativePath": "notebooks/SLC2A1/phenopackets/PMID_11603379_Patient_1.json",
+      "sha256": "496324d25c93eb1984eb6474dcb430f6bb2b9cef9c352b94e3e228eb1e7e6f75",
+      "publicationIds": [
+        "PMID:11603379"
+      ],
+      "diseaseIds": [
+        "OMIM:606777"
+      ],
+      "targetHgncId": "HGNC:11005",
+      "targetSymbol": "SLC2A1",
+      "positiveHpoIds": [
+        "HP:0000750",
+        "HP:0001250",
+        "HP:0001252",
+        "HP:0001260",
+        "HP:0001332",
+        "HP:0001336",
+        "HP:0002066",
+        "HP:0004322",
+        "HP:0010864",
+        "HP:0011972",
+        "HP:0025373"
+      ],
+      "excludedHpoIds": [
+        "HP:0001256",
+        "HP:0002342",
+        "HP:0003487"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_30517146_Patient_5",
+      "relativePath": "notebooks/ACTA1/phenopackets/PMID_30517146_Patient_5.json",
+      "sha256": "8e71ad6067a8ca50b4784272cd6c89518e05502cbdf822f6b4868615d7c65248",
+      "publicationIds": [
+        "PMID:30517146"
+      ],
+      "diseaseIds": [
+        "OMIM:161800"
+      ],
+      "targetHgncId": "HGNC:129",
+      "targetSymbol": "ACTA1",
+      "positiveHpoIds": [
+        "HP:0000218",
+        "HP:0001252",
+        "HP:0001270",
+        "HP:0001284",
+        "HP:0003701",
+        "HP:0006466",
+        "HP:0030319"
+      ],
+      "excludedHpoIds": [
+        "HP:0000602",
+        "HP:0001249",
+        "HP:0001283",
+        "HP:0002307",
+        "HP:0002460"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_27057656_patient",
+      "relativePath": "notebooks/ADAMTSL2/phenopackets/PMID_27057656_patient.json",
+      "sha256": "bfcf200e9098a056495aaeb1ee5a81eabab60dfcfc5ce9d563233ce0d607feea",
+      "publicationIds": [
+        "PMID:27057656"
+      ],
+      "diseaseIds": [
+        "OMIM:231050"
+      ],
+      "targetHgncId": "HGNC:14631",
+      "targetSymbol": "ADAMTSL2",
+      "positiveHpoIds": [
+        "HP:0000233",
+        "HP:0000343",
+        "HP:0001156",
+        "HP:0001263",
+        "HP:0001377",
+        "HP:0001488",
+        "HP:0001561",
+        "HP:0002205",
+        "HP:0002750",
+        "HP:0003022",
+        "HP:0003066",
+        "HP:0003097",
+        "HP:0004322",
+        "HP:0005792",
+        "HP:0009803",
+        "HP:0010049"
+      ],
+      "excludedHpoIds": [
+        "HP:0000240"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_28823388_3_month_old_girl",
+      "relativePath": "notebooks/ADA/phenopackets/PMID_28823388_3_month_old_girl.json",
+      "sha256": "ddbc2b1d599ee13cd0e63579cb9476ed18c2aadd5fd4a8e7794ebc981aa7a07d",
+      "publicationIds": [
+        "PMID:28823388"
+      ],
+      "diseaseIds": [
+        "OMIM:102700"
+      ],
+      "targetHgncId": "HGNC:186",
+      "targetSymbol": "ADA",
+      "positiveHpoIds": [
+        "HP:0001270",
+        "HP:0001508",
+        "HP:0001888",
+        "HP:0001954",
+        "HP:0002720",
+        "HP:0002850",
+        "HP:0004430",
+        "HP:0005359",
+        "HP:0006532",
+        "HP:0009098",
+        "HP:0030273"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_21594992_20_year_old_man",
+      "relativePath": "notebooks/FBN1/phenopackets/PMID_21594992_20_year_old_man.json",
+      "sha256": "fffdae315b50e11946de2a4181cd37086a21d343832b9623d12ebd9f9fbe12a7",
+      "publicationIds": [
+        "PMID:21594992"
+      ],
+      "diseaseIds": [
+        "OMIM:616914"
+      ],
+      "targetHgncId": "HGNC:3603",
+      "targetSymbol": "FBN1",
+      "positiveHpoIds": [
+        "HP:0000218",
+        "HP:0000278",
+        "HP:0000426",
+        "HP:0000460",
+        "HP:0000494",
+        "HP:0000520",
+        "HP:0000767",
+        "HP:0000978",
+        "HP:0001083",
+        "HP:0001166",
+        "HP:0001187",
+        "HP:0001508",
+        "HP:0001511",
+        "HP:0001622",
+        "HP:0001763",
+        "HP:0003758",
+        "HP:0004482",
+        "HP:0005328",
+        "HP:0009064",
+        "HP:0011003",
+        "HP:0011968"
+      ],
+      "excludedHpoIds": [
+        "HP:0000098",
+        "HP:0000369",
+        "HP:0001363",
+        "HP:0001654",
+        "HP:0002804",
+        "HP:0002808",
+        "HP:0004942",
+        "HP:0008081",
+        "HP:0012773"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_34354969_P18",
+      "relativePath": "notebooks/ABCB7/phenopackets/PMID_34354969_P18.json",
+      "sha256": "311df8a7b11ecbca3afd28f0554bb10278ed8140d3b43155aecf907fba9daab4",
+      "publicationIds": [
+        "PMID:34354969"
+      ],
+      "diseaseIds": [
+        "OMIM:301310"
+      ],
+      "targetHgncId": "HGNC:48",
+      "targetSymbol": "ABCB7",
+      "positiveHpoIds": [
+        "HP:0000028",
+        "HP:0000639",
+        "HP:0000717",
+        "HP:0001250",
+        "HP:0001251",
+        "HP:0001252",
+        "HP:0001260",
+        "HP:0001263",
+        "HP:0001288",
+        "HP:0001315",
+        "HP:0001511",
+        "HP:0001824",
+        "HP:0001903",
+        "HP:0001992",
+        "HP:0002172",
+        "HP:0002463",
+        "HP:0004322",
+        "HP:0006999",
+        "HP:0012751",
+        "HP:0025373"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_34014594_Index_patient",
+      "relativePath": "notebooks/ABCC8/phenopackets/PMID_34014594_Index_patient.json",
+      "sha256": "c4a5fe1236292909bc6a18aed50fcbb853049ee9298466a5e4455ec4ef5b4e84",
+      "publicationIds": [
+        "PMID:34014594"
+      ],
+      "diseaseIds": [
+        "OMIM:621196"
+      ],
+      "targetHgncId": "HGNC:59",
+      "targetSymbol": "ABCC8",
+      "positiveHpoIds": [
+        "HP:0000488",
+        "HP:0001271",
+        "HP:0002754",
+        "HP:0003119",
+        "HP:0004904",
+        "HP:0012594",
+        "HP:0030795",
+        "HP:0040217"
+      ],
+      "excludedHpoIds": [
+        "HP:0000103",
+        "HP:0000822",
+        "HP:0001953",
+        "HP:0001959"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_21300488_girl_II_4",
+      "relativePath": "notebooks/MECP2/phenopackets/PMID_21300488_girl_II_4.json",
+      "sha256": "cb60ce2170b68c4aa9978dd9fc119467508d5ca263a30ffed18da8f9c562fb63",
+      "publicationIds": [
+        "PMID:21300488"
+      ],
+      "diseaseIds": [
+        "OMIM:312750"
+      ],
+      "targetHgncId": "HGNC:6990",
+      "targetSymbol": "MECP2",
+      "positiveHpoIds": [
+        "HP:0000710",
+        "HP:0000748",
+        "HP:0000817",
+        "HP:0001276",
+        "HP:0001510",
+        "HP:0002019",
+        "HP:0002376",
+        "HP:0002650",
+        "HP:0003202",
+        "HP:0003763",
+        "HP:0005484",
+        "HP:0010864",
+        "HP:0030215",
+        "HP:0100023"
+      ],
+      "excludedHpoIds": [
+        "HP:0001250"
+      ],
+      "sentinel": true,
+      "maximumWorstTieRank": 20
+    },
+    {
+      "id": "PMID_11410597_proband",
+      "relativePath": "notebooks/SCN5A/phenopackets/PMID_11410597_proband.json",
+      "sha256": "1019f602d1cea2de35c19a91b4dd2b43b21a69a5088b791a6eefb47aabed041b",
+      "publicationIds": [
+        "PMID:11410597"
+      ],
+      "diseaseIds": [
+        "OMIM:601144"
+      ],
+      "targetHgncId": "HGNC:10593",
+      "targetSymbol": "SCN5A",
+      "positiveHpoIds": [
+        "HP:0004756",
+        "HP:0012251",
+        "HP:6000313"
+      ],
+      "excludedHpoIds": [
+        "HP:0001279",
+        "HP:0001657",
+        "HP:0001695",
+        "HP:0001699",
+        "HP:0001962"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_9854053_Male_proband_II_2",
+      "relativePath": "notebooks/SLC4A1/phenopackets/PMID_9854053_Male_proband_II_2.json",
+      "sha256": "b0ca2815b99dee5ab65cc7428681b0aa8acab670b818bd7a9ff0b6a24824b51f",
+      "publicationIds": [
+        "PMID:9854053"
+      ],
+      "diseaseIds": [
+        "OMIM:611590"
+      ],
+      "targetHgncId": "HGNC:11027",
+      "targetSymbol": "SLC4A1",
+      "positiveHpoIds": [
+        "HP:0000121",
+        "HP:0000980",
+        "HP:0001254",
+        "HP:0001433",
+        "HP:0001878",
+        "HP:0001923",
+        "HP:0002039",
+        "HP:0002900",
+        "HP:0003158",
+        "HP:0004322",
+        "HP:0004446",
+        "HP:0004918",
+        "HP:0008341",
+        "HP:0008897",
+        "HP:0025066",
+        "HP:0031033",
+        "HP:0032944",
+        "HP:0034609"
+      ],
+      "excludedHpoIds": [
+        "HP:0001541",
+        "HP:0003265",
+        "HP:0007430",
+        "HP:0012100"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_35198730_proband_s_mother",
+      "relativePath": "notebooks/SLC9A6/phenopackets/PMID_35198730_proband_s_mother.json",
+      "sha256": "b53d800fe76e8b4b31c745361fe3e9d5bda11e142b8aaf578402d62425e0b8ca",
+      "publicationIds": [
+        "PMID:35198730"
+      ],
+      "diseaseIds": [
+        "OMIM:301142"
+      ],
+      "targetHgncId": "HGNC:11079",
+      "targetSymbol": "SLC9A6",
+      "positiveHpoIds": [
+        "HP:0001268",
+        "HP:0001288",
+        "HP:0002015",
+        "HP:0002059",
+        "HP:0002063",
+        "HP:0002322",
+        "HP:0030904"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_38325380_Patient_3",
+      "relativePath": "notebooks/ZFX/phenopackets/PMID_38325380_Patient_3.json",
+      "sha256": "6c10263c44b5d571e8134ad206d7eec84f433b8dc0f3d8fb799fb1e8263baa00",
+      "publicationIds": [
+        "PMID:38325380"
+      ],
+      "diseaseIds": [
+        "OMIM:301118"
+      ],
+      "targetHgncId": "HGNC:12869",
+      "targetSymbol": "ZFX",
+      "positiveHpoIds": [
+        "HP:0000023",
+        "HP:0000028",
+        "HP:0000047",
+        "HP:0000154",
+        "HP:0000158",
+        "HP:0000219",
+        "HP:0000286",
+        "HP:0000307",
+        "HP:0000574",
+        "HP:0000664",
+        "HP:0000691",
+        "HP:0000717",
+        "HP:0000750",
+        "HP:0001252",
+        "HP:0001256",
+        "HP:0001561",
+        "HP:0001622",
+        "HP:0002013",
+        "HP:0002021",
+        "HP:0002591",
+        "HP:0007018",
+        "HP:0010862",
+        "HP:0011069",
+        "HP:0011968",
+        "HP:0031936"
+      ],
+      "excludedHpoIds": [
+        "HP:0000085",
+        "HP:0000121",
+        "HP:0000126",
+        "HP:0000175",
+        "HP:0000189",
+        "HP:0000201",
+        "HP:0000218",
+        "HP:0000256",
+        "HP:0000260",
+        "HP:0000262",
+        "HP:0000272",
+        "HP:0000275",
+        "HP:0000276",
+        "HP:0000278",
+        "HP:0000280",
+        "HP:0000294",
+        "HP:0000303",
+        "HP:0000316",
+        "HP:0000319",
+        "HP:0000337",
+        "HP:0000341",
+        "HP:0000343",
+        "HP:0000347",
+        "HP:0000358",
+        "HP:0000369",
+        "HP:0000378",
+        "HP:0000384",
+        "HP:0000391",
+        "HP:0000396",
+        "HP:0000400",
+        "HP:0000405",
+        "HP:0000407",
+        "HP:0000414",
+        "HP:0000448",
+        "HP:0000455",
+        "HP:0000475",
+        "HP:0000483",
+        "HP:0000486",
+        "HP:0000494",
+        "HP:0000501",
+        "HP:0000505",
+        "HP:0000506",
+        "HP:0000518",
+        "HP:0000540",
+        "HP:0000541",
+        "HP:0000545",
+        "HP:0000581",
+        "HP:0000582",
+        "HP:0000609",
+        "HP:0000629",
+        "HP:0000637",
+        "HP:0000639",
+        "HP:0000648",
+        "HP:0000656",
+        "HP:0000678",
+        "HP:0000684",
+        "HP:0000713",
+        "HP:0000716",
+        "HP:0000718",
+        "HP:0000739",
+        "HP:0000744",
+        "HP:0000767",
+        "HP:0000768",
+        "HP:0000787",
+        "HP:0000822",
+        "HP:0000926",
+        "HP:0000954",
+        "HP:0000957",
+        "HP:0000995",
+        "HP:0001057",
+        "HP:0001097",
+        "HP:0001176",
+        "HP:0001182",
+        "HP:0001217",
+        "HP:0001250",
+        "HP:0001342",
+        "HP:0001373",
+        "HP:0001382",
+        "HP:0001385",
+        "HP:0001476",
+        "HP:0001520",
+        "HP:0001537",
+        "HP:0001562",
+        "HP:0001629",
+        "HP:0001631",
+        "HP:0001643",
+        "HP:0001647",
+        "HP:0001680",
+        "HP:0001773",
+        "HP:0001792",
+        "HP:0001814",
+        "HP:0001822",
+        "HP:0001831",
+        "HP:0001840",
+        "HP:0001845",
+        "HP:0002007",
+        "HP:0002015",
+        "HP:0002019",
+        "HP:0002033",
+        "HP:0002035",
+        "HP:0002162",
+        "HP:0002213",
+        "HP:0002217",
+        "HP:0002286",
+        "HP:0002342",
+        "HP:0002553",
+        "HP:0002578",
+        "HP:0002616",
+        "HP:0002650",
+        "HP:0002870",
+        "HP:0002897",
+        "HP:0003189",
+        "HP:0003301",
+        "HP:0003302",
+        "HP:0003304",
+        "HP:0003763",
+        "HP:0004305",
+        "HP:0005280",
+        "HP:0006101",
+        "HP:0006191",
+        "HP:0006335",
+        "HP:0007443",
+        "HP:0008455",
+        "HP:0009748",
+        "HP:0009765",
+        "HP:0009890",
+        "HP:0009931",
+        "HP:0010722",
+        "HP:0010808",
+        "HP:0010864",
+        "HP:0011220",
+        "HP:0011229",
+        "HP:0011231",
+        "HP:0011410",
+        "HP:0011599",
+        "HP:0011800",
+        "HP:0012028",
+        "HP:0012532",
+        "HP:0025267",
+        "HP:0025592",
+        "HP:0030031",
+        "HP:0030084",
+        "HP:0031473",
+        "HP:0100259",
+        "HP:0100633",
+        "HP:0100874"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_36215968_patient",
+      "relativePath": "notebooks/NEK8/phenopackets/PMID_36215968_patient.json",
+      "sha256": "4fcb335aec595df827ede7ca314d60b0a6c7102d168863bcb3e058e1ad4e13e5",
+      "publicationIds": [
+        "PMID:36215968"
+      ],
+      "diseaseIds": [
+        "OMIM:620903"
+      ],
+      "targetHgncId": "HGNC:13387",
+      "targetSymbol": "NEK8",
+      "positiveHpoIds": [
+        "HP:0000083",
+        "HP:0000103",
+        "HP:0000105",
+        "HP:0000822",
+        "HP:0001959",
+        "HP:0004719"
+      ],
+      "excludedHpoIds": [
+        "HP:0000090",
+        "HP:0001407",
+        "HP:0003774"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_30053862_Case_II_2",
+      "relativePath": "notebooks/TP53RK/phenopackets/PMID_30053862_Case_II_2.json",
+      "sha256": "4ca8dd9b5ae65780098ed845453765f7b1f5b5913c906298c48c55ebc0a6a6da",
+      "publicationIds": [
+        "PMID:30053862"
+      ],
+      "diseaseIds": [
+        "OMIM:617730"
+      ],
+      "targetHgncId": "HGNC:16197",
+      "targetSymbol": "TP53RK",
+      "positiveHpoIds": [
+        "HP:0000093",
+        "HP:0000175",
+        "HP:0000252",
+        "HP:0000316",
+        "HP:0000341",
+        "HP:0000347",
+        "HP:0000369",
+        "HP:0000400",
+        "HP:0003073",
+        "HP:0003774",
+        "HP:0005280",
+        "HP:0005565",
+        "HP:0007430",
+        "HP:0045028"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_25758857_Clinical_data",
+      "relativePath": "notebooks/NFU1/phenopackets/PMID_25758857_Clinical_data.json",
+      "sha256": "11d94b7155dfa6cc8c5b86fcc8a4d26bde18635ab276a359f692c104862e41a6",
+      "publicationIds": [
+        "PMID:25758857"
+      ],
+      "diseaseIds": [
+        "OMIM:620938"
+      ],
+      "targetHgncId": "HGNC:16287",
+      "targetSymbol": "NFU1",
+      "positiveHpoIds": [
+        "HP:0001258",
+        "HP:0001263",
+        "HP:0001348",
+        "HP:0002376",
+        "HP:0002510",
+        "HP:0002650",
+        "HP:0007371",
+        "HP:0009830",
+        "HP:0012706",
+        "HP:0012707",
+        "HP:0012708",
+        "HP:0033748"
+      ],
+      "excludedHpoIds": [
+        "HP:0001298",
+        "HP:0001762",
+        "HP:0002079",
+        "HP:0002169",
+        "HP:0002280",
+        "HP:0003128",
+        "HP:0003487",
+        "HP:0011096",
+        "HP:0034295"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_23434115_Exome_2_brother",
+      "relativePath": "notebooks/ACTN1/phenopackets/PMID_23434115_Exome_2_brother.json",
+      "sha256": "d1223e4bf6ef05d96803648293907b95203559b696f791a4ab9e613b05baee75",
+      "publicationIds": [
+        "PMID:23434115"
+      ],
+      "diseaseIds": [
+        "OMIM:615193"
+      ],
+      "targetHgncId": "HGNC:163",
+      "targetSymbol": "ACTN1",
+      "positiveHpoIds": [
+        "HP:0000421",
+        "HP:0001873",
+        "HP:0011877",
+        "HP:0032438"
+      ],
+      "excludedHpoIds": [
+        "HP:0031126"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_22956686_558_IV_2",
+      "relativePath": "notebooks/BCKDK/phenopackets/PMID_22956686_558_IV_2.json",
+      "sha256": "50a3fd1029ab56fccf45ead1067f466741df30ac7a68968db248e51dee23d5d9",
+      "publicationIds": [
+        "PMID:22956686"
+      ],
+      "diseaseIds": [
+        "OMIM:614923"
+      ],
+      "targetHgncId": "HGNC:16902",
+      "targetSymbol": "BCKDK",
+      "positiveHpoIds": [
+        "HP:0000252",
+        "HP:0000518",
+        "HP:0000729",
+        "HP:0001249",
+        "HP:0001263",
+        "HP:0001270",
+        "HP:0001347",
+        "HP:0002197",
+        "HP:0011171",
+        "HP:0011182",
+        "HP:0500132",
+        "HP:0500143",
+        "HP:0500144"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_36751037_Family_A_individual_1",
+      "relativePath": "notebooks/AMOTL1/phenopackets/PMID_36751037_Family_A_individual_1.json",
+      "sha256": "7125f5ae5f7e5a14af15e9e450e0f36d1d6a4af823148779bbbf3591bf2c7825",
+      "publicationIds": [
+        "PMID:36751037"
+      ],
+      "diseaseIds": [
+        "OMIM:621192"
+      ],
+      "targetHgncId": "HGNC:17811",
+      "targetSymbol": "AMOTL1",
+      "positiveHpoIds": [
+        "HP:0000098",
+        "HP:0000311",
+        "HP:0000316",
+        "HP:0000365",
+        "HP:0000403",
+        "HP:0000520",
+        "HP:0000545",
+        "HP:0000592",
+        "HP:0000978",
+        "HP:0001182",
+        "HP:0001263",
+        "HP:0002019",
+        "HP:0002650",
+        "HP:0002910",
+        "HP:0003186",
+        "HP:0007018",
+        "HP:0011318",
+        "HP:0011800",
+        "HP:0011831",
+        "HP:0012741",
+        "HP:0100336",
+        "HP:0100337"
+      ],
+      "excludedHpoIds": [
+        "HP:0000400"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_38791218_Family_2_Patient_7_I_1",
+      "relativePath": "notebooks/KCTD1/phenopackets/PMID_38791218_Family_2_Patient_7_I_1.json",
+      "sha256": "43cefefede17bf9b8170600223d510920e83761fd26842b2f4f85ee08a428951",
+      "publicationIds": [
+        "PMID:38791218"
+      ],
+      "diseaseIds": [
+        "OMIM:621434"
+      ],
+      "targetHgncId": "HGNC:18249",
+      "targetSymbol": "KCTD1",
+      "positiveHpoIds": [
+        "HP:0000691",
+        "HP:0011052",
+        "HP:0011056",
+        "HP:0011057",
+        "HP:0100789"
+      ],
+      "excludedHpoIds": [
+        "HP:0000679",
+        "HP:0006336",
+        "HP:0011053",
+        "HP:0011069",
+        "HP:0033189",
+        "HP:0040221"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_22939636_Family_1_Individual_1",
+      "relativePath": "notebooks/RTTN/phenopackets/PMID_22939636_Family_1_Individual_1.json",
+      "sha256": "0c4a8ab40cce01639ff64565bda38caa90a4edc3ce984ffa07f85699b7620af0",
+      "publicationIds": [
+        "PMID:22939636"
+      ],
+      "diseaseIds": [
+        "OMIM:614833"
+      ],
+      "targetHgncId": "HGNC:18654",
+      "targetSymbol": "RTTN",
+      "positiveHpoIds": [
+        "HP:0000252",
+        "HP:0001249",
+        "HP:0001250",
+        "HP:0001260",
+        "HP:0002126",
+        "HP:0002353",
+        "HP:0007256",
+        "HP:0025161",
+        "HP:0033725"
+      ],
+      "excludedHpoIds": [
+        "HP:0001272",
+        "HP:0001344",
+        "HP:0100025"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_30847826_index_case",
+      "relativePath": "notebooks/COQ4/phenopackets/PMID_30847826_index_case.json",
+      "sha256": "7b77d377cedb5b2599446f1e957a5e096783d7b4a9a917edf03a581cd28e2739",
+      "publicationIds": [
+        "PMID:30847826"
+      ],
+      "diseaseIds": [
+        "OMIM:616276"
+      ],
+      "targetHgncId": "HGNC:19693",
+      "targetSymbol": "COQ4",
+      "positiveHpoIds": [
+        "HP:0001260",
+        "HP:0001268",
+        "HP:0001272",
+        "HP:0001310",
+        "HP:0002059",
+        "HP:0002075",
+        "HP:0002313",
+        "HP:0002317",
+        "HP:0002505",
+        "HP:0003487",
+        "HP:0007359",
+        "HP:0008994",
+        "HP:0030890"
+      ],
+      "excludedHpoIds": [
+        "HP:0001252",
+        "HP:0001263",
+        "HP:0001270",
+        "HP:0001284",
+        "HP:0002015",
+        "HP:0033725"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_24300288_first_patient",
+      "relativePath": "notebooks/DYM/phenopackets/PMID_24300288_first_patient.json",
+      "sha256": "c942646ea4714f726be6f3bd76cb971e67c0f2e92cdcf8e198f98324127e7049",
+      "publicationIds": [
+        "PMID:24300288"
+      ],
+      "diseaseIds": [
+        "OMIM:223800"
+      ],
+      "targetHgncId": "HGNC:21317",
+      "targetSymbol": "DYM",
+      "positiveHpoIds": [
+        "HP:0000154",
+        "HP:0000280",
+        "HP:0000319",
+        "HP:0000470",
+        "HP:0000926",
+        "HP:0001249",
+        "HP:0001344",
+        "HP:0001498",
+        "HP:0002213",
+        "HP:0002515",
+        "HP:0002650",
+        "HP:0002857",
+        "HP:0002866",
+        "HP:0002938",
+        "HP:0003180",
+        "HP:0003183",
+        "HP:0004568",
+        "HP:0008905",
+        "HP:0010049",
+        "HP:0010743",
+        "HP:0034414"
+      ],
+      "excludedHpoIds": [
+        "HP:0000574",
+        "HP:0000664",
+        "HP:0002035",
+        "HP:0003270",
+        "HP:0003311"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_37951597_Family_13_Subject_1",
+      "relativePath": "notebooks/ACBD6/phenopackets/PMID_37951597_Family_13_Subject_1.json",
+      "sha256": "4a14437b54fb8041c522c1b4e7efad9a2b55911066b3c2068057d0677e57f1cb",
+      "publicationIds": [
+        "PMID:37951597"
+      ],
+      "diseaseIds": [
+        "OMIM:620785"
+      ],
+      "targetHgncId": "HGNC:23339",
+      "targetSymbol": "ACBD6",
+      "positiveHpoIds": [
+        "HP:0000020",
+        "HP:0000219",
+        "HP:0000232",
+        "HP:0000280",
+        "HP:0000445",
+        "HP:0000490",
+        "HP:0000582",
+        "HP:0000729",
+        "HP:0000750",
+        "HP:0001251",
+        "HP:0001263",
+        "HP:0001337",
+        "HP:0002061",
+        "HP:0002123",
+        "HP:0002172",
+        "HP:0002360",
+        "HP:0002591",
+        "HP:0005280",
+        "HP:0006986",
+        "HP:0025161",
+        "HP:0025331",
+        "HP:0025403",
+        "HP:0031936",
+        "HP:0100033"
+      ],
+      "excludedHpoIds": [
+        "HP:0000028",
+        "HP:0000047",
+        "HP:0000083",
+        "HP:0000175",
+        "HP:0000238",
+        "HP:0000276",
+        "HP:0000286",
+        "HP:0000303",
+        "HP:0000322",
+        "HP:0000486",
+        "HP:0000505",
+        "HP:0000506",
+        "HP:0000540",
+        "HP:0000639",
+        "HP:0000662",
+        "HP:0000718",
+        "HP:0000819",
+        "HP:0000822",
+        "HP:0000969",
+        "HP:0001182",
+        "HP:0001252",
+        "HP:0001272",
+        "HP:0001274",
+        "HP:0001278",
+        "HP:0001300",
+        "HP:0001320",
+        "HP:0001332",
+        "HP:0001344",
+        "HP:0001382",
+        "HP:0001394",
+        "HP:0001513",
+        "HP:0001762",
+        "HP:0001876",
+        "HP:0002069",
+        "HP:0002079",
+        "HP:0002119",
+        "HP:0002553",
+        "HP:0002650",
+        "HP:0002684",
+        "HP:0002788",
+        "HP:0002808",
+        "HP:0002870",
+        "HP:0007359",
+        "HP:0010819",
+        "HP:0011003",
+        "HP:0012444",
+        "HP:0012469",
+        "HP:0030048",
+        "HP:0030302",
+        "HP:0100716",
+        "HP:0200055"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_30364145_proband",
+      "relativePath": "notebooks/OTUD6B/phenopackets/PMID_30364145_proband.json",
+      "sha256": "884aa21275a59b9dc9ef901fa8398374e976ec3b6cbe617eae682950a09c46e0",
+      "publicationIds": [
+        "PMID:30364145"
+      ],
+      "diseaseIds": [
+        "OMIM:617452"
+      ],
+      "targetHgncId": "HGNC:24281",
+      "targetSymbol": "OTUD6B",
+      "positiveHpoIds": [
+        "HP:0000218",
+        "HP:0000219",
+        "HP:0000276",
+        "HP:0000319",
+        "HP:0000337",
+        "HP:0000343",
+        "HP:0000400",
+        "HP:0000490",
+        "HP:0000508",
+        "HP:0000601",
+        "HP:0001212",
+        "HP:0001256",
+        "HP:0001263",
+        "HP:0001511",
+        "HP:0001636",
+        "HP:0002020",
+        "HP:0002069",
+        "HP:0009765",
+        "HP:0010055",
+        "HP:0011304",
+        "HP:0011968"
+      ],
+      "excludedHpoIds": [
+        "HP:0000278",
+        "HP:0000426",
+        "HP:0000637",
+        "HP:0002553",
+        "HP:0002650"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_39753114_F6_II_1",
+      "relativePath": "notebooks/EEFSEC/phenopackets/PMID_39753114_F6_II_1.json",
+      "sha256": "5f56ecb0033724e618a06a9e9ef3ab93d7e2c78f38ce94ecc79ebd182fb3b77a",
+      "publicationIds": [
+        "PMID:39753114"
+      ],
+      "diseaseIds": [
+        "OMIM:621102"
+      ],
+      "targetHgncId": "HGNC:24614",
+      "targetSymbol": "EEFSEC",
+      "positiveHpoIds": [
+        "HP:0000218",
+        "HP:0000276",
+        "HP:0000365",
+        "HP:0000400",
+        "HP:0000657",
+        "HP:0000750",
+        "HP:0000767",
+        "HP:0001252",
+        "HP:0001263",
+        "HP:0001270",
+        "HP:0001382",
+        "HP:0001511",
+        "HP:0001643",
+        "HP:0001684",
+        "HP:0002342",
+        "HP:0002808",
+        "HP:0005484",
+        "HP:0007817",
+        "HP:0008070",
+        "HP:0033078",
+        "HP:0033725",
+        "HP:0045074"
+      ],
+      "excludedHpoIds": [
+        "HP:0000219",
+        "HP:0000347",
+        "HP:0000486",
+        "HP:0000568",
+        "HP:0000609",
+        "HP:0000639",
+        "HP:0000641",
+        "HP:0001159",
+        "HP:0001257",
+        "HP:0001260",
+        "HP:0001762",
+        "HP:0002066",
+        "HP:0002069",
+        "HP:0002080",
+        "HP:0002133",
+        "HP:0002164",
+        "HP:0002384",
+        "HP:0004209",
+        "HP:0007663",
+        "HP:0031097",
+        "HP:0031903",
+        "HP:0032209",
+        "HP:0032794",
+        "HP:0034392"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_38489591_Family_B_individual_5",
+      "relativePath": "notebooks/CST3/phenopackets/PMID_38489591_Family_B_individual_5.json",
+      "sha256": "44f3174d843c8c0c1b62041bf65beb4706bf889c0a616f94bddd7c0d5c0609fa",
+      "publicationIds": [
+        "PMID:38489591"
+      ],
+      "diseaseIds": [
+        "OMIM:621214"
+      ],
+      "targetHgncId": "HGNC:2475",
+      "targetSymbol": "CST3",
+      "positiveHpoIds": [
+        "HP:0000708",
+        "HP:0001251",
+        "HP:0001268",
+        "HP:0001273",
+        "HP:0001288",
+        "HP:0002059",
+        "HP:0002076",
+        "HP:0002186",
+        "HP:0002197",
+        "HP:0002381",
+        "HP:0004372",
+        "HP:0007359",
+        "HP:0011931"
+      ],
+      "excludedHpoIds": [
+        "HP:0002453",
+        "HP:0032615"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_26590883_Patient_NCI_82_1",
+      "relativePath": "notebooks/FANCI/phenopackets/PMID_26590883_Patient_NCI_82_1.json",
+      "sha256": "e3537642ea23624c83c23055549a58e131efd17c0cc7b1b301c92ee729862292",
+      "publicationIds": [
+        "PMID:26590883"
+      ],
+      "diseaseIds": [
+        "OMIM:609053"
+      ],
+      "targetHgncId": "HGNC:25568",
+      "targetSymbol": "FANCI",
+      "positiveHpoIds": [
+        "HP:0000089",
+        "HP:0000252",
+        "HP:0000325",
+        "HP:0000365",
+        "HP:0000413",
+        "HP:0000543",
+        "HP:0000609",
+        "HP:0000821",
+        "HP:0000957",
+        "HP:0001331",
+        "HP:0001629",
+        "HP:0001631",
+        "HP:0001873",
+        "HP:0001875",
+        "HP:0002247",
+        "HP:0002949",
+        "HP:0003221",
+        "HP:0004322",
+        "HP:0004325",
+        "HP:0005528",
+        "HP:0009777",
+        "HP:0034323"
+      ],
+      "excludedHpoIds": [
+        "HP:0000076",
+        "HP:0000085",
+        "HP:0000568",
+        "HP:0001274",
+        "HP:0001511",
+        "HP:0001643",
+        "HP:0001655",
+        "HP:0009778",
+        "HP:0030048"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_38013430_M2270",
+      "relativePath": "notebooks/CYLC1/phenopackets/PMID_38013430_M2270.json",
+      "sha256": "9d2cbd5637f8d80cee9a7542dc683a755ea065d62d946a3a60cd1d296a1c5575",
+      "publicationIds": [
+        "PMID:38013430"
+      ],
+      "diseaseIds": [
+        "OMIM:301119"
+      ],
+      "targetHgncId": "HGNC:2582",
+      "targetSymbol": "CYLC1",
+      "positiveHpoIds": [
+        "HP:0000798",
+        "HP:0003251",
+        "HP:0012865",
+        "HP:0032560",
+        "HP:0034011"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_30208878_proband",
+      "relativePath": "notebooks/GNPTAB/phenopackets/PMID_30208878_proband.json",
+      "sha256": "fcb15a27c3bd019187acaa5d647d2eb3c7d12ee0dc15bb5aa3c88c3c7200b8c8",
+      "publicationIds": [
+        "PMID:30208878"
+      ],
+      "diseaseIds": [
+        "OMIM:252600"
+      ],
+      "targetHgncId": "HGNC:29670",
+      "targetSymbol": "GNPTAB",
+      "positiveHpoIds": [
+        "HP:0000023",
+        "HP:0000243",
+        "HP:0000252",
+        "HP:0000280",
+        "HP:0000369",
+        "HP:0000520",
+        "HP:0000768",
+        "HP:0001263",
+        "HP:0001276",
+        "HP:0001357",
+        "HP:0001363",
+        "HP:0001508",
+        "HP:0001518",
+        "HP:0003307",
+        "HP:0003320",
+        "HP:0003538",
+        "HP:0005280",
+        "HP:0006380",
+        "HP:0008155",
+        "HP:0008439",
+        "HP:0012471",
+        "HP:0034337"
+      ],
+      "excludedHpoIds": [
+        "HP:0001744",
+        "HP:0002240"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_24465259_Patient_1",
+      "relativePath": "notebooks/DNM2/phenopackets/PMID_24465259_Patient_1.json",
+      "sha256": "3db0e5130957ff92cc89afe46040e35feae29fb1d55193401a77a92e9120c9f0",
+      "publicationIds": [
+        "PMID:24465259"
+      ],
+      "diseaseIds": [
+        "OMIM:160150"
+      ],
+      "targetHgncId": "HGNC:2974",
+      "targetSymbol": "DNM2",
+      "positiveHpoIds": [
+        "HP:0000467",
+        "HP:0000508",
+        "HP:0000597",
+        "HP:0001284",
+        "HP:0001771",
+        "HP:0002460",
+        "HP:0003236",
+        "HP:0003687",
+        "HP:0003701",
+        "HP:0030319"
+      ],
+      "excludedHpoIds": [
+        "HP:0002505",
+        "HP:0002938"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_24951643_Kinship_1_Patient_1",
+      "relativePath": "notebooks/AGRN/phenopackets/PMID_24951643_Kinship_1_Patient_1.json",
+      "sha256": "8ac1c198da59eb3635a08952ed065e072892869004eb1a2cb3a90fcb0a10c281",
+      "publicationIds": [
+        "PMID:24951643"
+      ],
+      "diseaseIds": [
+        "OMIM:615120"
+      ],
+      "targetHgncId": "HGNC:329",
+      "targetSymbol": "AGRN",
+      "positiveHpoIds": [
+        "HP:0002515",
+        "HP:0003393",
+        "HP:0003547",
+        "HP:0003701",
+        "HP:0009027",
+        "HP:0030237"
+      ],
+      "excludedHpoIds": [
+        "HP:0000508",
+        "HP:0000651",
+        "HP:0001283",
+        "HP:0030319"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_37433783_P5",
+      "relativePath": "notebooks/EZH1/phenopackets/PMID_37433783_P5.json",
+      "sha256": "ba51cdc29341a80147563f1dd1ed5f98f90f669971f4f14aff4b256e88d019d6",
+      "publicationIds": [
+        "PMID:37433783"
+      ],
+      "diseaseIds": [
+        "OMIM:601674"
+      ],
+      "targetHgncId": "HGNC:3526",
+      "targetSymbol": "EZH1",
+      "positiveHpoIds": [
+        "HP:0000194",
+        "HP:0000256",
+        "HP:0000280",
+        "HP:0000303",
+        "HP:0000322",
+        "HP:0000490",
+        "HP:0000565",
+        "HP:0000718",
+        "HP:0000733",
+        "HP:0000750",
+        "HP:0001249",
+        "HP:0001252",
+        "HP:0001276",
+        "HP:0001310",
+        "HP:0001337",
+        "HP:0001347",
+        "HP:0001387",
+        "HP:0002066",
+        "HP:0002194",
+        "HP:0010862",
+        "HP:0012472",
+        "HP:0012760",
+        "HP:0100716"
+      ],
+      "excludedHpoIds": [
+        "HP:0000365",
+        "HP:0000639",
+        "HP:0001332",
+        "HP:0002119",
+        "HP:0002376",
+        "HP:0003202",
+        "HP:0100704"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_12165566_IV_5",
+      "relativePath": "notebooks/FOXE1/phenopackets/PMID_12165566_IV_5.json",
+      "sha256": "260827467db9906c855cf979e9e31c745211ecb4b3f34d37dd11f1156c9b340b",
+      "publicationIds": [
+        "PMID:12165566"
+      ],
+      "diseaseIds": [
+        "OMIM:241850"
+      ],
+      "targetHgncId": "HGNC:3806",
+      "targetSymbol": "FOXE1",
+      "positiveHpoIds": [
+        "HP:0000175",
+        "HP:0000316",
+        "HP:0000358",
+        "HP:0000369",
+        "HP:0000821",
+        "HP:0001263",
+        "HP:0002750",
+        "HP:0008191",
+        "HP:0031507"
+      ],
+      "excludedHpoIds": [
+        "HP:0000453",
+        "HP:0010564",
+        "HP:0430050"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_20685856_Family_1_index",
+      "relativePath": "notebooks/GLI2/phenopackets/PMID_20685856_Family_1_index.json",
+      "sha256": "5de3eb7ef915925344bd2ca0ea999e26ef3a7ec726d8c7f5d26e480dc09da71a",
+      "publicationIds": [
+        "PMID:20685856"
+      ],
+      "diseaseIds": [
+        "OMIM:615849"
+      ],
+      "targetHgncId": "HGNC:4318",
+      "targetSymbol": "GLI2",
+      "positiveHpoIds": [
+        "HP:0000010",
+        "HP:0000044",
+        "HP:0000076",
+        "HP:0000824",
+        "HP:0001620",
+        "HP:0001943",
+        "HP:0002069",
+        "HP:0002750",
+        "HP:0004322",
+        "HP:0006136",
+        "HP:0008202",
+        "HP:0008897",
+        "HP:0010627",
+        "HP:0011344",
+        "HP:0011748",
+        "HP:0011755",
+        "HP:0030341",
+        "HP:0030344",
+        "HP:0031098",
+        "HP:0033080",
+        "HP:0034323"
+      ],
+      "excludedHpoIds": [
+        "HP:0000175",
+        "HP:0001360",
+        "HP:0410030"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_24969041_neonate",
+      "relativePath": "notebooks/GLRA1/phenopackets/PMID_24969041_neonate.json",
+      "sha256": "3d7c039aa1d0aeae09a37e5882f44472ec47cf56633213fec19d080d6040cb92",
+      "publicationIds": [
+        "PMID:24969041"
+      ],
+      "diseaseIds": [
+        "OMIM:149400"
+      ],
+      "targetHgncId": "HGNC:4326",
+      "targetSymbol": "GLRA1",
+      "positiveHpoIds": [
+        "HP:0001276",
+        "HP:0002108",
+        "HP:0002267",
+        "HP:0100660"
+      ],
+      "excludedHpoIds": [
+        "HP:0002011"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_26915616_case_report",
+      "relativePath": "notebooks/GSN/phenopackets/PMID_26915616_case_report.json",
+      "sha256": "e3166dc300296892768bb38984e1e7a3f850d4251e94578b258381543f0a806b",
+      "publicationIds": [
+        "PMID:26915616"
+      ],
+      "diseaseIds": [
+        "OMIM:105120"
+      ],
+      "targetHgncId": "HGNC:4620",
+      "targetSymbol": "GSN",
+      "positiveHpoIds": [
+        "HP:0000221",
+        "HP:0000966",
+        "HP:0000973",
+        "HP:0003394",
+        "HP:0003431",
+        "HP:0007089",
+        "HP:0007209",
+        "HP:0007230",
+        "HP:0012507",
+        "HP:0033383",
+        "HP:0033660"
+      ],
+      "excludedHpoIds": [],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_39468830_IV_2",
+      "relativePath": "notebooks/MTTV/phenopackets/PMID_39468830_IV_2.json",
+      "sha256": "b6db125c302cf7e530e9d81f12262f0210fe298615d4df45cda62fef1c9ca298",
+      "publicationIds": [
+        "PMID:39468830"
+      ],
+      "diseaseIds": [
+        "OMIM:500018"
+      ],
+      "targetHgncId": "HGNC:7500",
+      "targetSymbol": "MT-TV",
+      "positiveHpoIds": [
+        "HP:0001258",
+        "HP:0001288",
+        "HP:0003431",
+        "HP:0003448",
+        "HP:0003487",
+        "HP:0006886",
+        "HP:0007083",
+        "HP:0007340",
+        "HP:0011448",
+        "HP:0011449",
+        "HP:0012078",
+        "HP:0031993",
+        "HP:0033206"
+      ],
+      "excludedHpoIds": [
+        "HP:0000365",
+        "HP:0000649",
+        "HP:0001098",
+        "HP:0003387"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_28132691_Subject_1",
+      "relativePath": "notebooks/PSMD12/phenopackets/PMID_28132691_Subject_1.json",
+      "sha256": "30c402766d1eecc0e3c4555863bf0571e56b26225cd250b5d7941d8e90fd2026",
+      "publicationIds": [
+        "PMID:28132691"
+      ],
+      "diseaseIds": [
+        "OMIM:617516"
+      ],
+      "targetHgncId": "HGNC:9557",
+      "targetSymbol": "PSMD12",
+      "positiveHpoIds": [
+        "HP:0000047",
+        "HP:0000278",
+        "HP:0000347",
+        "HP:0000358",
+        "HP:0000365",
+        "HP:0000369",
+        "HP:0000486",
+        "HP:0000639",
+        "HP:0000750",
+        "HP:0001249",
+        "HP:0001252",
+        "HP:0001263",
+        "HP:0001270",
+        "HP:0001629",
+        "HP:0001631",
+        "HP:0001643",
+        "HP:0001660",
+        "HP:0002783",
+        "HP:0004736",
+        "HP:0009777",
+        "HP:0011968"
+      ],
+      "excludedHpoIds": [
+        "HP:0000028",
+        "HP:0000041",
+        "HP:0000049",
+        "HP:0000054",
+        "HP:0000073",
+        "HP:0000316",
+        "HP:0000324",
+        "HP:0000448",
+        "HP:0000729",
+        "HP:0001250",
+        "HP:0009778",
+        "HP:0012683",
+        "HP:0100704"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_24331334_DM_patient",
+      "relativePath": "notebooks/RET/phenopackets/PMID_24331334_DM_patient.json",
+      "sha256": "b4441281fb3568c48b64f41cf43884d7191fcd5c2383e74de42c0035fd91cd05",
+      "publicationIds": [
+        "PMID:24331334"
+      ],
+      "diseaseIds": [
+        "OMIM:171400"
+      ],
+      "targetHgncId": "HGNC:9967",
+      "targetSymbol": "RET",
+      "positiveHpoIds": [
+        "HP:0002666",
+        "HP:0003528",
+        "HP:0025388",
+        "HP:0100735"
+      ],
+      "excludedHpoIds": [
+        "HP:0000843"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    },
+    {
+      "id": "PMID_39106866_Individual_5",
+      "relativePath": "notebooks/RFC4/phenopackets/PMID_39106866_Individual_5.json",
+      "sha256": "e364bfc256fd11620f24f7924fc5bd059a28090be87c5aef08633f6ff24de42c",
+      "publicationIds": [
+        "PMID:39106866"
+      ],
+      "diseaseIds": [
+        "OMIM:621010"
+      ],
+      "targetHgncId": "HGNC:9972",
+      "targetSymbol": "RFC4",
+      "positiveHpoIds": [
+        "HP:0000750",
+        "HP:0001260",
+        "HP:0001263",
+        "HP:0001269",
+        "HP:0001272",
+        "HP:0001288",
+        "HP:0001290",
+        "HP:0001298",
+        "HP:0001310",
+        "HP:0001324",
+        "HP:0001508",
+        "HP:0001762",
+        "HP:0002080",
+        "HP:0002133",
+        "HP:0002194",
+        "HP:0002311",
+        "HP:0002375",
+        "HP:0002835",
+        "HP:0003487",
+        "HP:0004322",
+        "HP:0005484",
+        "HP:0008619"
+      ],
+      "excludedHpoIds": [
+        "HP:0000639",
+        "HP:0001152",
+        "HP:0001943",
+        "HP:0002059",
+        "HP:0002091",
+        "HP:0002094",
+        "HP:0002747",
+        "HP:0009113"
+      ],
+      "sentinel": false,
+      "maximumWorstTieRank": null
+    }
+  ]
+}

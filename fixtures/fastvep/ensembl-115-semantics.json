@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "claim": "Source-matched consequence and HGVS concordance with Ensembl VEP 115.2",
+  "assembly": "GRCh38",
+  "oracle": {
+    "implementation": "Ensembl VEP 115.2",
+    "container": "ensemblorg/ensembl-vep@sha256:ed6b660e278458109afc00d5e730aee240a3bf77e817796386033e1a18963152",
+    "options": [
+      "--format", "vcf",
+      "--vcf",
+      "--offline",
+      "--species", "homo_sapiens",
+      "--assembly", "GRCh38",
+      "--terms", "SO",
+      "--distance", "5000",
+      "--hgvs",
+      "--symbol",
+      "--canonical",
+      "--numbers",
+      "--protein",
+      "--biotype",
+      "--tsl",
+      "--mane",
+      "--show_ref_allele",
+      "--uploaded_allele",
+      "--no_check_variants_order"
+    ],
+    "defaultsReliedUpon": {
+      "shiftHgvs": true,
+      "minimalOutputRepresentation": false,
+      "transcriptSelection": "all"
+    }
+  },
+  "candidate": {
+    "implementation": "fastVEP",
+    "options": [
+      "annotate",
+      "--distance", "5000",
+      "--hgvs",
+      "--symbol",
+      "--canonical",
+      "--no-progress"
+    ],
+    "transcriptSelection": "all"
+  },
+  "sources": {
+    "gff3Sha256": "1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c",
+    "referenceArchiveSha256": "fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02",
+    "preparedReferenceSha256": "9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7"
+  },
+  "chromosomeSynonyms": "1/chr1 through 22/chr22, X/chrX, Y/chrY, MT/chrM",
+  "sourceLabel": "Ensembl",
+  "sourceLabelMethod": "The oracle GFF is staged under the basename Ensembl and fastVEP is invoked with Ensembl=<path>, so VEP's invocation-level SOURCE field is directly comparable.",
+  "fieldContract": "fixtures/fastvep/ensembl-115-gff-gff-contract.json",
+  "inputContract": "fixtures/fastvep/ensembl-115-input-contract.json",
+  "consequenceContract": "fixtures/fastvep/ensembl-115-consequences.json"
+}

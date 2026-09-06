@@ -152,6 +152,15 @@ pub fn installed_status(resources: &Path) -> Option<ReadyManifest> {
     installed_release(resources).map(|(_, ready)| ready)
 }
 
+pub(crate) fn source_asset(resources: &Path) -> Option<(String, String, String)> {
+    let ready = installed_status(resources)?;
+    Some((
+        "ReactomePathways.gmt.zip".into(),
+        ready.release,
+        ready.asset_sha256,
+    ))
+}
+
 fn installed_release(resources: &Path) -> Option<(PathBuf, ReadyManifest)> {
     fs::read_dir(resources.join("reactome"))
         .ok()?
@@ -502,6 +511,10 @@ impl Knowledge {
                         subtype_count: None,
                         gene_count: Some(pathway.genes.len()),
                         synonyms: Vec::new(),
+                        symbol: None,
+                        canonical_gene_id: None,
+                        result_gene_id: None,
+                        identity_status: None,
                     },
                 ))
             })
@@ -574,6 +587,21 @@ mod tests {
         assert_eq!(pathways.len(), 1);
         assert_eq!(pathways[0].id, "R-HSA-177929");
         assert_eq!(pathways[0].genes, ["EGFR", "GRB2"]);
+        let knowledge = Knowledge::new(pathways);
+        let result = knowledge.search("R-HSA-177929", 10);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].gene_count, Some(2));
+        assert_eq!(
+            knowledge
+                .canonical_pathways(&[super::super::phenotype::PhenotypeTerm {
+                    id: result[0].id.clone(),
+                    label: result[0].label.clone(),
+                }])
+                .unwrap()[0]
+                .genes
+                .len(),
+            result[0].gene_count.unwrap()
+        );
     }
 
     #[test]
@@ -581,6 +609,71 @@ mod tests {
         assert_eq!(
             http_date_version("Sun, 21 Jun 2026 06:23:59 GMT").as_deref(),
             Some("20260621-062359")
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_REACTOME_FIXTURE to a pinned ReactomePathways.gmt.zip snapshot"]
+    fn official_reactome_membership_matches_independent_gmt_oracle() {
+        let path = PathBuf::from(std::env::var("ANNOCAT_REACTOME_FIXTURE").unwrap());
+        let production = read_archive(&path).unwrap();
+
+        let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+        let index = (0..archive.len())
+            .find(|index| archive.by_index(*index).unwrap().name().ends_with(".gmt"))
+            .unwrap();
+        let mut source = String::new();
+        archive
+            .by_index(index)
+            .unwrap()
+            .read_to_string(&mut source)
+            .unwrap();
+        let mut expected = BTreeMap::<String, (String, BTreeSet<String>)>::new();
+        for (line_number, line) in source.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert!(fields.len() >= 3, "invalid GMT line {}", line_number + 1);
+            let label = fields[0].trim();
+            let id = fields[1].trim();
+            if label.is_empty() || !id.starts_with("R-HSA-") {
+                continue;
+            }
+            let genes = fields[2..]
+                .iter()
+                .map(|gene| gene.trim().to_ascii_uppercase())
+                .filter(|gene| !gene.is_empty())
+                .collect::<BTreeSet<_>>();
+            if genes.is_empty() {
+                continue;
+            }
+            assert!(
+                expected
+                    .insert(id.to_owned(), (label.to_owned(), genes))
+                    .is_none(),
+                "Reactome source repeats {id}"
+            );
+        }
+        let actual = production
+            .iter()
+            .map(|pathway| {
+                (
+                    pathway.id.clone(),
+                    (
+                        pathway.label.clone(),
+                        pathway.genes.iter().cloned().collect::<BTreeSet<_>>(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected);
+        assert!(actual.len() > 2_000);
+        assert!(actual.values().all(|(_, genes)| !genes.is_empty()));
+        eprintln!(
+            "validated {} Reactome pathways and {} pathway-gene memberships",
+            actual.len(),
+            actual.values().map(|(_, genes)| genes.len()).sum::<usize>()
         );
     }
 }

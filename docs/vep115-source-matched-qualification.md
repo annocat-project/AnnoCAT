@@ -1,0 +1,1334 @@
+# Source-matched Ensembl VEP 115.2 qualification
+
+Status: Qualification in progress. The latest source-matched GitHub Actions
+run, `33976948020`, completed on 2026-09-05 and failed closed; no source-matched
+qualification has been awarded. Direct-GFF/cache parity and complete
+source-matched field agreement remain unresolved. The direct-GFF/cache result
+is a diagnostic for fastVEP's standalone indexed-GFF mode, not an AnnoCAT
+release gate. Production-cache equivalence and GFF-derived field projection
+passed. That run did not exercise the actual AnnoCAT annotation path specified
+below. The next workflow revision implements that lane locally; it has not yet
+completed a GitHub Actions run.
+
+Last updated: 2026-09-05
+
+## Purpose
+
+AnnoCAT uses fastVEP with transcript models built from the public Ensembl 115
+GFF3 and the pinned GRCh38 FASTA. The archived Ensembl REST service uses a
+different, richer Ensembl VEP transcript dataset. A direct comparison between
+those two outputs can therefore mix together:
+
+- differences in consequence and HGVS algorithms;
+- differences in transcript membership;
+- metadata available only in the Ensembl VEP cache or database; and
+- actual fastVEP defects.
+
+The release test must isolate implementation correctness from source-data
+differences. It does this by running official Ensembl VEP 115.2 and candidate
+fastVEP against the same GFF3, FASTA, variants, and options. Archived REST
+comparison remains a separate compatibility lane.
+
+This qualification does not install or invoke Ensembl VEP in AnnoCAT. The
+official VEP oracle runs on a temporary GitHub-hosted Linux runner. Candidate
+fastVEP testing also includes a Windows runner that builds and tests the exact
+candidate commit. The later release-artifact gate must separately bind the
+packaged executable to that qualified commit and recorded binary identity.
+
+## Relevance and proportionality for AnnoCAT
+
+The requirements in this contract have different roles:
+
+- **Direct annotation-correctness requirements** are mandatory for a release
+  qualification. These include the source-matched VEP oracle, complete
+  supported-consequence inventory, immutable field semantics, input-record
+  projection and preservation, unresolved-difference handling, compatibility
+  with caches from supported releases, and testing of the packaged Windows executable. Each
+  can directly detect a user-visible annotation error in AnnoCAT.
+- **Release-reproducibility requirements** support the correctness claim but
+  do not independently establish biological correctness. These include action
+  and toolchain identities, corpus provenance, and durable retention of the
+  compact qualification record.
+- **Standalone fastVEP diagnostics** include direct annotation from a
+  region-indexed GFF3. AnnoCAT builds and uses a complete transcript cache, so
+  a difference confined to direct-GFF mode does not block AnnoCAT when the
+  production-cache, source-matched, supported-old-cache, and packaged-product
+  lanes pass. The difference remains visible for fastVEP maintenance.
+- **Out of scope for this contract** are independent clinical pathogenicity or
+  causal-effect claims, running VEP on an end user's computer, retaining every
+  large intermediate file indefinitely, and validating variant classes or
+  annotation sources that AnnoCAT does not support.
+
+This proportionality is intentional. AnnoCAT needs enough evidence to show
+that its shipped fastVEP executable reproduces the declared VEP 115.2 behavior;
+it does not need to become an independent replacement for biological or
+clinical truth curation.
+
+## Scope and scientific claim
+
+Passing this qualification establishes implementation concordance with the
+pinned official Ensembl VEP 115.2 executable for the declared inputs, source
+files, semantic options, output fields, and sampled records. Official VEP is
+the operational reference implementation, not an independent biological
+ground truth.
+
+The current qualification scope is:
+
+- GRCh38 using the pinned no-alt reference FASTA;
+- canonical chromosomes 1–22, X, Y, and MT;
+- VCF SNVs, MNVs, short insertions and deletions, and split or unsplit
+  multiallelic records defined by a versioned qualification input contract;
+- transcript and intergenic consequences derived from the public Ensembl 115
+  GFF3, including upstream and downstream consequences within 5,000 bases;
+  and
+- the exact output fields declared in the field contract below.
+
+The claim excludes structural variants, CNVs, breakends, alternative and patch
+contigs, RefSeq transcript models, regulatory and motif features, VEP plugins,
+pathogenicity classification, phenotype ranking, and clinical validity unless
+a later contract adds source-matched coverage for them. Supplementary-source
+annotation such as ClinVar, gnomAD, dbNSFP, CADD, REVEL, and SpliceAI is
+qualified by its own source-contract tests, not by this document.
+
+No passing result may be described as proof that an annotation is biologically
+causal, clinically pathogenic, or correct independently of VEP. A separate
+expert-curated validation set is required before making a scientific claim
+beyond VEP 115.2 concordance.
+
+The versioned qualification input contract freezes the accepted VCF version,
+canonical contigs, sequence-allele alphabet, insertion/deletion length bounds,
+multiallelic handling, and treatment of null ALT (`.`), spanning deletion
+(`*`), symbolic, structural, and breakend alleles. Changing the production
+parser does not silently expand the qualification claim; the input contract,
+corpora, and claim must be reviewed together.
+
+## Oracle hierarchy
+
+### Primary: source-matched official VEP
+
+Official Ensembl VEP 115.2 is run in GFF mode with source-equivalent annotation
+inputs. Official VEP requires a sorted, bgzipped, tabix-indexed GFF3, while
+AnnoCAT currently gives fastVEP's production cache builder the original
+downloaded Ensembl GFF3. The source-matched oracle lane therefore uses the
+prepared canonical projection below, and a separate production-equivalence
+lane proves that this preparation does not qualify a different transcript
+model from the one users receive:
+
+| Input | Required identity |
+| --- | --- |
+| Official implementation | Ensembl VEP `release/115.2` container, pinned by image digest |
+| Original transcript source | `Homo_sapiens.GRCh38.115.gff3.gz` |
+| GFF3 SHA-256 | `1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c` |
+| Oracle-prepared annotation | Canonical contigs only; VEP-parser-compatible aliases for semantically equivalent Ensembl GFF feature types; deterministically sorted, bgzipped, and tabix-indexed by the workflow |
+| Reference | `GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz` |
+| Reference archive SHA-256 | `fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02` |
+| Uncompressed FASTA SHA-256 | `9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7` |
+| Assembly | GRCh38 |
+| Distance | 5,000 bases |
+| Consequence terms | Sequence Ontology |
+| HGVS | Enabled explicitly |
+
+Chromosome synonyms are supplied explicitly for `1`/`chr1` through
+`22`/`chr22`, `X`/`chrX`, `Y`/`chrY`, and `MT`/`chrM`.
+
+The workflow must record a content hash of the prepared, uncompressed canonical
+GFF3 records as well as hashes of the compressed GFF3 and index. It also
+records the versions of the sorting, bgzip, tabix, and FASTA-indexing tools.
+The source adapter maps Ensembl `ncRNA_gene` to `gene`,
+`unconfirmed_transcript` to `transcript`, and `scRNA` to `ncRNA`. These are
+feature-type aliases only: coordinates, identifiers, parents, and attributes
+remain unchanged. Official VEP 115.2's custom-GFF parser otherwise ignores
+these Ensembl feature types or loses their parent relationship. The production-
+equivalence lane must prove that fastVEP produces identical complete semantic
+output from the prepared and original GFF3 before this adapter is accepted.
+This distinguishes semantic source identity from parser compatibility and from
+compression bytes that may vary between tool builds.
+
+The production-equivalence lane builds one transcript cache from the
+oracle-prepared GFF3 and a second cache through AnnoCAT's exact production path
+from the original downloaded GFF3. It annotates every qualification corpus with
+both and requires identical supported-contig annotation rows under the field
+contract. Cache bytes need not match when serialization metadata differs; the
+complete semantic output and transcript inventory must match. This lane is in
+addition to diagnostic direct-GFF versus cache-backed comparison within the
+oracle-prepared source. That diagnostic exercises a standalone fastVEP input
+mode that AnnoCAT does not invoke during annotation and is not an AnnoCAT
+release gate.
+
+The reference identity must also be enforced by AnnoCAT's production source
+installation, not only by the qualification runner. New downloads verify the
+pinned archive SHA-256 before preparation. An existing installation may be
+accepted without downloading or rebuilding when its prepared FASTA has the
+pinned uncompressed SHA-256; its manifest may then be upgraded in place to
+record that identity. A different hash is not treated as the qualified
+reference merely because the file decompresses and has valid FASTA structure.
+
+This is the operational release oracle for consequence, impact, coordinate
+projection, exon and intron numbering, HGVSc, HGVSp, amino acids, codons,
+distance, strand, and transcript identity within the declared corpora. It is
+not a biological or clinical truth set.
+
+### Secondary: archived Ensembl REST
+
+The archived release-115 REST service remains valuable for comparison with
+the normal Ensembl VEP dataset. It is not the primary algorithm oracle because
+its transcript records and auxiliary metadata are not identical to the public
+GFF3.
+
+The frozen and hashed request, response, and software metadata for the existing
+197-record REST contract remain a reproducible regression gate. A live request
+to the archived service is a diagnostic availability and compatibility check,
+not a release gate: network failure or a later archive-side change must not
+invalidate a source-matched qualification. Expanded boundary and ClinVar REST
+comparisons are likewise diagnostic until every difference has been classified
+using the source-matched result. A diagnostic failure must remain visible in
+the workflow summary and uploaded report; it must not be silently discarded.
+
+An expanded REST difference may become an accepted contract entry only when:
+
+1. official VEP in source-matched GFF mode agrees with fastVEP;
+2. the REST response differs because its transcript dataset or metadata
+   differs;
+3. the exact allele, feature type, and transcript identity are recorded; and
+4. no gene-wide, transcript-wide, or wildcard exception is used.
+
+If official source-matched VEP agrees with REST instead, the difference remains
+a fastVEP defect and must be corrected.
+
+### Independent: published clinical and HGVS truth
+
+Source-matched VEP establishes compatibility with VEP 115.2, not correctness
+independent of VEP. A separate externally curated lane must therefore test
+clinically relevant, transcript-specific HGVS and consequence expectations.
+This lane does not replace the complete VEP row-set comparison and its results
+must not be merged into the VEP concordance percentage.
+
+Use published variants only when the row-level input, assembly, reference
+allele, target transcript accession and version, expected result, provenance,
+and reuse terms are available. The ground-truth set published by Yen et al. is
+a candidate source because it was constructed specifically to test HGVS
+generation and includes non-SNV representations. It used GRCh37 and historical
+RefSeq and Ensembl transcript collections, however, so it must first undergo a
+row-level eligibility audit; it is not automatically truth for GRCh38,
+Ensembl 115, or a different transcript version. The 298-variant clinical set
+reported by Tuteja et al. is another candidate if its complete row-level truth
+data can be obtained and reused; its SNV-heavy composition cannot replace the
+representation and boundary corpora. Accept only rows that independently meet
+the declared GRCh38 and exact-Ensembl-transcript requirements. Do not lift over
+or reconstruct expected rows from figures, mappings, or summary counts.
+
+For each accepted published case:
+
+1. preserve the publication's original genomic and transcript accessions,
+   including versions, and its original expected HGVSc and HGVSp;
+2. identify the target transcript row after AnnoCAT has annotated all
+   overlapping transcripts; do not compare the expected value with whichever
+   transcript the result table displays by default;
+3. require the publication or accepted truth set to identify an exact
+   Ensembl transcript accession and version that exists in the pinned Ensembl
+   115 GFF3;
+4. report exact HGVS agreement and standards-compliant semantic equivalence
+   separately, with the independent validator and version recorded;
+5. classify a historical or out-of-scope transcript as unsupported instead of
+   silently substituting another transcript, changing its version, or lifting
+   the expected answer to a new assembly; and
+6. preserve any disagreement for expert adjudication. A published expectation
+   does not become an automatic exception to VEP concordance, and a VEP result
+   does not automatically override an independently supported HGVS truth.
+
+VariantValidator or Mutalyzer may validate an expected HGVS expression and may
+report mappings as diagnostic evidence. Their exact software/data versions,
+transcript sequence accessions, and outputs must be frozen. A validator-derived
+mapping cannot turn a RefSeq-only case into an accepted Ensembl-transcript truth
+case under the present scope. These tools are corroborating validators, not
+unversioned live release gates. ClinVar clinical significance may select
+clinically realistic inputs but is not an HGVS or consequence oracle. GIAB and
+CMRG provide trusted alleles and difficult-region strata, not transcript-
+consequence truth.
+
+### Transcript inventory, versions, and display selection
+
+The annotation and display contracts are deliberately separate. VEP and
+AnnoCAT annotate every overlapping in-scope transcript. `--canonical` adds a
+designation; it does not filter the output. Neither the source-matched oracle
+nor AnnoCAT's production invocation may use `--pick`, `--per_gene`,
+`--pick_allele`, `--most_severe`, or an equivalent transcript-reducing option.
+The VEP concordance gate compares the complete allele-feature-transcript
+multiset, including missing, extra, and duplicate rows.
+
+AnnoCAT subsequently chooses one representative consequence for the main
+result row while retaining the other consequences for Variant Details and the
+transcript selector. Representative selection has its own versioned product
+contract and tests. It must prove that the displayed gene, transcript,
+consequence, and transcript-scoped evidence all derive from the same stored
+consequence. It must not be described as selecting the only biologically valid
+transcript.
+
+The following immutable sources determine transcript versions:
+
+- **Ensembl transcript and protein versions:** the pinned Ensembl 115 GFF3 is
+  authoritative. A transcript accession is the GFF3 `transcript_id` (or
+  transcript `ID`) plus that feature's integer `version` attribute, for
+  example `ENST00000380903` plus `version=7` becomes
+  `ENST00000380903.7`. A protein accession is the CDS `protein_id` plus the
+  CDS `version` attribute. The benchmark manifest records both stable ID and
+  version rather than deriving a version from the current Ensembl website or
+  REST service.
+- **MANE membership:** the same pinned Ensembl 115 GFF3 is authoritative for
+  its `MANE_Select` and `MANE_Plus_Clinical` transcript tags. Qualification
+  verifies that AnnoCAT attaches each tag to the correct versioned Ensembl
+  transcript and uses it according to the representative-selection contract.
+  This is an implementation-projection check against the pinned source, not an
+  independent re-evaluation of the MANE curation.
+- **Published RefSeq truth:** retain the exact `NM_` or `NR_` accession and
+  version stated by the publication, but do not infer or silently substitute
+  an Ensembl transcript. A RefSeq-only record is unsupported unless the
+  publication or accepted truth artifact also supplies the exact versioned
+  Ensembl transcript and the expected value being tested is valid on that
+  transcript. A standalone MANE summary is therefore not a required AnnoCAT
+  runtime or release-qualification source. It may be proposed later as a
+  separately reviewed, frozen mapping source if excluding RefSeq-only cases
+  materially weakens the independent corpus.
+
+Each corpus record manifest therefore contains, as applicable, the assembly,
+genomic allele, gene stable ID, transcript stable ID, transcript version,
+full transcript accession, protein stable ID and version, GFF3-derived MANE
+status, any publication-supplied RefSeq accession, and the authority from which
+each value was obtained. Corpus construction fails on a missing Ensembl
+version, conflicting versions for one stable ID, or an assembly mismatch. A
+web lookup may help investigate a case but cannot supply an unrecorded
+benchmark value.
+
+## Frozen qualification corpora
+
+Each corpus is compared and reported separately. Identity or field counts are
+never added across corpora.
+
+| Corpus | Records | SHA-256 | Purpose |
+| --- | ---: | --- | --- |
+| Legacy | 197 | `b846a65bf671ddc7afcf9e6729d35bd85c31dc3f089cee3a7ce81926fa39b9d5` | Existing public chromosome 21, 22, X, Y, and MT regression coverage |
+| Transcript boundary | 1,262 | `ea912b66c7dfdc127c038faaffece824d78ed2873997d9cf7255290afdd58917` | Coding, noncoding, strand, exon, intron, CDS, start, stop, insertion, deletion, and MNV boundaries |
+| Reviewed ClinVar | 400 | `3de468d953892d970c132a3fcb48f2e5e7e98345dc10ceb25874f624daf6d4de` | Deterministic clinically realistic benign and pathogenic consequence classes |
+
+ClinVar significance selects realistic variants but is not used as the
+consequence oracle.
+
+Every frozen or generated corpus must have a committed machine-readable
+manifest. The manifest records the upstream URL, release date or version,
+source byte size and SHA-256, assembly, eligible-record count, inclusion and
+exclusion rules, deduplication and clustering rules, sampling algorithm and
+version, random seed when applicable, selected record or transcript IDs,
+stratum counts, generator commit, output record count, and output SHA-256.
+The generator and manifest are part of the qualification input and must be
+reviewed with the VCF. A final VCF hash alone is not sufficient provenance.
+
+## Coverage and confidence policy
+
+The qualification has two explicitly different outcomes:
+
+- **Release regression qualification** requires the three compact frozen
+  corpora, all known regression fixtures, field and input integrity, production
+  source equivalence, supported-old-cache compatibility, and the packaged
+  Windows executable to pass. Its claim is limited to the declared fields and
+  tested inputs; it is not described as broad or genome-wide concordance.
+- **Broad VEP 115.2 concordance qualification** additionally requires the
+  untouched holdout, expanded boundary coverage, metamorphic cases, and large
+  discovery cohort below. Its report states the sampled population and may use
+  only the statistical interpretation permitted below.
+- **Independent clinical/HGVS corroboration** requires the accepted published
+  truth cases and versioned independent HGVS validation described above. It
+  reports exact, equivalent, unsupported, and adjudication-required cases by
+  target transcript. It neither inherits nor changes the VEP 115.2
+  concordance verdict.
+
+The three compact frozen corpora contain 1,859 input records. They are
+sufficiently diverse for a release regression gate and for preventing
+recurrence of the known defects, but they do not establish comprehensive
+genome-wide VEP 115.2 concordance. Each corpus remains an independently
+reported test; the combined record count must not be presented as a count of
+independent biological observations or allele-transcript comparisons.
+
+Current reported coverage includes the following. Until the required
+generation manifests are committed, only the record counts and VCF hashes are
+independently reproducible; the asserted biological strata remain provisional:
+
+- legacy chromosome 21, 22, X, Y, and mitochondrial cases, including indels,
+  MNVs, multiallelic records, and selenocysteine;
+- 1,262 generated boundary variants across 28 coding and noncoding
+  transcripts, both strands, exon-count and CDS-phase groups, and autosomal,
+  sex-chromosome, and mitochondrial loci; and
+- 400 reviewed ClinVar variants, with 20 benign and 20 pathogenic examples in
+  each of 10 consequence classes: frameshift, in-frame deletion, in-frame
+  insertion, missense, splice acceptor, splice donor, start lost, stop gained,
+  stop lost, and synonymous.
+
+These ten ClinVar classes are coding-focused realism strata, not the complete
+set of consequences in AnnoCAT's declared scope. A committed
+supported-consequence manifest must enumerate every atomic Sequence Ontology
+term in the declared configuration and a finite, predeclared set of observed
+or high-risk compound-term patterns. It must not claim to enumerate every
+theoretically possible combination. The required set includes applicable splice
+region, UTR, intronic, noncoding transcript and exon, NMD transcript,
+upstream/downstream, intergenic, retained start/stop, and other supported
+terms. Each entry has one explicit status: qualified, exercised but not yet
+qualified, or excluded with a reason. An unrepresented term cannot inherit a
+qualification claim from a different consequence class.
+
+A release report may claim only entries marked qualified. An entry marked
+exercised but not yet qualified remains visibly outside that claim. Broad VEP
+115.2 concordance cannot pass while an entry declared in scope remains
+unqualified; it must either gain sufficient predeclared coverage or be moved
+outside scope with a reviewed reason.
+
+Coverage reports use two complementary units. The independently selected VCF
+record or predeclared locus cluster is the unit for sampling and statistical
+interpretation. Allele-feature-transcript rows, including compound consequence
+terms and duplicate multiplicity, are the unit for completeness reporting and
+exact output comparison. A large number of transcript rows from one variant
+must not be counted as independent observations.
+
+This design is stronger for regression detection than an equally sized
+unstratified random sample because it exercises known consequence mechanisms.
+It is still limited by the small number of boundary transcripts, only 40
+ClinVar records per consequence class, dependence among variants and
+transcripts, and selection informed partly by previously observed failures.
+It therefore cannot measure a genome-wide error rate or reliably discover all
+previously unknown divergence classes.
+
+The qualification uses three distinct corpus roles:
+
+- **Regression corpora** are the permanent small fixtures. They may be
+  inspected while correcting code and must pass after every relevant change.
+- **Qualification holdout** records are selected and frozen before candidate
+  output is inspected. They are used for the final broader-concordance claim.
+  If a candidate is changed in response to a holdout result, that holdout
+  becomes regression data and a new untouched holdout must be selected for the
+  final claim.
+- **Discovery records** broaden failure discovery. They do not become an
+  accuracy estimate merely because they are numerous.
+
+Before describing fastVEP as broadly concordant with VEP 115.2, qualification
+must add the following coverage:
+
+1. Create an untouched reviewed-ClinVar qualification holdout with
+   approximately 300 records per current coding realism stratum, or
+   approximately 3,000 records across the current 10 strata. Select VCF records without
+   replacement from a predeclared eligible source population and apply
+   predeclared caps for repeated loci, genes, and transcript clusters. Maintain
+   benign and pathogenic representation where available, but do not double the
+   cohort solely by clinical significance because significance does not alter
+   VEP consequence calculation. Assign each consequence stratum from frozen
+   source-matched official VEP 115.2 output generated before any candidate
+   output is inspected; ClinVar's molecular-consequence label is not the
+   annotation oracle.
+2. Expand boundary testing from 28 to approximately 150–200 deliberately
+   stratified transcripts. Include coding and noncoding biotypes, both
+   strands, exon-count and CDS-phase combinations, incomplete CDS annotations,
+   NMD transcripts, pseudogenes, autosomes, X, Y, PAR boundaries, and
+   mitochondrial transcripts where supported.
+3. Add focused representation cases for long indels, complex replacements,
+   MNVs, repeat-associated left/right representations, padded and minimal
+   equivalent alleles, and split and unsplit multiallelic records.
+4. Add 200–500 predeclared metamorphic pairs. Each pair's manifest identifies
+   its relation and the exact fields that must remain invariant or may differ.
+   Required relations include split versus unsplit multiallelic records,
+   minimal versus correctly padded equivalent alleles, and input-record order
+   permutations. Consequence and HGVS expectations come from official VEP;
+   do not assume that genomic coordinates, uploaded-allele fields, or
+   `HGVS_OFFSET` remain identical when VEP intentionally normalizes or shifts a
+   representation.
+5. Run a deterministic 10,000–25,000-record discovery cohort before a broad
+   VEP 115.2 concordance qualification and after a substantial
+   consequence-engine change. Construct it from predeclared quotas across
+   reviewed-ClinVar consequence and allele classes, MANE Select, MANE Plus
+   Clinical and non-MANE transcripts, both strands, transcript geometry, GIAB
+   CMRG and difficult-region categories, and supported representation edge
+   cases. A hash may choose records within a stratum; it must not replace the
+   biological strata or allow common noncoding GIAB records to dominate.
+   Refresh the sampled records when ClinVar or the supported Ensembl release
+   changes; do not rerun or refresh it on an arbitrary calendar schedule. A
+   uniformly hash-selected WGS subset is an optional load and difference-
+   discovery input only and cannot satisfy this qualification requirement.
+   During initial workflow development, execution may continue after a
+   discovery mismatch so the complete report can be collected, but that run
+   cannot qualify a release. Once reviewed, any unexplained source-matched
+   difference within the declared scope blocks qualification. A difference
+   proven to be outside scope or caused by a documented oracle-source
+   distinction is recorded explicitly rather than silently ignored.
+6. Reduce each newly discovered algorithmic difference to a small permanent
+   regression fixture. The large discovery cohort complements the frozen
+   release gate; it does not replace it.
+
+The approximately 300-record target per consequence class is a coverage
+planning target, not an accuracy guarantee. A one-sided binomial rule-of-three
+bound may be reported only for the untouched holdout when the report defines
+the target population, random sampling procedure, independent unit of
+analysis, mismatch endpoint, and treatment of locus, gene, and transcript
+clustering. Targeted regression and boundary records must never be included in
+that confidence calculation. A zero-difference result otherwise establishes
+concordance only for the declared sources, options, fields, and sampled inputs.
+
+GIAB benchmark and difficult-region records supply realistic and challenging
+variant representations. They are not an oracle for transcript consequence or
+HGVS correctness; official source-matched VEP remains the oracle for those
+outputs.
+
+Any future addition of structural variants, CNVs, breakends, alternative
+contigs, patches, RefSeq transcripts, regulatory features, or plugins requires
+its own source-matched corpus, explicit options, required fields, and claim
+amendment before it enters the qualification scope.
+
+## Field contract
+
+The checked-in source-matched contract, rather than a constant embedded only in
+the comparator, owns the complete ordered field inventory. Every production
+fastVEP CSQ field must have exactly one disposition:
+
+- **exact**: compare every value and multiplicity with source-matched official
+  VEP;
+- **input-derived**: compare with an independent deterministic extractor that
+  reads the pinned input VCF and shares no parsing implementation with fastVEP;
+- **source-derived**: official GFF-mode VEP does not expose an equivalent
+  value, so compare fastVEP's declared source-supported projection with a
+  reviewed deterministic extractor that reads the same pinned GFF3 and/or
+  FASTA and shares no parsing implementation with fastVEP; or
+- **excluded**: the field is outside this source-matched consequence contract
+  and has a specific documented reason and separate validation owner.
+
+The comparator fails if a declared exact, input-derived, or source-derived
+field disappears, if the workflow's requested field list differs from the
+contract, or if a production CSQ field has no disposition. A code change
+therefore cannot make a test pass by silently removing a required field.
+
+At minimum, exact comparison covers:
+
+- allele, consequence, and transcript identity: `Allele`, `Consequence`,
+  `IMPACT`, `Feature_type`, and `Feature`;
+- gene and transcript context: `SYMBOL`, `Gene`, and `BIOTYPE`;
+- coordinate projection: `EXON`, `INTRON`, `cDNA_position`, `CDS_position`,
+  and `Protein_position`;
+- sequence consequence: `HGVSc`, `HGVSp`, `Amino_acids`, and `Codons`;
+- proximity and orientation: `DISTANCE` and `STRAND`; and
+- transcript state: `FLAGS`, `CANONICAL`, and `TSL`.
+
+The contract must additionally govern the product-visible or allele-mapping
+fields `REF_ALLELE`, `UPLOADED_ALLELE`, `MANE`, `MANE_SELECT`,
+`MANE_PLUS_CLINICAL`, `CCDS`, `ENSP`, and `HGVS_OFFSET`. The official lane
+enables the VEP options required to emit each applicable field.
+`REF_ALLELE` after minimization, `UPLOADED_ALLELE` before minimization, and
+`HGVS_OFFSET` from VEP's HGVS shifting are exact comparisons when AnnoCAT emits
+them; the input-derived disposition may additionally verify their relationship
+to the submitted VCF. The comparator treats only VEP's empty insertion
+`REF_ALLELE` and fastVEP's `-`, and VEP's `/` versus fastVEP's escaped `&`
+additional `UPLOADED_ALLELE` delimiter, as equivalent representations. It
+still compares every allele character and order. `ENSP` is exact. `CCDS` is source-derived because VEP
+115.2's GFF parser does not project the GFF3 `ccdsid` attribute into its
+internal CCDS field; an independent validator therefore compares every
+fastVEP transcript CCDS value directly with the pinned GFF3.
+
+For MANE, compare exactly the `MANE` set designation that official GFF-mode VEP
+can derive from the shared GFF3. The public GFF3 identifies `MANE_Select` and
+`MANE_Plus_Clinical` membership but does not contain the paired RefSeq
+accession. The source-derived check therefore requires the corresponding
+`MANE_SELECT` or `MANE_PLUS_CLINICAL` marker to be present only for tagged
+transcripts, but does not qualify its string value as a RefSeq accession.
+fastVEP's current GFF-built caches retain a versioned Ensembl transcript ID in
+that value for backward compatibility with AnnoCAT's transcript preference and
+viewer contract. AnnoCAT must not describe that value as the paired RefSeq
+transcript. Qualifying or displaying a paired accession requires a separately
+pinned MANE mapping source and validation owner; paired RefSeq accessions are
+outside the current qualification scope. Fields must not be dropped merely to
+obtain concordance. If AnnoCAT does not emit `ALLELE_NUM`, the
+comparator must still map each CSQ row unambiguously to one input ALT index and
+fail an ambiguous multiallelic mapping.
+
+The following fields are source-derived only for the stated source reasons:
+
+- `SYMBOL_SOURCE`, because the public GFF3 supplies the symbol without the VEP
+  cache provenance;
+- `HGNC_ID`, because the GFF3 does not contain the VEP cache cross-reference;
+- `MANE_SELECT` and `MANE_PLUS_CLINICAL`, because the public GFF3 supports
+  membership validation but not validation of the paired RefSeq accession;
+- `APPRIS`, because fastVEP's GFF loader does not retain that cache metadata;
+  and
+- `CCDS`, because the public GFF3 contains `ccdsid` but official VEP 115.2 GFF
+  mode does not project it.
+
+`SOURCE` is source-derived. Official VEP emits the mounted GFF filename as this
+value, while fastVEP emits its explicit logical source label. The workflow
+therefore verifies the immutable GFF SHA-256 and source projection instead of
+equating two invocation-specific labels.
+
+`HGVSp` remains exact for the protein stable identifier and `p.` payload. The
+comparator ignores only the protein accession version because official VEP
+115.2's custom-GFF parser assigns translation version 1, whereas the shared
+Ensembl GFF3 provides the actual version retained by fastVEP. A stable-ID or
+protein-HGVS payload difference remains a qualification failure.
+
+`FLAGS` is not excluded from the source-matched lane. If the shared GFF3
+provides `cds_start_NF` or `cds_end_NF`, both implementations must interpret
+and emit it consistently. The initial release gate requires focused real or
+synthetic fixtures for both flags and both transcript strands, including the
+expected suppression of invalid start- or stop-boundary consequences.
+
+The GFF-to-REST lane may exclude `FLAGS` because the public GFF3 lacks some of
+the completeness metadata returned by the normal VEP dataset. AnnoCAT must not
+infer these flags from sequence length or transcript geometry.
+
+The semantic-options manifest explicitly records all output-affecting options
+and defaults. This includes Sequence Ontology terms, 5,000-base upstream and
+downstream distance, HGVS generation, VEP's HGVS 3-prime shifting behavior,
+allele minimization, transcript selection, canonical designation, transcript
+numbers, protein identifiers, biotype, TSL, and chromosome synonyms. Official
+VEP and fastVEP commands may use different syntax only when the manifest shows
+that the semantics and resulting fields are equivalent.
+
+## Reference and VCF integrity
+
+Every positive-corpus record must be checked against the pinned GRCh38 FASTA
+before annotation. The official lane enables VEP reference checking or
+performs an equivalent fail-closed preflight. Any unexpected reference
+mismatch, skipped record, unknown contig, or ambiguous ALT association in a
+positive corpus fails qualification and appears in the complete report.
+
+Before annotation, the qualification applies the versioned input contract to
+create the same in-scope VCF projection used by AnnoCAT. It records the count
+and ordered identity digest of retained records and alleles and, separately,
+the count, reason, and identity digest for every skipped record or allele.
+
+A separate record-preservation check removes only declared tool-added headers
+and annotation fields, then requires the projected input and candidate output
+to retain the same record count and the same `CHROM`, `POS`, `ID`, `REF`,
+`ALT`, `QUAL`, `FILTER`, original `INFO`, `FORMAT`, sample names, genotypes,
+and sample values. VCF fields are compared structurally according to their
+declared semantics rather than by incidental header or key ordering. Any value
+mutation remains a failure. Annotation concordance does not excuse alteration
+or loss of an in-scope source record.
+
+Focused negative fixtures verify fail-closed or explicitly documented behavior
+for a reference mismatch, an unrecognized contig, a non-variant allele, and
+each unsupported variant class. For the currently intentional removal of
+non-variant records, the expected skipped count, reason, and identity digest
+must agree with the projection record. Distance fixtures cover 4,999, 5,000,
+and 5,001 bases on both transcript strands so the declared 5 kb boundary is
+tested rather than merely configured.
+
+## Supplementary annotation parity at practical scale
+
+Supplementary providers such as dbNSFP, gnomAD, CADD, and SpliceAI can be tens
+or hundreds of gigabytes. They are not downloaded or rebuilt by this VEP
+qualification. Supplementary parity is a separate overall AnnoCAT release
+prerequisite owned by
+[Source validation in GitHub Actions](github-actions-source-validation.md).
+That plan defines the synthetic contract matrix, pinned real-source subsets,
+complete-cache integrity checks, AnnoCAT result projection, and the limits of
+the resulting claim. Its status is reported alongside, but not merged into,
+the VEP concordance verdict.
+
+A supplementary-source failure may block the overall AnnoCAT release, but it
+must not be described as a VEP consequence-concordance failure. This document
+does not duplicate or override the source-validation plan.
+
+## Actual AnnoCAT annotation-path qualification
+
+Direct fastVEP comparison is necessary but does not by itself qualify the
+AnnoCAT product path. AnnoCAT validates and projects the input VCF, streams it
+to fastVEP, validates the annotated VCF, converts the VCF and structured
+transcript output into canonical Parquet tables, selects representative rows,
+and publishes a result manifest. A defect in any of those steps can change the
+table or Variant Details even when a direct fastVEP invocation agrees with
+VEP.
+
+The release-regression workflow must therefore run the exact Windows
+`annocat.exe` intended for the release, in the intended bundle layout with the
+qualified `tools/fastvep/fastvep.exe`. It uses a temporary AnnoCAT home with
+the verified production GRCh38 reference and Ensembl 115 transcript cache and
+runs each compact corpus separately through the public noninteractive command:
+
+```text
+annocat.exe --home <temporary-home> annotate --input <corpus.vcf> --core-only --include-annotated-vcf --confirm-grch38 --json
+```
+
+`--core-only` isolates VEP-derived transcript consequences. It does not select
+supplementary providers, whose qualification remains owned by the separate
+source-validation plan. `--include-annotated-vcf` retains the VCF that AnnoCAT
+already creates during annotation; it does not select a different consequence
+algorithm. `--confirm-grch38` is used only for a frozen corpus whose header
+does not independently identify GRCh38 and never performs assembly conversion.
+
+The installed transcript-cache manifest must identify the exact packaged
+fastVEP commit and executable SHA-256. Qualification must use the manifest
+emitted by AnnoCAT's installer; the workflow must not rewrite product metadata
+to make this provenance check pass.
+
+For each corpus the lane must:
+
+1. require AnnoCAT to accept the input and complete without recovery or manual
+   interaction;
+2. compare the retained `annotated.vcf` directly with source-matched official
+   VEP 115.2 under the same immutable field and identity contract used for the
+   fastVEP comparison;
+3. run `annocat.exe --home <temporary-home> results validate <result-id>
+   --json` and require all manifest hashes, schemas, table relationships, and
+   declared row counts to pass;
+4. compare every transcript row that the versioned result schema projects into
+   `consequences.parquet` with the accepted VEP allele/feature/transcript row by
+   normalized variant, alternate allele, feature type, and feature ID,
+   preserving duplicate multiplicity, and verify the declared projection of
+   VCF-only intergenic rows separately;
+5. require the AnnoCAT consequence field values to equal the corresponding
+   accepted VEP values after only the reviewed representation rules in this
+   contract;
+6. require every representative variant-table row to derive from an accepted
+   CSQ row under AnnoCAT's versioned representative-selection contract and,
+   when transcript-backed, to reference the corresponding stored consequence
+   row; and
+7. require the input record count, retained annotated-VCF record count,
+   structured record count, allele count, CSQ-entry count, consequence count,
+   and declared exclusions to reconcile without an unexplained loss, addition,
+   or cross-allele association.
+
+The Parquet verifier must be a read-only qualification helper. It may use
+DuckDB to query the result files, but it must not add a product export feature
+or regenerate expected values with AnnoCAT's conversion implementation. Its
+VEP expectations come from the same frozen oracle output used by the VCF
+comparator. `annocat results validate` remains an integrity check and cannot
+replace the field-level VEP comparison.
+
+The structured consequence schema retains `Amino_acids` as a
+reference/alternate pair. For a synonymous consequence, a structured value
+such as `L/L` is equivalent to VEP's collapsed VCF value `L`; the Parquet
+comparison may normalize only an identical pair in that field. It must not
+collapse a changed pair such as `L/P`. `REF_ALLELE`, `UPLOADED_ALLELE`, and the
+VCF `MANE` membership label remain VCF-only values and are qualified by the
+retained-VCF comparison. The Parquet lane instead verifies the stored MANE
+transcript fields.
+
+The three compact corpora contain diverse WGS-style records and exercise the
+actual WGS code path, but they are not a full-WGS scale test and must not be
+reported as genome-wide concordance. Scale is checked separately with an
+approved public GIAB whole-genome input. That manual lane runs the complete
+input through AnnoCAT without retaining the very large annotated VCF, validates
+the completed result, and compares a predeclared deterministic sample from
+`consequences.parquet` with frozen VEP 115.2 output for the same input records.
+The sampling manifest is fixed before candidate output is inspected and
+stratifies by chromosome, allele representation, consequence class,
+transcript biotype, strand, and difficult-region category. If the selected
+GIAB file omits Y or MT, the existing frozen Y and MT fixtures remain separate
+required coverage rather than being implied by that WGS run.
+
+The full-WGS lane runs for a release candidate after a material annotation or
+result-projection change and in the quarterly compatibility sweep. It measures
+whole-run integrity, resource behavior, and sampled concordance; it does not
+turn the sample into a genome-wide error-rate estimate or make untested rows
+VEP-qualified.
+
+## Required workflow lanes
+
+The manual workflow accepts an optional fastVEP commit, tag, or branch. A blank
+value resolves to `config/fastvep-pin.json`. The requested ref and resolved
+commit are both recorded. A release qualification is valid only when the
+resolved commit is the immutable commit later written to the AnnoCAT pin;
+passing a mutable branch name alone is not an artifact identity.
+
+The common lanes required for the release regression qualification are:
+
+1. build the exact candidate fastVEP revision with its lockfile;
+2. verify every downloaded source, corpus, generator, manifest, and contract
+   hash;
+3. validate every in-scope input REF allele against the pinned FASTA, verify
+   retained and skipped projection identities, and run the VCF
+   record-preservation gate;
+4. run official VEP 115.2 with the pinned image digest and semantic-options
+   manifest;
+5. record byte-level and semantic fastVEP direct-GFF versus newly built
+   transcript-cache differences for all three corpora as a non-gating
+   standalone-fastVEP diagnostic;
+6. build a cache through AnnoCAT's exact production path from the original GFF3
+   and require semantic parity with the oracle-prepared cache for all corpora;
+7. reproduce each supported previous-release cache with the exact released
+   builder and pinned production inputs declared by the immutable cache-
+   compatibility manifest, then run the candidate against that unchanged
+   cache and require the same exact field contract;
+8. require exact source-matched official-VEP agreement under the immutable
+   field contract for all three corpora;
+9. build or obtain the exact Windows fastVEP executable intended for the
+   release ZIP, run it against the frozen official-VEP outputs, and require the
+   same result as the Linux candidate;
+10. build or obtain the exact Windows AnnoCAT executable intended for the
+    release ZIP, run every compact corpus through the actual AnnoCAT annotation
+    path above, validate each published result, and require annotated-VCF and
+    canonical consequence-table agreement with the accepted VEP output;
+11. require every comparator self-test, including missing field, changed field,
+    missing row, extra row, duplicate multiplicity, ambiguous multiallelic
+    mapping, reference mismatch, and input-record mutation; and
+12. require the frozen archived-REST contract for the legacy corpus, and run a
+    live archive refresh only as a diagnostic.
+
+Broad VEP 115.2 concordance qualification additionally requires:
+
+13. verify the manifests and hashes for the untouched ClinVar holdout,
+    expanded transcript-boundary corpus, and metamorphic corpus;
+14. run the applicable common source-matched, production-equivalence,
+    supported-cache, field, input-integrity, and packaged-Windows lanes on those
+    expanded corpora; and
+15. run the discovery cohort and prevent broad qualification after any
+    source-matched discrepancy until it has been reviewed and either resolved
+    or demonstrated to be outside the declared scope.
+
+Independent clinical/HGVS corroboration additionally requires:
+
+16. verify the provenance and reuse status of every published row, pin the
+    original expected values, and require its exact versioned Ensembl target
+    transcript to occur in the pinned Ensembl 115 GFF3;
+17. run each supported case through the exact packaged AnnoCAT path without a
+    transcript-reducing option, locate the target stable ID among the complete
+    stored consequence rows, bind it to the exact version from the pinned
+    inventory, and verify that version in the transcript HGVS; and
+18. compare the target row with the published expectation and frozen
+    independent validator, reporting exact, valid-equivalent, unsupported, and
+    adjudication-required results separately.
+
+A release regression qualification does not inherit the broad-concordance
+claim. Conversely, a broad qualification cannot omit any of its additional
+lanes merely because all compact regression corpora pass.
+
+Independent clinical/HGVS corroboration is also a separate outcome. It may
+fail or remain incomplete without changing whether the implementation matches
+VEP 115.2, and a VEP concordance pass may not be presented as independent
+clinical/HGVS corroboration.
+
+The overall AnnoCAT release also requires the separately reported
+supplementary-source prerequisite described above. A failure there can block
+the product release, but it is not reported as a VEP consequence-concordance
+failure.
+
+The checked-in cache-compatibility manifest is the only authority for the term
+"supported previous cache." Each entry records the AnnoCAT release, immutable
+release-bundle URL and SHA-256, path and SHA-256 of the fastVEP executable in
+that bundle, fastVEP commit, transcript-source and reference identities, exact
+production cache-build command, cache schema version, expected cache byte size
+and SHA-256, and support status. A cache is enrolled only after two independent
+builds with those identities produce the expected byte hash. Removing support
+requires an explicit, user-reviewed migration or support-policy decision; it
+cannot be accomplished by deleting a failing test entry.
+
+### Previous-release cache construction in GitHub Actions
+
+AnnoCAT does not need to collect a cache from an end user or permanently store
+a complete transcript-cache artifact. For each supported release, the manual
+release-qualification workflow runs a Windows compatibility job that:
+
+1. downloads the immutable released AnnoCAT ZIP and verifies its manifest
+   SHA-256;
+2. extracts and verifies the released `tools/fastvep/fastvep.exe`;
+3. downloads or restores the exact pinned Ensembl GFF3 and GRCh38 reference,
+   verifies their source and prepared-content identities, and prepares them by
+   the released production procedure;
+4. invokes the released executable with AnnoCAT's exact production cache-build
+   arguments to create the previous-release baseline cache;
+5. requires the baseline cache size, SHA-256, schema, and structural
+   verification report to match its compatibility-manifest entry;
+6. records the baseline hash, gives the cache to the candidate as read-only
+   input, and runs candidate `cache-verify` and annotation over every required
+   frozen corpus;
+7. requires candidate output from the previous-release cache to equal candidate
+   output from the newly built production cache under the complete field
+   contract, and requires both to agree with source-matched official VEP; and
+8. hashes the baseline again and fails if the candidate changed it.
+
+Creating the baseline with the released executable is not a candidate cache
+rebuild or migration. It deterministically reproduces the cache that the
+supported release installed. After that construction step, the candidate may
+only read the baseline. It must not rebuild, convert, repair, replace, or
+modify it. Output produced by the old executable is retained as diagnostic
+evidence, not used as the correctness oracle, because an intentional candidate
+fix may differ from the old implementation.
+
+The official VEP lane may run on Linux and transfer only its compact VCF output
+and manifests to the Windows compatibility job. The complete GFF3, FASTA, and
+previous-release cache remain temporary runner files. GitHub's download cache
+may accelerate immutable source downloads, but it is not the source of truth
+for compatibility and is never accepted without the pinned content checks.
+
+Ordinary pull requests may use a compact cache fixture built by the released
+executable to detect schema and reader regressions quickly. The full Ensembl
+115 cache construction is mandatory in the manually triggered release-
+qualification workflow; the compact fixture cannot replace it.
+
+If a supported installed cache cannot produce the required results with the
+candidate, the change is cache-incompatible. Qualification fails until the
+implementation is made backward-compatible or AnnoCAT adopts the explicit
+migration policy. The candidate must not silently rebuild the old cache and
+call that compatibility.
+
+### Readthrough-transcript policy without cache migration
+
+Official indexed Ensembl VEP caches remove transcripts carrying Ensembl's
+`readthrough_tra` attribute. AnnoCAT instead builds its transcript cache from
+the public Ensembl 115 GFF3, which does not retain the attribute needed to make
+that decision. GENCODE release 49 corresponds to Ensembl 115 on GRCh38.p14 and
+does retain `tag "readthrough_transcript"`. The release-matched comprehensive
+chromosome annotation is
+[`gencode.v49.annotation.gtf.gz`](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.annotation.gtf.gz).
+Its compressed length is 93,374,019 bytes and its published MD5 is
+`0ef4a024ea2d35b1b88c12447b0b70b9`; its independently computed SHA-256 is
+`d6e6fe0515c95b2a8cd36a853c1989cee9115c736c60237c56ae92b9daaaf7c4`.
+Inspection found 2,115 versioned Ensembl transcript IDs carrying that tag and
+2,115 stable IDs after removing only a terminal `.` followed by decimal digits,
+with no normalization collision. The sorted stable-ID list uses UTF-8, one ID
+per line, and a final line feed; it is 33,840 bytes with SHA-256
+`78a58d8855af0a1ac2807b9ed45fedb061f936a37916faf054cacebe46ed63ef`.
+Every one of the 52 distinct candidate-only transcript IDs observed across the
+legacy, boundary, and reviewed-ClinVar differentials belongs to that set.
+
+This policy excludes only exact `transcript_id` values on GTF `transcript`
+features tagged `readthrough_transcript`. It strips an optional transcript
+version before comparison because the fastVEP cache stores stable IDs. It does
+not exclude `readthrough_gene`, `overlapping_locus`, or
+`stop_codon_readthrough`; those labels describe different biological or
+annotation properties.
+
+Readthrough transcripts are genuine curated transcript models, not presumed
+annotation errors. GENCODE defines them as transcripts that overlap multiple
+independent loci and includes them in its comprehensive annotation. This
+exclusion is scientifically appropriate for the narrower declared purpose of
+matching Ensembl VEP 115's indexed-cache transcript set. It must not be
+described as evidence that readthrough transcription is absent or biologically
+irrelevant.
+
+Matching the official indexed-cache output therefore requires a declared
+transcript-selection policy, not a consequence-algorithm exception. Physical
+cache migration is unnecessary: fastVEP already loads an explicit transcript
+cache into transcript objects before it constructs the indexed provider. The
+small exclusion set can be applied once at that boundary, before overlap lookup
+or consequence generation, without changing the cache on disk.
+
+This runtime boundary is an intentional compatibility policy, not a temporary
+fallback. Filtering during cache construction would save only the storage and
+startup work for 2,115 transcript objects while changing cache hashes and
+forcing existing installations to migrate. No release may patch an installed
+binary cache in place. A future, deliberately versioned cache format may omit
+these transcripts during construction, but it must retain this runtime policy
+for every older cache version that remains supported.
+
+The implementation contract is:
+
+1. Keep the `FSTVEP02` reader and existing manifest schema readable. A cache
+   produced by a supported release remains valid for annotation and is never
+   rewritten, converted, or marked stale by this correction.
+2. Derive a sorted unique exclusion list during release preparation, not on the
+   user's computer. The derivation accepts only the pinned GENCODE 49 file and
+   records its URL, byte length, MD5, SHA-256, tag, feature type, stable-ID
+   normalization rule, output count, and output SHA-256.
+3. Ship the small reviewed list with the qualified fastVEP/AnnoCAT release.
+   AnnoCAT users do not download or retain the 89.05 MiB GENCODE GTF merely to
+   obtain 2,115 identifiers.
+4. Pass the exact list to fastVEP for annotation only when the selected AnnoCAT
+   transcript resource identifies Ensembl 115 on GRCh38. The generic fastVEP
+   default remains unchanged for other inputs. fastVEP validates and loads the
+   list into a set, removes matching parsed transcript objects once before
+   building the transcript provider, and performs no output-row post-processing.
+   A missing, malformed, or wrong-hash list fails before annotation rather than
+   silently reverting to the unfiltered behavior.
+5. Record the exclusion-list identity and policy version in each new result's
+   provenance. The installed transcript-cache manifest and cache SHA-256 remain
+   unchanged because the cache itself is unchanged.
+6. Do not add an **Update transcript cache** prompt, automatic rebuild, modal,
+   or new Data Sources setting for this correction. Fresh and existing
+   installations use the same policy with the same Ensembl 115 cache format.
+7. Existing results are never rewritten. Reannotation with the corrected
+   release may contain fewer transcript consequences. The allele row remains,
+   but its representative transcript, displayed gene, consequence, or available
+   Variant Details transcript options can change when a removed readthrough
+   transcript previously supplied that value. This is the intended alignment
+   with official cached VEP, not a UI or schema migration.
+
+Gene lists, saved filters, supplementary caches, result schemas, and viewer
+code are not changed by this policy. A gene-filter result can nevertheless
+change after reannotation if its only match was an excluded readthrough
+transcript. The user sees no new control; provenance distinguishes results made
+before and after the correction.
+
+Qualification of this policy requires all of the following:
+
+- the candidate binary structurally verifies and annotates from the supported
+  release cache without changing its bytes;
+- the deterministic derivation binds to the exact GENCODE 49 source and emits
+  exactly the declared 2,115 unique stable transcript IDs;
+- applying the policy to an existing supported cache removes only transcript
+  objects in the declared set, leaves the cache file byte-identical, and adds no
+  per-variant or per-query disk writes;
+- filtering is one linear pass with constant-time set membership before provider
+  indexing; an alternating enabled/disabled release-build benchmark uses the
+  same warm cache for at least 20 paired runs and reports list validation, cache
+  loading, filtering, provider construction, end-to-end startup, throughput,
+  and memory separately; it extends to 30 pairs or moves to a quiet dedicated
+  runner when the first 20 are inconclusive;
+- the paired benchmark reports a 95% confidence interval whose upper bound must
+  remain below a 5% end-to-end regression; the filter also adds no more than 5%
+  to median transcript initialization or 500 ms absolute, whichever is
+  stricter, does not reduce median large-corpus throughput by more than 5%, and
+  does not increase steady-state memory by more than 2 MiB;
+- the same cache annotated with and without the policy differs only by removal
+  of consequence rows whose exact transcript ID is in the declared set and,
+  when those were the allele's only transcript consequences, one standard
+  `intergenic_variant` fallback that keeps the allele represented; all shared
+  rows and all non-CSQ fields are byte-for-byte identical before result
+  projection. Here `intergenic_variant` is relative to the retained VEP
+  transcript set and must not be interpreted as proof that no readthrough RNA
+  or other unselected feature exists at the locus;
+- the legacy, boundary, and reviewed-ClinVar corpora have no missing or extra
+  in-scope transcript identities relative to official cached VEP 115.2 and no
+  new shared-field difference;
+- the packaged AnnoCAT path produces the same VCF and Parquet schemas and keeps
+  every representative row traceable to a retained consequence row;
+- the packaged result opens normally, transcript selection contains only
+  retained consequences, and gene filtering cannot match an excluded
+  consequence; and
+- missing-list, bad-hash, malformed-line, duplicate-ID, versioned-ID, and
+  cancellation tests fail safely without modifying the installed cache.
+
+Source-matched custom-GFF and official-cache qualification remain separate.
+The former verifies consequence algorithms over the same input annotation; it
+cannot establish official-cache transcript membership when the public GFF3
+omits an attribute used by the official cache builder.
+
+The expanded REST differential is recorded but does not become a release gate
+until its source differences have exact reviewed contracts.
+
+The job uploads:
+
+- official VEP and fastVEP versions and immutable identities;
+- requested and resolved fastVEP refs;
+- Linux and Windows candidate executable SHA-256 values and build provenance;
+- all input, source, cache, output, and contract hashes;
+- corpus selection and semantic-options manifests;
+- source-matched comparison reports;
+- actual-AnnoCAT annotated-VCF, consequence-table, manifest, and result-
+  validation reports for the compact corpora;
+- REST request, response, software-version, and comparison reports; and
+- official VEP, direct fastVEP, new-cache, previous-release-cache, and packaged
+  Windows fastVEP VCF outputs.
+
+The qualification records the resolved Rust toolchain, operating-system image,
+compiler and linker identity, container digest, and versions of source-
+preparation utilities. Third-party GitHub Actions used by the release gate are
+pinned to immutable commits where available, and their resolved identities are
+recorded. This is release-process hardening: it protects reproducibility and
+supply-chain integrity but is not presented as independent biological
+validation.
+
+The large FASTA, GFF3, newly built fastVEP transcript cache, and baseline cache
+reproduced by a previous release are temporary runner data and are not uploaded
+as release artifacts. The report still records their identities and the
+identity of each compatibility cache used.
+
+Ordinary workflow artifacts may expire. Each qualified release therefore keeps
+a durable compact evidence record as a GitHub release asset or committed
+release record. It contains the final machine-readable report, manifests,
+hashes, resolved commits and tool identities, cache identities, packaged
+Windows executable checksum, and workflow run URL. Large reproducible
+intermediate VCFs and source files do not need permanent retention when their
+pinned inputs, generation procedure, and hashes are preserved.
+
+## Pass and failure interpretation
+
+A source-matched lane passes only with:
+
+- no reference-invalid, unexpectedly skipped, missing, extra, or mutated
+  in-scope projected records;
+- no missing or extra allele/feature/transcript identities;
+- no differing required field values;
+- no missing required output field;
+- no unclassified production field; and
+- no unexplained duplicate-row or row-multiplicity difference.
+
+The comparator records deterministic, machine-readable lists of every missing,
+extra, and differing annotation row, including the complete field values and
+multiplicity for duplicate identities. It also records every missing, extra,
+or changed input record. A short summary may show ten examples, but the
+uploaded report cannot truncate the authoritative difference list. Field-level
+analysis must handle multirow identities instead of skipping them.
+
+The comparator's own version or commit and SHA-256 are part of the report. Its
+self-tests deliberately introduce every failure category listed in the
+workflow contract and must demonstrate that each causes a nonzero result.
+
+If source-matched VEP and fastVEP disagree, reduce the difference to a minimal
+fixture, correct the shared root cause, rerun every previously passing fixture,
+and rerun all three frozen corpora. Do not accept an aggregate percentage.
+
+If source-matched VEP and fastVEP agree but REST differs, retain the fastVEP
+result and classify the REST difference as a source-data difference. It may be
+contracted only by exact identity after review.
+
+## Release artifact binding
+
+The qualification record binds together:
+
+- the immutable fastVEP source commit and lockfile hash;
+- the official VEP image digest;
+- the source, corpus, contract, and semantic-options hashes;
+- the Linux candidate executable hash;
+- the packaged Windows executable hash;
+- the packaged Windows AnnoCAT executable hash and exact end-to-end command;
+- each current and previous-release transcript-cache identity;
+- each actual-AnnoCAT result manifest and VEP comparison-report hash;
+- the GitHub workflow run URL and final status; and
+- the durable compact evidence-record location and checksum.
+
+The AnnoCAT release pin must equal the qualified fastVEP commit. The release
+ZIP must contain the qualified Windows executable hash. A rebuild with a
+different hash requires either a reproducible-build identity showing it is the
+same artifact or a rerun of the packaged-binary qualification lane.
+
+## Compatibility and user impact
+
+- The workflow does not change AnnoCAT annotation commands.
+- The workflow does not add VEP to the AnnoCAT release ZIP.
+- The workflow does not change the fastVEP transcript-cache schema.
+- Existing installed transcript caches are considered readable and usable only
+  after the previous-release-cache lane reproduces the baseline with the exact
+  old release and proves that the candidate reads it without modifying or
+  rebuilding it.
+- End users do not download or run official VEP.
+- The official VEP container and large reference inputs exist only on the
+  temporary GitHub runner and its validation-download cache.
+- The end-to-end qualification invokes existing AnnoCAT commands and does not
+  add a product mode, data format, or user-facing option.
+
+## Implementation order
+
+1. Review and approve this qualification contract.
+2. Commit the corpus generators and manifests, supported-consequence and input
+   contracts, cache-compatibility manifest, immutable field and semantic-
+   options contracts, production-GFF equivalence and reference checksum checks,
+   full-diff comparator, and comparator self-tests. Separately add an accepted
+   published-truth manifest containing exact Ensembl transcript versions before
+   implementing the independent clinical/HGVS lane.
+3. Finish and locally validate the GitHub Actions workflow syntax and helper
+   script tests.
+4. Commit the fastVEP corrections on `codex/vep115-concordance` and push that
+   candidate branch without changing AnnoCAT's pin.
+5. Run the manual workflow with the candidate commit as `fastvep_ref` and
+   inspect every complete source-matched, compatibility, and REST report.
+6. Fix any source-matched defects and add exact REST contracts only for proven
+   source differences. Any inspected qualification holdout then becomes
+   regression data; generate a new untouched holdout before a broader
+   concordance claim.
+7. Rerun until every AnnoCAT-relevant engine and cache release-gating lane,
+   including the source-matched production cache, supported-old-cache, and
+   packaged-Windows-fastVEP lanes, passes. A residual difference confined to
+   standalone direct-GFF mode remains a recorded diagnostic.
+8. Update AnnoCAT's fastVEP pin to the exact qualified commit and build the
+   candidate release ZIP with the recorded executable hashes.
+9. Run the actual-AnnoCAT compact-corpus and consequence-table gate against
+   that exact ZIP. Do not publish it unless this packaged end-to-end gate also
+   passes.
+10. Retain the workflow run URL and complete artifact-binding record with the
+   release evidence.
+11. Align the fastVEP fixture README and all dependent validation documents so
+    they identify source-matched official VEP as the primary implementation
+    oracle and archived REST as the compatibility oracle.
+
+## First source-matched execution
+
+[GitHub Actions run 33942720015](https://github.com/annocat-project/AnnoCAT/actions/runs/33942720015)
+executed official Ensembl VEP 115.2 against fastVEP `0863825` and the pinned
+GFF3, FASTA, options, and three corpora. The run failed release qualification,
+as the workflow was configured at that time, because direct-GFF/cache parity
+and source-matched comparison did not pass. The Windows lane was consequently
+skipped. The policy above now classifies only the direct-GFF/cache component as
+diagnostic; source-matched cache output remains a release gate.
+
+The run established all of the following:
+
+- input validation, immutable downloads, official VEP execution, supplementary
+  synthetic cache parity, GFF field projection, and production-source
+  equivalence completed successfully;
+- the full-cache and production-cache annotation paths were semantically
+  identical, but the regional indexed-GFF path assembled some transcripts from
+  only the tabix chunk near the queried variant. For example, CTNND2
+  `ENST00000356264` was reported as exon `7/10` by the incomplete direct path,
+  while the full cache and official VEP correctly reported `7/22`;
+- official VEP's custom-GFF parser omitted many valid noncoding transcripts
+  because its recognized feature list does not include several feature types
+  used by the Ensembl 115 GFF3. Those annotations are retained in AnnoCAT; the
+  oracle input now uses the narrowly defined feature-type aliases above; and
+- `SOURCE`, synthetic GFF protein versions, empty insertion reference alleles,
+  and multiallelic delimiter escaping were representation differences rather
+  than biological annotation differences. The field contract now handles only
+  those exact cases and keeps all semantic values fail-closed.
+
+The next candidate makes indexed parsing a two-stage operation: discover the
+overlapping transcript IDs, fetch each complete transcript span, assemble the
+complete records, and retain only the originally selected transcripts. This
+does not change the transcript-cache schema or the VCF output schema. A new
+official run is required to verify the correction and enumerate the remaining
+algorithmic differences; this document does not predict that result.
+
+AnnoCAT does not invoke that regional direct-GFF annotation path. The run's
+direct/cache counts therefore describe a standalone fastVEP defect rather than
+missing or extra rows in AnnoCAT's cache-backed results. The workflow retains
+the comparison as a diagnostic but no longer uses it to decide AnnoCAT release
+qualification.
+
+## Current implementation status
+
+As of 2026-09-05:
+
+- the local fastVEP branch is named `codex/vep115-concordance`;
+- the latest tested fastVEP candidate is
+  `2e1def60016566bb95397923eea5cdca77250798`, and the AnnoCAT branch pins that
+  exact candidate. This records the candidate identity but does not by itself
+  qualify it for release;
+- the expanded Annotation concordance workflow, three compact frozen VCF
+  inputs, their generators and manifests, and the verification helpers are
+  implemented locally;
+- the readthrough compatibility filter is implemented locally after cache
+  loading and before provider indexing. A deterministic GENCODE 49 derivation
+  emits 2,115 stable transcript IDs, and the candidate leaves the existing
+  216,587,918-byte transcript cache byte-identical;
+- a 20-pair alternating release-build startup benchmark over the warm full
+  cache measured a mean paired delta of 1.15%, with a 95% confidence interval
+  from -0.63% to 2.93%; its 45.24 ms median filter time and 2.93% upper bound
+  pass the declared 500 ms and 5% limits;
+- ten alternating paired runs over 100,000 HG002 variants per mode processed
+  two million annotations. Median throughput was 12,246 variants/s without the
+  policy and 12,266 variants/s with it; the mean paired runtime delta was
+  0.99%, with a 95% confidence interval from -1.97% to 3.96%. The upper bound
+  passes the declared 5% throughput limit and shows no material regression on
+  this local workload; the point estimate is not a speedup claim;
+- the corresponding 100,000-record metamorphic comparison removed 7,100 CSQ
+  entries from 3,156 records, covering 54 declared transcript IDs. All retained
+  CSQ entries and non-CSQ fields were byte-identical; 18 alleles whose only
+  transcript consequence was excluded received the standard intergenic
+  fallback. This is implementation evidence, not yet official-oracle release
+  qualification;
+- the versioned qualification-input and 41-term supported-consequence
+  contracts exist and pass their local integrity checks;
+- the historical 197-record corpus, generated 1,262-record transcript-boundary
+  corpus, and independently selected 400-record ClinVar corpus are wired into
+  the workflow; the metamorphic and discovery cohorts remain requirements that
+  have not yet been implemented;
+- the field contract owns all 49 production CSQ fields. Applicable fields are
+  exact or input-derived; `CCDS` and MANE membership are checked directly
+  against the source GFF3; paired MANE RefSeq accessions are explicitly not
+  qualified by this lane; and every excluded field must remain empty;
+- the comparator emits complete row-level differences and its self-tests cover
+  missing, extra, changed, duplicate, multiallelic, and input-mutation failure
+  modes;
+- Linux source-matched, production-cache, Windows-candidate/previous-cache,
+  direct-GFF/cache diagnostic, and live-REST diagnostic lanes are implemented
+  locally;
+- the manual workflow now builds the packaged Windows `annocat.exe`, invokes
+  its annotation path over all three compact corpora, validates each completed
+  result, and compares the retained VCF and canonical consequence table with
+  VEP. The official VEP, candidate fastVEP, previous-cache, and packaged
+  AnnoCAT lanes now apply the same pinned readthrough transcript policy. A
+  separate unfiltered/filtered metamorphic gate proves that the policy changes
+  only declared transcript CSQ entries. These additions are implemented
+  locally but have not yet run in GitHub Actions;
+- a deterministic local package build passed the complete AnnoCAT, browser,
+  and fastVEP test suites. Its candidate fastVEP executable is 7,420,416 bytes
+  with SHA-256
+  `f1d47278f11e6607e314d19788fb853215fdca04bb9396b1faf66b11eace63f7`;
+- the CLI direct-source resolver now accepts the already-supported
+  `grch38-reference` and `ensembl-gff3` core install IDs in dependency order;
+  profile installation behavior is unchanged;
+- the proposed sampled full-WGS lane remains unimplemented and is still
+  required for full-WGS scale qualification;
+- the independent published clinical/HGVS lane is specified but not
+  implemented. No qualifying published truth corpus containing exact Ensembl
+  transcript versions has yet been pinned in the repository, and no result
+  from that lane may currently be claimed. The standalone MANE summary is not
+  a required source for the declared scope;
+- the immutable previous-cache manifest enrolls AnnoCAT `v0.1.0`. Two local
+  invocations of its released builder produced the same 216,730,905-byte cache
+  with SHA-256
+  `e5a82215f22b5ff7b20bb214873a24c5f22e9eac8c1bc9fd403d9b22448bd4b2`;
+- the current `v0.1.0` GitHub release contains the Windows release ZIP and its
+  checksum but no transcript-cache asset; the Windows lane reproduces its
+  enrolled baseline cache temporarily from the verified released executable
+  and pinned production inputs;
+- local reproduction showed that the current candidate's exact production
+  cache is byte-identical to the enrolled `v0.1.0` cache, and the candidate
+  reads that old cache without modifying it across all three corpora;
+- local GFF projection validation covers 55,009 emitted transcript rows across
+  the three corpora, resolves every one of 9,957 distinct per-corpus transcript
+  identities, and reports no CCDS or MANE-membership mismatches. Distinct
+  transcript counts are reported per corpus and are not summed as a global
+  unique-transcript count;
+- the production source catalog and qualification contract pin both the GFF3
+  and GRCh38 reference-archive checksums;
+- the REST lanes are live diagnostics; a frozen, hashed archived-REST response
+  remains unimplemented and therefore is not a release gate;
+- third-party Actions are pinned to immutable commits and ordinary evidence is
+  retained for 90 days; the durable compact release evidence record is not yet
+  published;
+- the expanded workflow is pushed. Its latest run,
+  [33976948020](https://github.com/annocat-project/AnnoCAT/actions/runs/33976948020),
+  tested fastVEP `76dd05c43af3059b1f7b162ecbe5445af711aaa7` and failed the final
+  release gate as described above; the dependent Windows job was skipped;
+- the supplementary-source workflow currently proves synthetic OSA1/OSA2 and
+  AnnoCAT projection parity; independently pinned real-source subsets are not
+  yet implemented;
+- complete source-matched official VEP results from the latest run are retained
+  in its GitHub artifact and in the local analysis directory
+  `target/annotation-concordance-33976948020`; and
+- the AnnoCAT branch pin has changed since `v0.1.0`, but the published
+  `v0.1.0` package still contains fastVEP
+  `a3fa8d81f6f9e3cd3e705f912fe47b4485b6ed69`; no newer package has been
+  published.
+
+## Scientific and technical references
+
+- [GENCODE human release 49](https://www.gencodegenes.org/human/release_49.html)
+  identifies the GRCh38.p14 annotation files used to derive the pinned
+  exclusion set.
+- [GENCODE tag definitions](https://www.gencodegenes.org/pages/tags.html)
+  defines `readthrough_transcript` separately from `readthrough_gene`,
+  `overlapping_locus`, and `stop_codon_readthrough`.
+- [GENCODE human release history](https://www.gencodegenes.org/human/releases.html)
+  maps GENCODE 49 to Ensembl 115 and GRCh38.p14.
+- [Ensembl release 115 VEP annotation sources](https://sep2025.archive.ensembl.org/info/docs/tools/vep/script/vep_cache.html)
+  documents GFF/GTF use, sorting and indexing, and the FASTA requirement for
+  transcript construction and offline HGVS.
+- [Ensembl release 115 VEP command-line options](https://sep2025.archive.ensembl.org/info/docs/tools/vep/script/vep_options.html)
+  defines reference checking, allele handling, HGVS shifting, distance,
+  transcript metadata, and output options.
+- [Ensembl VEP consequence definitions](https://sep2025.archive.ensembl.org/info/genome/variation/prediction/predicted_data.html)
+  enumerate the transcript, noncoding, proximity, and intergenic consequence
+  terms that the supported-consequence manifest must classify.
+- [Official Ensembl VEP 115.2 container](https://hub.docker.com/layers/ensemblorg/ensembl-vep/release_115.2/images/sha256-ed6b660e278458109afc00d5e730aee240a3bf77e817796386033e1a18963152)
+  records the pinned Linux AMD64 image digest.
+- [McLaren et al., *The Ensembl Variant Effect Predictor*](https://pmc.ncbi.nlm.nih.gov/articles/PMC4893825/)
+  describes VEP's consequence model and reproducibility purpose.
+- [Hanley and Lippman-Hand, *If Nothing Goes Wrong, Is Everything All Right?*](https://jhanley.biostat.mcgill.ca/c607/ch08/zero_numerator.pdf)
+  defines the rule of three and its sampling interpretation.
+- [Chen et al., metamorphic testing for bioinformatics](https://pmc.ncbi.nlm.nih.gov/articles/PMC2657898/)
+  supports predeclared property-based relations for scientific software.
+- [Dwarshuis et al., GIAB genomic stratifications](https://pmc.ncbi.nlm.nih.gov/articles/PMC11489684/)
+  describes difficult-region stratification and its role in benchmark
+  interpretation.
+- [Tuteja et al., clinical annotation-tool comparison](https://pmc.ncbi.nlm.nih.gov/articles/PMC9577137/)
+  demonstrates both the value and limits of using VEP relative to a manually
+  curated HGVS set.
+- [Yen et al., transcript-matched HGVS ground truth](https://pmc.ncbi.nlm.nih.gov/articles/PMC5267466/)
+  provides a published external test set and demonstrates why comparisons must
+  preserve the target transcript accession and version.
+- [Morales et al., MANE transcript set](https://pmc.ncbi.nlm.nih.gov/articles/PMC9007741/)
+  supports using versioned MANE Select pairs for standardized reporting and
+  MANE Plus Clinical for additional clinically necessary transcripts.
+- [Ensembl release 115 annotation-source inventory](https://sep2025.archive.ensembl.org/info/docs/tools/vep/script/vep_cache.html)
+  identifies MANE v1.4 as the MANE source paired with VEP 115 on GRCh38.
+- [VariantValidator](https://onlinelibrary.wiley.com/doi/10.1002/humu.23348)
+  describes independent validation and mapping of genomic and transcript HGVS
+  descriptions.
+- [AMP/CAP bioinformatics-pipeline validation guidance](https://doi.org/10.1016/j.jmoldx.2017.11.003)
+  supports predeclared end-to-end validation across representative variant
+  types and known failure modes.
+- [GitHub Actions artifact retention](https://docs.github.com/en/actions/tutorials/store-and-share-data#configuring-a-custom-artifact-retention-period)
+  documents that workflow artifacts expire according to their configured
+  retention period, motivating a compact durable release record.

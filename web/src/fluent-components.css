@@ -24,7 +24,7 @@ body:has(dialog[open]) {
   z-index: 80;
   display: grid;
   max-height: min(720px, calc(100vh - var(--space-5)));
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: var(--space-3);
   padding: var(--space-3);
   overflow: hidden;
@@ -42,6 +42,96 @@ body:has(dialog[open]) {
 
 .phenotype-popover__header h2 {
   margin: 0;
+}
+
+.phenotype-popover__heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-inline-end: var(--space-3);
+}
+
+.phenotype-popover__heading h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-subtitle-2);
+}
+
+.phenotype-settings-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.phenotype-settings-menu__trigger {
+  position: relative;
+}
+
+.phenotype-settings-menu__trigger[aria-expanded="true"] {
+  background: var(--color-control-pressed);
+  color: var(--color-accent-strong);
+}
+
+.phenotype-settings-menu__trigger:not(.has-active-settings) .phenotype-settings-menu__indicator {
+  display: none;
+}
+
+.phenotype-settings-menu__indicator {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--color-surface);
+  border-radius: var(--radius-circular);
+  background: var(--color-accent);
+}
+
+.phenotype-settings-menu__popover {
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 4;
+  width: min(25rem, calc(100vw - var(--space-6)));
+}
+
+.phenotype-setting-option {
+  display: flex;
+  min-height: var(--option-row-min-height-with-description);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--control-radius-medium);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.phenotype-setting-option:hover {
+  background: var(--color-control-hover);
+}
+
+.phenotype-setting-option__label {
+  min-width: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-leading);
+}
+
+.phenotype-setting-option > input {
+  flex: 0 0 auto;
+}
+
+.phenotype-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .phenotype-popover__content {
@@ -80,9 +170,15 @@ body:has(dialog[open]) {
   display: none;
 }
 
+.phenotype-search-state {
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
 .phenotype-popover__footer {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
@@ -199,6 +295,10 @@ body:has(dialog[open]) {
 }
 
 @media (max-width: 560px) {
+  .phenotype-popover__heading {
+    flex-wrap: nowrap;
+  }
+
   .saved-gene-lists__row {
     grid-template-columns: 1fr;
   }

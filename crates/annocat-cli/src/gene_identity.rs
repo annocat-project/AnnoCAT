@@ -1,16 +1,34 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-pub const SOURCE_URL: &str = "https://www.genenames.org/download/";
-pub const CONTRACT_VERSION: &str = "hgnc-identity-v1";
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub const CONTRACT_VERSION: &str = "hgnc-identity-v2";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedGene {
     pub symbol: String,
-    pub gene_id: String,
+    pub canonical_gene_id: Option<String>,
+    pub result_gene_id: Option<String>,
+    pub identity_status: String,
+}
+
+impl ResolvedGene {
+    pub fn comparison_key(&self) -> String {
+        self.canonical_gene_id
+            .clone()
+            .unwrap_or_else(|| format!("SYMBOL:{}", self.symbol))
+    }
+
+    pub fn result_id(&self) -> String {
+        self.result_gene_id
+            .clone()
+            .unwrap_or_else(|| self.symbol.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,12 +43,6 @@ pub struct SearchMatch {
     pub gene: ResolvedGene,
     pub matched_text: String,
     pub match_kind: &'static str,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ResultKeys {
-    pub symbols: HashSet<String>,
-    pub gene_ids: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -54,7 +66,6 @@ pub struct Resolver {
     identity_release: Option<String>,
     runtime_direct: HashMap<String, BTreeSet<String>>,
     canonical_ids: HashMap<String, BTreeSet<String>>,
-    result_keys: HashMap<String, ResultKeys>,
 }
 
 impl Resolver {
@@ -65,7 +76,6 @@ impl Resolver {
             identity_release: installed.map(|(_, release)| release),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         };
         if let Ok(genes) = transcript_genes(resources) {
             for (symbol, gene_id) in genes.iter() {
@@ -74,22 +84,6 @@ impl Resolver {
         }
         for (symbol, gene_id) in report {
             resolver.add_runtime(symbol, gene_id);
-        }
-        for (symbol, gene_id) in report {
-            let resolved = resolver
-                .resolve_pair(gene_id, symbol)
-                .resolved()
-                .unwrap_or_else(|| ResolvedGene {
-                    symbol: normalize(symbol),
-                    gene_id: strip_ensembl_version(gene_id),
-                });
-            let keys = resolver.result_keys.entry(resolved.symbol).or_default();
-            if !symbol.trim().is_empty() {
-                keys.symbols.insert(normalize(symbol));
-            }
-            if !gene_id.trim().is_empty() {
-                keys.gene_ids.insert(normalize(gene_id));
-            }
         }
         resolver
     }
@@ -101,7 +95,15 @@ impl Resolver {
     pub fn resolve_pair(&self, id: &str, label: &str) -> Resolution {
         match self.resolve(id) {
             Resolution::Unknown => self.resolve(label),
-            resolution => resolution,
+            Resolution::Resolved(by_id) => match self.resolve(label) {
+                Resolution::Resolved(by_label)
+                    if by_id.comparison_key() != by_label.comparison_key() =>
+                {
+                    Resolution::Ambiguous
+                }
+                _ => Resolution::Resolved(by_id),
+            },
+            Resolution::Ambiguous => Resolution::Ambiguous,
         }
     }
 
@@ -125,28 +127,15 @@ impl Resolver {
             })
     }
 
-    pub fn canonical_symbol(&self, symbol: &str) -> Option<ResolvedGene> {
-        self.resolve(symbol).resolved()
-    }
-
     pub fn canonicalize(&self, symbol: &str, gene_id: &str) -> ResolvedGene {
         self.resolve_pair(gene_id, symbol)
             .resolved()
             .unwrap_or_else(|| ResolvedGene {
                 symbol: normalize(symbol),
-                gene_id: strip_ensembl_version(gene_id),
+                canonical_gene_id: None,
+                result_gene_id: nonempty(strip_ensembl_version(gene_id)),
+                identity_status: "symbol-only".into(),
             })
-    }
-
-    pub fn result_keys(&self, included: &std::collections::HashSet<String>) -> ResultKeys {
-        let mut keys = ResultKeys::default();
-        for symbol in included {
-            if let Some(found) = self.result_keys.get(symbol) {
-                keys.symbols.extend(found.symbols.iter().cloned());
-                keys.gene_ids.extend(found.gene_ids.iter().cloned());
-            }
-        }
-        keys
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchMatch> {
@@ -199,7 +188,12 @@ impl Resolver {
             left.0
                 .cmp(&right.0)
                 .then(left.1.gene.symbol.cmp(&right.1.gene.symbol))
-                .then(left.1.gene.gene_id.cmp(&right.1.gene.gene_id))
+                .then(
+                    left.1
+                        .gene
+                        .comparison_key()
+                        .cmp(&right.1.gene.comparison_key()),
+                )
         });
         matches
             .into_iter()
@@ -241,10 +235,11 @@ impl Resolver {
         let ids = self.canonical_ids.get(symbol);
         ResolvedGene {
             symbol: symbol.to_owned(),
-            gene_id: ids
+            canonical_gene_id: None,
+            result_gene_id: ids
                 .filter(|ids| ids.len() == 1)
-                .and_then(|ids| ids.iter().next().cloned())
-                .unwrap_or_else(|| symbol.to_owned()),
+                .and_then(|ids| ids.iter().next().cloned()),
+            identity_status: "symbol-only".into(),
         }
     }
 
@@ -261,11 +256,13 @@ impl Resolver {
         let runtime_id = self.canonical_ids.get(&gene.symbol);
         ResolvedGene {
             symbol: gene.symbol.clone(),
-            gene_id: runtime_id
+            canonical_gene_id: nonempty(gene.hgnc_id.clone()),
+            result_gene_id: runtime_id
                 .filter(|ids| ids.len() == 1)
                 .and_then(|ids| ids.iter().next().cloned())
                 .or_else(|| (!gene.ensembl_id.is_empty()).then(|| gene.ensembl_id.clone()))
-                .unwrap_or_else(|| gene.symbol.clone()),
+                .or_else(|| (!gene.ncbi_id.is_empty()).then(|| gene.ncbi_id.clone())),
+            identity_status: "hgnc".into(),
         }
     }
 }
@@ -480,6 +477,7 @@ fn normalize(value: &str) -> String {
 
 fn normalize_identifier(value: &str) -> String {
     let value = normalize(value);
+    let value = value.strip_prefix("NCBIGENE:").unwrap_or(&value).to_owned();
     strip_ensembl_version(&value)
 }
 
@@ -498,6 +496,10 @@ fn strip_ensembl_version(value: &str) -> String {
     } else {
         value
     }
+}
+
+fn nonempty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn transcript_genes(resources: &Path) -> Result<Arc<Vec<(String, String)>>, String> {
@@ -531,6 +533,7 @@ fn transcript_genes(resources: &Path) -> Result<Arc<Vec<(String, String)>>, Stri
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     fn test_resolver() -> Resolver {
         let complete = concat!(
@@ -550,20 +553,29 @@ mod tests {
             identity_release: Some("2026-08-07".into()),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         }
     }
 
     #[test]
     fn resolves_current_and_historical_hgnc_identities() {
         let resolver = test_resolver();
-        for value in ["TP53", "HGNC:11998", "7157", "ENSG00000141510.18"] {
+        for value in [
+            "TP53",
+            "HGNC:11998",
+            "7157",
+            "NCBIGene:7157",
+            "ENSG00000141510.18",
+        ] {
             assert_eq!(resolver.resolve(value).resolved().unwrap().symbol, "TP53");
         }
         assert_eq!(resolver.resolve("ENSG00000141510.bad"), Resolution::Unknown);
         assert_eq!(resolver.resolve("A1S9T").resolved().unwrap().symbol, "UBA1");
         assert_eq!(resolver.resolve("ACS3"), Resolution::Ambiguous);
         assert_eq!(resolver.resolve("CBBM"), Resolution::Ambiguous);
+        assert_eq!(
+            resolver.resolve_pair("HGNC:11998", "UBA1"),
+            Resolution::Ambiguous
+        );
     }
 
     #[test]
@@ -576,7 +588,9 @@ mod tests {
             resolver.resolve("TESTGENE"),
             Resolution::Resolved(ResolvedGene {
                 symbol: "TESTGENE".into(),
-                gene_id: "ENSG99999999999".into(),
+                canonical_gene_id: None,
+                result_gene_id: Some("ENSG99999999999".into()),
+                identity_status: "symbol-only".into(),
             })
         );
     }
@@ -606,12 +620,137 @@ mod tests {
             identity_release: Some("test".into()),
             runtime_direct: HashMap::new(),
             canonical_ids: HashMap::new(),
-            result_keys: HashMap::new(),
         };
 
         assert_eq!(
             resolver.resolve("CURRENT").resolved().unwrap().symbol,
             "CURRENT"
+        );
+    }
+
+    #[test]
+    #[ignore = "set ANNOCAT_HPO_FIXTURE_ROOT to a pinned HPO/HGNC release"]
+    fn official_hpo_hgnc_identifier_matrix_matches_release() {
+        let hpo_root = PathBuf::from(std::env::var("ANNOCAT_HPO_FIXTURE_ROOT").unwrap());
+        let resources = hpo_root
+            .parent()
+            .and_then(Path::parent)
+            .expect("HPO fixture root must be resources/hpo/release");
+        let complete = hpo_root.join("raw/hgnc_complete_set.txt");
+        let withdrawn = hpo_root.join("raw/withdrawn.txt");
+        let resolver = Resolver::new(resources, &[]);
+        assert_eq!(resolver.identity_release(), Some("2026-08-07"));
+
+        let complete_text = std::fs::read_to_string(&complete).unwrap();
+        let mut lines = complete_text.lines();
+        let header = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+        let column = |name: &str| header.iter().position(|value| *value == name).unwrap();
+        let hgnc = column("hgnc_id");
+        let symbol = column("symbol");
+        let status = column("status");
+        let alias = column("alias_symbol");
+        let previous = column("prev_symbol");
+        let ncbi = column("entrez_id");
+        let ensembl = column("ensembl_gene_id");
+        let clean = |value: &str| value.trim().trim_matches('"').to_ascii_uppercase();
+        let mut direct = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut historical = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut approved = BTreeMap::<String, String>::new();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            if fields.get(status).map(|value| clean(value)) != Some("APPROVED".into()) {
+                continue;
+            }
+            let hgnc_id = clean(fields.get(hgnc).copied().unwrap_or(""));
+            let approved_symbol = clean(fields.get(symbol).copied().unwrap_or(""));
+            approved.insert(hgnc_id.clone(), approved_symbol);
+            for key in [
+                fields.get(symbol).copied().unwrap_or(""),
+                fields.get(hgnc).copied().unwrap_or(""),
+                fields.get(ncbi).copied().unwrap_or(""),
+                fields.get(ensembl).copied().unwrap_or(""),
+            ] {
+                let key = clean(key).split('.').next().unwrap_or("").to_owned();
+                if !key.is_empty() {
+                    direct.entry(key).or_default().insert(hgnc_id.clone());
+                }
+            }
+            for field_index in [alias, previous] {
+                for key in fields
+                    .get(field_index)
+                    .copied()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .split('|')
+                    .map(clean)
+                    .filter(|key| !key.is_empty())
+                {
+                    historical.entry(key).or_default().insert(hgnc_id.clone());
+                }
+            }
+        }
+
+        let withdrawn_text = std::fs::read_to_string(&withdrawn).unwrap();
+        let mut lines = withdrawn_text.lines();
+        let header = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+        let symbol_index = header
+            .iter()
+            .position(|value| *value == "WITHDRAWN_SYMBOL")
+            .unwrap();
+        let targets_index = header
+            .iter()
+            .position(|value| *value == "MERGED_INTO_REPORT(S) (i.e HGNC_ID|SYMBOL|STATUS)")
+            .unwrap();
+        for line in lines {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let key = clean(fields.get(symbol_index).copied().unwrap_or(""));
+            for target in fields
+                .get(targets_index)
+                .copied()
+                .unwrap_or("")
+                .trim_matches('"')
+                .split(',')
+            {
+                let target = clean(target.split('|').next().unwrap_or(""));
+                if approved.contains_key(&target) && !key.is_empty() {
+                    historical.entry(key.clone()).or_default().insert(target);
+                }
+            }
+        }
+
+        let keys = direct
+            .keys()
+            .chain(historical.keys())
+            .collect::<BTreeSet<_>>();
+        for key in keys.iter().copied() {
+            let candidates = direct.get(key).or_else(|| historical.get(key)).unwrap();
+            match candidates.len() {
+                1 => {
+                    let expected = candidates.iter().next().unwrap();
+                    let resolved = resolver
+                        .resolve(key)
+                        .resolved()
+                        .unwrap_or_else(|| panic!("{key} did not resolve"));
+                    assert_eq!(
+                        resolved.canonical_gene_id.as_deref(),
+                        Some(expected.as_str())
+                    );
+                    assert_eq!(resolved.symbol, approved[expected]);
+                    assert_eq!(resolved.identity_status, "hgnc");
+                }
+                _ => assert_eq!(resolver.resolve(key), Resolution::Ambiguous),
+            }
+        }
+        assert_eq!(
+            resolver.resolve("ANNOCAT_UNKNOWN_GENE"),
+            Resolution::Unknown
+        );
+        assert!(approved.len() > 40_000);
+        assert!(keys.len() > approved.len());
+        eprintln!(
+            "validated {} approved HGNC genes across {} accepted or ambiguous identifiers",
+            approved.len(),
+            keys.len()
         );
     }
 }

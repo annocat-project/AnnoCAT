@@ -662,16 +662,52 @@ fn run_native_dialog<T: Send + 'static>(
         .map_err(|_| "native dialog closed without a result".to_string())
 }
 
+fn validate_local_request(headers: &str, authority: &str) -> Result<(), &'static str> {
+    let mut host = None;
+    let mut origin = None;
+    for line in headers.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("Host") {
+            if host.replace(value.trim()).is_some() {
+                return Err("duplicate Host header");
+            }
+        } else if name.eq_ignore_ascii_case("Origin") {
+            if origin.replace(value.trim()).is_some() {
+                return Err("duplicate Origin header");
+            }
+        }
+    }
+    if !host.is_some_and(|value| value.eq_ignore_ascii_case(authority)) {
+        return Err("request Host is not the local AnnoCAT server");
+    }
+    let expected_origin = format!("http://{authority}");
+    if origin.is_some_and(|value| !value.eq_ignore_ascii_case(&expected_origin)) {
+        return Err("request Origin is not the local AnnoCAT server");
+    }
+    Ok(())
+}
+
 fn respond(stream: &mut TcpStream) -> io::Result<()> {
     const MAX_BODY: usize = 2 * 1024 * 1024;
     let (mut request_bytes, header_end, content_length) = read_http_headers(stream)?;
+    let request_headers = String::from_utf8_lossy(&request_bytes[..header_end]);
+    let local_authority = stream.local_addr()?.to_string();
+    if let Err(error) = validate_local_request(&request_headers, &local_authority) {
+        return write_http_response(
+            stream,
+            "403 Forbidden",
+            "application/json",
+            &serde_json::json!({"error": error}).to_string(),
+        );
+    }
     let (method, target, has_csrf_header) = {
-        let request = String::from_utf8_lossy(&request_bytes[..header_end]);
-        let first_line = request.lines().next().unwrap_or("");
+        let first_line = request_headers.lines().next().unwrap_or("");
         let mut parts = first_line.split_whitespace();
         let method = parts.next().unwrap_or("").to_owned();
         let target = parts.next().unwrap_or("/").to_owned();
-        let has_csrf_header = request.lines().any(|line| {
+        let has_csrf_header = request_headers.lines().any(|line| {
             line.split_once(':').is_some_and(|(name, value)| {
                 name.eq_ignore_ascii_case("X-AnnoCat-CSRF") && value.trim() == "1"
             })
@@ -679,45 +715,11 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         (method, target, has_csrf_header)
     };
     let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
-    let mutating = path.ends_with("/start")
-        || path.ends_with("/cancel")
-        || path.ends_with("/discard")
-        || path.ends_with("/resume")
-        || path.ends_with("/recover")
-        || path.ends_with("/delete")
-        || path.ends_with("/name")
-        || path.ends_with("/share")
-        || path.ends_with("/export")
-        || path.ends_with("/favor/enrich")
-        || (path.ends_with("/phenotypes") && method == "POST")
-        || (path.ends_with("/genes/preview") && method == "POST")
-        || (path == "/api/gene-lists" && method == "POST")
-        || (path.ends_with("/config") && method == "POST")
-        || (path.ends_with("/notes") && method == "POST")
-        || (path == "/api/services/favor" && method == "POST")
-        || matches!(
-            path,
-            "/api/pick-folder"
-                | "/api/pick-resource-folder"
-                | "/api/pick-downloads-folder"
-                | "/api/pick-results-folder"
-                | "/api/pick-vcfs"
-                | "/api/pick-recovery-files"
-                | "/api/pick-recovery-input"
-                | "/api/pick-results"
-        );
-    if mutating {
+    let api_post = path.starts_with("/api/") && method == "POST";
+    if api_post {
         terminal_log("http", format!("{method} {path}"));
     }
-    if mutating && method != "POST" {
-        return write_http_response(
-            stream,
-            "405 Method Not Allowed",
-            "application/json",
-            "{\"error\":\"POST required\"}",
-        );
-    }
-    if mutating && !has_csrf_header {
+    if api_post && !has_csrf_header {
         return write_http_response(
             stream,
             "403 Forbidden",
@@ -834,6 +836,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         );
     }
     if path == "/api/annotations/pause" {
+        if method != "POST" {
+            return write_http_response(
+                stream,
+                "405 Method Not Allowed",
+                "application/json",
+                "{\"error\":\"POST required\"}",
+            );
+        }
         return write_http_response(
             stream,
             "200 OK",
@@ -1330,8 +1340,14 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             }
             let search_query = query_parameter(query, "q").transpose()?.unwrap_or_default();
             let limit = query_parameter_u64(query, "limit").unwrap_or(20) as usize;
+            let include_polygenic = query_parameter_bool(query, "includePolygenic")?;
             let run_id = query_parameter(query, "runId").transpose()?;
-            let mut terms = match phenotype::search_terms(&paths.resources, &search_query, limit) {
+            let mut terms = match phenotype::search_terms(
+                &paths.resources,
+                &search_query,
+                limit,
+                include_polygenic,
+            ) {
                 Ok(terms) => terms,
                 Err(_) if run_id.is_some() => Vec::new(),
                 Err(error) => return Err(error),
@@ -1469,7 +1485,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
         let response = portable_paths().and_then(|paths| {
             let result = completed_run_result(&paths.runs, run_id)?;
             let profile = if method == "GET" {
-                phenotype::load(&paths.runs, run_id)?
+                phenotype::load_current(&paths.resources, &paths.runs, run_id)?
             } else if method == "POST" {
                 let request = serde_json::from_slice::<phenotype::ProfileUpdate>(request_body)
                     .map_err(|error| format!("invalid phenotype profile request: {error}"))?;
@@ -1594,9 +1610,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             let run_directory = variants
                 .parent()
                 .ok_or("completed result has no run directory")?;
-            favor::enrich(run_directory, &variants, &evidence, &catalog, request).and_then(
-                |summary| serde_json::to_string(&summary).map_err(|error| error.to_string()),
-            )
+            let summary = favor::enrich(run_directory, &variants, &evidence, &catalog, request)?;
+            prepare_completed_run_query_inputs(&paths.runs, run_id)?;
+            serde_json::to_string(&summary).map_err(|error| error.to_string())
         });
         let (status, body) = match response {
             Ok(body) => ("200 OK", body),
@@ -1649,7 +1665,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 .into_iter()
                 .map(|candidate| candidate.allele_id)
                 .collect::<Vec<_>>();
-            results::page_json_with_details_for_candidates(
+            let gene_query =
+                phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
+            results::page_json_with_active_gene_query_for_candidates(
                 run_id,
                 &result,
                 evidence.as_deref(),
@@ -1658,6 +1676,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 limit,
                 &page_request?,
                 &candidate_ids,
+                gene_query.as_deref(),
             )
         });
         let (status, body) = match response {
@@ -1838,7 +1857,9 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
             let result = completed_run_result(&paths.runs, run_id)?;
             let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
             let page_request = page_request?;
-            results::page_json_with_details(
+            let gene_query =
+                phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
+            results::page_json_with_active_gene_query(
                 run_id,
                 &result,
                 evidence.as_deref(),
@@ -1846,6 +1867,7 @@ fn respond(stream: &mut TcpStream) -> io::Result<()> {
                 offset,
                 limit,
                 &page_request,
+                gene_query.as_deref(),
             )
         });
         let (status, body) = match response {
@@ -2315,6 +2337,17 @@ fn query_parameter(query: &str, name: &str) -> Option<Result<String, String>> {
         let (key, value) = pair.split_once('=')?;
         (key == name).then(|| percent_decode(value))
     })
+}
+
+fn query_parameter_bool(query: &str, name: &str) -> Result<bool, String> {
+    let Some(value) = query_parameter(query, name).transpose()? else {
+        return Ok(false);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("{name} must be true or false")),
+    }
 }
 
 fn result_page_request(query: &str) -> Result<results::PageRequest, String> {
@@ -3669,6 +3702,21 @@ fn completed_run_file(
     expected_name: &str,
     expected_extension: &str,
 ) -> Result<std::path::PathBuf, String> {
+    let (root, manifest) = completed_run_manifest(runs_directory, requested_id)?;
+    completed_run_file_from_manifest(
+        &root,
+        &manifest,
+        requested_id,
+        manifest_key,
+        expected_name,
+        expected_extension,
+    )
+}
+
+fn completed_run_manifest(
+    runs_directory: &std::path::Path,
+    requested_id: &str,
+) -> Result<(std::path::PathBuf, serde_json::Value), String> {
     let result = completed_run_result(runs_directory, requested_id)?;
     let root = result
         .parent()
@@ -3686,6 +3734,20 @@ fn completed_run_file(
             .map_err(|error| format!("cannot read AnnoCAT result manifest: {error}"))?,
     )
     .map_err(|error| format!("invalid AnnoCAT result manifest: {error}"))?;
+    if manifest["runId"] != requested_id {
+        return Err("AnnoCAT result manifest has a different run ID".into());
+    }
+    Ok((root, manifest))
+}
+
+fn completed_run_file_from_manifest(
+    root: &std::path::Path,
+    manifest: &serde_json::Value,
+    requested_id: &str,
+    manifest_key: &str,
+    expected_name: &str,
+    expected_extension: &str,
+) -> Result<std::path::PathBuf, String> {
     if manifest["runId"] != requested_id || manifest[manifest_key] != expected_name {
         return Err(format!("AnnoCAT result does not declare {expected_name}"));
     }
@@ -3702,26 +3764,60 @@ fn completed_run_file(
     Ok(file)
 }
 
-fn completed_run_query_inputs(
+fn completed_run_optional_file_from_manifest(
+    root: &std::path::Path,
+    manifest: &serde_json::Value,
+    requested_id: &str,
+    manifest_key: &str,
+    expected_name: &str,
+    expected_extension: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if manifest.get(manifest_key).is_none() {
+        return Ok(None);
+    }
+    completed_run_file_from_manifest(
+        root,
+        manifest,
+        requested_id,
+        manifest_key,
+        expected_name,
+        expected_extension,
+    )
+    .map(Some)
+}
+
+fn completed_run_declared_query_inputs(
     runs_directory: &std::path::Path,
     requested_id: &str,
 ) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), String> {
-    let evidence = completed_run_file(
-        runs_directory,
+    let (root, manifest) = completed_run_manifest(runs_directory, requested_id)?;
+    let evidence = completed_run_optional_file_from_manifest(
+        &root,
+        &manifest,
         requested_id,
         "evidenceFile",
         "evidence.parquet",
         "parquet",
-    )
-    .ok();
-    let catalog = completed_run_file(
-        runs_directory,
+    )?;
+    let catalog = completed_run_optional_file_from_manifest(
+        &root,
+        &manifest,
         requested_id,
         "fieldCatalogFile",
         "field-catalog.json",
         "json",
-    )
-    .ok();
+    )?;
+    match (&evidence, &catalog) {
+        (Some(_), Some(_)) | (None, None) => Ok((evidence, catalog)),
+        _ => Err("AnnoCAT result must declare evidence and its field catalog together".into()),
+    }
+}
+
+fn completed_run_query_inputs(
+    runs_directory: &std::path::Path,
+    requested_id: &str,
+) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), String> {
+    let (evidence, catalog) = completed_run_declared_query_inputs(runs_directory, requested_id)?;
     Ok((
         evidence.as_deref().map(favor::effective_evidence),
         catalog.as_deref().map(favor::effective_catalog),
@@ -3732,33 +3828,15 @@ fn prepare_completed_run_query_inputs(
     runs_directory: &std::path::Path,
     requested_id: &str,
 ) -> Result<(), String> {
-    let evidence = completed_run_file(
-        runs_directory,
-        requested_id,
-        "evidenceFile",
-        "evidence.parquet",
-        "parquet",
-    )
-    .ok();
-    let catalog = completed_run_file(
-        runs_directory,
-        requested_id,
-        "fieldCatalogFile",
-        "field-catalog.json",
-        "json",
-    )
-    .ok();
+    let (evidence, catalog) = completed_run_declared_query_inputs(runs_directory, requested_id)?;
     let (Some(evidence), Some(catalog)) = (evidence, catalog) else {
         return Ok(());
     };
-    let phenotype_assets = phenotype::active_query_assets(runs_directory, requested_id)?;
-    favor::prepare_query_assets_with_gene(
-        &evidence,
-        &catalog,
-        phenotype_assets
-            .as_ref()
-            .map(|(gene_evidence, gene_catalog)| (gene_evidence.as_path(), gene_catalog.as_path())),
-    )
+    let resources = portable_paths()?.resources;
+    let gene_catalog = phenotype::load_current(&resources, runs_directory, requested_id)
+        .ok()
+        .and_then(|profile| phenotype::active_query_catalog(&profile));
+    favor::prepare_query_assets_with_active_gene(&evidence, &catalog, gene_catalog.as_ref())
 }
 
 #[derive(Clone, Serialize)]
@@ -4080,6 +4158,7 @@ fn export_filtered_results_interactive(
     let paths = portable_paths()?;
     let result = completed_run_result(&paths.runs, run_id)?;
     let (evidence, catalog) = completed_run_query_inputs(&paths.runs, run_id)?;
+    let gene_query = phenotype::active_query(&paths.resources, &paths.runs, run_id, &result)?;
     let mut filters = request.filters.clone();
     if request.candidate_only {
         filters.included_allele_ids = Some(
@@ -4112,7 +4191,7 @@ fn export_filtered_results_interactive(
     };
     match request.format.as_str() {
         "rowsCsv" => {
-            let rows = results::export_filtered_rows_with_details_and_labels(
+            let rows = results::export_filtered_rows_with_active_gene_query_and_labels(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
@@ -4120,6 +4199,7 @@ fn export_filtered_results_interactive(
                 &filters,
                 &request.columns,
                 &request.column_labels,
+                gene_query.as_deref(),
             )?;
             Ok(Some(FilteredExportSummary {
                 path: destination,
@@ -4128,22 +4208,25 @@ fn export_filtered_results_interactive(
             }))
         }
         "genesTxt" => {
-            let genes = results::export_filtered_genes_with_details(
+            let genes = results::export_filtered_genes_with_active_gene_query(
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 &destination,
                 &filters,
+                gene_query.as_deref(),
             )?;
             let mut count_filters = filters.clone();
             count_filters.exact_total = true;
-            let page_json = results::page_json_with_evidence(
+            let page_json = results::page_json_with_active_gene_query(
+                run_id,
                 &result,
                 evidence.as_deref(),
                 catalog.as_deref(),
                 0,
                 1,
                 &count_filters,
+                gene_query.as_deref(),
             )?;
             let page: serde_json::Value =
                 serde_json::from_str(&page_json).map_err(|error| error.to_string())?;
@@ -4438,6 +4521,33 @@ fn pick_result_file() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod profile_status_tests {
     use super::*;
+
+    #[test]
+    fn boolean_query_parameters_are_strict_and_default_off() {
+        assert!(!query_parameter_bool("q=seizure", "includePolygenic").unwrap());
+        for value in ["true", "TRUE", "1"] {
+            assert!(
+                query_parameter_bool(
+                    &format!("q=seizure&includePolygenic={value}"),
+                    "includePolygenic"
+                )
+                .unwrap()
+            );
+        }
+        for value in ["false", "FALSE", "0"] {
+            assert!(
+                !query_parameter_bool(
+                    &format!("q=seizure&includePolygenic={value}"),
+                    "includePolygenic"
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(
+            query_parameter_bool("includePolygenic=yes", "includePolygenic").unwrap_err(),
+            "includePolygenic must be true or false"
+        );
+    }
 
     fn web_app_source() -> String {
         [
@@ -5180,6 +5290,42 @@ mod profile_status_tests {
     }
 
     #[test]
+    fn local_http_boundary_rejects_foreign_hosts_and_origins() {
+        let authority = "127.0.0.1:8787";
+        assert!(
+            validate_local_request(
+                "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8787\r\n",
+                authority
+            )
+            .is_ok()
+        );
+        assert!(validate_local_request(
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nOrigin: http://127.0.0.1:8787\r\n",
+            authority
+        )
+        .is_ok());
+        assert!(
+            validate_local_request(
+                "GET /api/status HTTP/1.1\r\nHost: hostile.example\r\n",
+                authority
+            )
+            .is_err()
+        );
+        assert!(validate_local_request(
+            "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nOrigin: https://hostile.example\r\n",
+            authority
+        )
+        .is_err());
+        assert!(
+            validate_local_request(
+                "GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nHost: hostile.example\r\n",
+                authority
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn legacy_recovery_never_chains_native_windows_dialogs() {
         let source = include_str!("main.rs");
         let picker = source
@@ -5309,6 +5455,25 @@ mod profile_status_tests {
             .unwrap(),
             "field-catalog.json"
         );
+        let (evidence, catalog) = completed_run_query_inputs(&root, "run-2").unwrap();
+        assert_eq!(evidence.unwrap().file_name().unwrap(), "evidence.parquet");
+        assert_eq!(catalog.unwrap().file_name().unwrap(), "field-catalog.json");
+        std::fs::remove_file(complete.join("evidence.parquet")).unwrap();
+        assert!(
+            completed_run_query_inputs(&root, "run-2")
+                .unwrap_err()
+                .contains("file is missing")
+        );
+        std::fs::write(complete.join("evidence.parquet"), b"fixture").unwrap();
+        let manifest_path = complete.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.as_object_mut().unwrap().remove("evidenceFile");
+        manifest.as_object_mut().unwrap().remove("fieldCatalogFile");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let (evidence, catalog) = completed_run_query_inputs(&root, "run-2").unwrap();
+        assert!(evidence.is_none());
+        assert!(catalog.is_none());
         delete_completed_run(&root, "run-2").unwrap();
         assert!(!complete.exists());
         assert!(library_metadata::display_name(&root, "run-2").is_none());

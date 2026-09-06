@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "supportPolicy": "A release is supported only after its full production cache is reproduced twice with identical bytes and enrolled below.",
+  "releases": [
+    {
+      "annocatRelease": "v0.1.0",
+      "status": "enrolled",
+      "releaseBundle": {
+        "url": "https://github.com/annocat-project/AnnoCAT/releases/download/v0.1.0/AnnoCat-0.1.0-windows-x86_64.zip",
+        "path": "AnnoCat-0.1.0-windows-x86_64.zip",
+        "bytes": 22037480,
+        "sha256": "fb27c464e07d6ec59152079dfc4b7fe80d0fbf116eaefd31d73821d6ca9c327a"
+      },
+      "builder": {
+        "pathInBundle": "AnnoCat-0.1.0-windows-x86_64/tools/fastvep/fastvep.exe",
+        "bytes": 7352832,
+        "sha256": "8dd4f3e23638eae53047dfb6790004e994fc6b5ca3a510a01fb29ac7b31109c5",
+        "fastvepCommit": "a3fa8d81f6f9e3cd3e705f912fe47b4485b6ed69"
+      },
+      "sources": {
+        "gff3Sha256": "1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c",
+        "referenceArchiveSha256": "fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02",
+        "preparedReferenceSha256": "9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7"
+      },
+      "buildCommand": "fastvep.exe cache --gff3 Ensembl=<original-pinned-gff3.gz> --fasta <prepared-pinned-reference.fa> --output <ensembl-115.cache> --no-progress",
+      "cacheFormat": "FSTVEP02",
+      "enrollmentEvidence": {
+        "date": "2026-09-04",
+        "independentBuildInvocations": 2,
+        "transcriptCount": 509638,
+        "codingTranscriptCount": 234024,
+        "codingWithSequenceCount": 233995,
+        "primaryCodingMissingSequenceCount": 0,
+        "nonPrimaryCodingMissingSequenceCount": 29,
+        "cacheBytes": 216730905,
+        "cacheSha256": "e5a82215f22b5ff7b20bb214873a24c5f22e9eac8c1bc9fd403d9b22448bd4b2"
+      },
+      "expectedCacheBytes": 216730905,
+      "expectedCacheSha256": "e5a82215f22b5ff7b20bb214873a24c5f22e9eac8c1bc9fd403d9b22448bd4b2"
+    }
+  ]
+}

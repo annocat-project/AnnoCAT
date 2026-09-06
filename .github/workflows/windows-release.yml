@@ -10,15 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  source-contracts:
+    uses: ./.github/workflows/source-contract-validation.yml
+
   bundle:
+    needs: source-contracts
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         shell: pwsh
         run: |
-          rustup toolchain install 1.94.1 --profile minimal
+          rustup toolchain install 1.94.1 --profile minimal --component rustfmt
           rustup default 1.94.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Fetch pinned AnnoCAT fastVEP fork
         shell: pwsh
         run: |
