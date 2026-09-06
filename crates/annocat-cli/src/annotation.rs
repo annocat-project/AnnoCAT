@@ -15,7 +15,7 @@ const PERFORMANCE_FILE: &str = "annotation-performance.json";
 const FASTVEP_PERFORMANCE_FILE: &str = "fastvep-performance.json";
 const PERFORMANCE_PROFILE_ENV: &str = "ANNOCAT_PROFILE_ANNOTATION";
 const CHECKPOINT_SCHEMA_VERSION: u16 = 2;
-const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v1";
+const ANNOTATION_EXECUTION_CONTRACT: &str = "fastvep-projected-grch38-v2";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1698,6 +1698,7 @@ fn execution_contract_sha256(
         },
         "referenceManifestSha256": super::fastvep::sha256_file(&reference_manifest)?,
         "transcriptManifestSha256": super::fastvep::sha256_file(&transcript_manifest)?,
+        "transcriptExclusionPolicy": super::fastvep::readthrough_transcript_policy(),
         "representativeSelectionContract": super::results::REPRESENTATIVE_SELECTION_CONTRACT,
     });
     Ok(format!(
@@ -1745,6 +1746,7 @@ fn run_fastvep(
     let executable = super::fastvep::readiness()
         .executable
         .ok_or("fastVEP executable disappeared")?;
+    let readthrough_transcripts = super::fastvep::readthrough_transcript_list()?;
     let stdout =
         File::create(staging.join("fastvep.stdout.log")).map_err(|error| error.to_string())?;
     let stderr =
@@ -1770,6 +1772,8 @@ fn run_fastvep(
         .arg(super::reference::fasta_path(resources))
         .arg("--transcript-cache")
         .arg(super::transcript::cache_path(resources))
+        .arg("--exclude-transcripts")
+        .arg(&readthrough_transcripts)
         .args([
             "--symbol",
             "--hgvs",
@@ -2302,6 +2306,11 @@ fn finalize_outputs(
     object.insert(
         "representativeSelectionContract".into(),
         super::results::REPRESENTATIVE_SELECTION_CONTRACT.into(),
+    );
+    object.insert(
+        "transcriptExclusionPolicy".into(),
+        serde_json::to_value(super::fastvep::readthrough_transcript_policy())
+            .map_err(|error| error.to_string())?,
     );
     object.insert("inputName".into(), input_name.into());
     object.insert("inputBytes".into(), file_bytes(&request.input)?.into());

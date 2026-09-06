@@ -152,6 +152,8 @@ $fastVepReadme | Set-Content -LiteralPath (Join-Path $bundleRoot "docs\fastvep.m
 $pin.windowsX86_64.sha256 = $builtFastVepHash
 $pin.windowsX86_64.sizeBytes = $builtFastVepSize
 $pin | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $bundleRoot "config\fastvep-pin.json") -Encoding utf8
+$readthroughList = Join-Path $projectRoot "config\$($pin.readthroughTranscriptPolicy.filename)"
+Copy-Item -LiteralPath $readthroughList -Destination (Join-Path $bundleRoot "config\$($pin.readthroughTranscriptPolicy.filename)")
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $bundleRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\fastvep\LICENSE.md") -Destination (Join-Path $bundleRoot "licenses\fastVEP-Apache-2.0.txt")
 Copy-Item -LiteralPath (Join-Path $projectRoot "third-party\annocat-rust-licenses.html") -Destination (Join-Path $bundleRoot "licenses\AnnoCAT-third-party-licenses.html")

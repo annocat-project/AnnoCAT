@@ -14,6 +14,7 @@ permissions:
 env:
   VEP_IMAGE: ensemblorg/ensembl-vep@sha256:ed6b660e278458109afc00d5e730aee240a3bf77e817796386033e1a18963152
   ENSEMBL_GFF3_SHA256: 1e553efa8496d662e7264061a5cecf3001eb9a1157aaa66d80cd7ac35841509c
+  GENCODE_GTF_SHA256: d6e6fe0515c95b2a8cd36a853c1989cee9115c736c60237c56ae92b9daaaf7c4
   GRCH38_ARCHIVE_SHA256: fb4243ebb014caf27111f24dd62b7ce42160f28581da6f8fcd6cba5977778d02
   GRCH38_FASTA_SHA256: 9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7
 
@@ -46,7 +47,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/concordance/downloads
-          key: vep115-sources-${{ env.ENSEMBL_GFF3_SHA256 }}-${{ env.GRCH38_ARCHIVE_SHA256 }}
+          key: vep115-sources-${{ env.ENSEMBL_GFF3_SHA256 }}-${{ env.GENCODE_GTF_SHA256 }}-${{ env.GRCH38_ARCHIVE_SHA256 }}
 
       - name: Resolve and build candidate fastVEP
         id: candidate
@@ -89,6 +90,7 @@ jobs:
           set -euo pipefail
           downloads="$RUNNER_TEMP/concordance/downloads"
           gff="$downloads/Homo_sapiens.GRCh38.115.gff3.gz"
+          gtf="$downloads/gencode.v49.annotation.gtf.gz"
           reference="$downloads/GRCh38_no_alt_analysis_set.fna.gz"
 
           if ! printf '%s  %s\n' "$ENSEMBL_GFF3_SHA256" "$gff" | sha256sum --check --status; then
@@ -97,6 +99,13 @@ jobs:
               https://ftp.ensembl.org/pub/release-115/gff3/homo_sapiens/Homo_sapiens.GRCh38.115.gff3.gz
           fi
           printf '%s  %s\n' "$ENSEMBL_GFF3_SHA256" "$gff" | sha256sum --check
+
+          if ! printf '%s  %s\n' "$GENCODE_GTF_SHA256" "$gtf" | sha256sum --check --status; then
+            rm -f "$gtf"
+            curl --fail --location --retry 3 --output "$gtf" \
+              https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.annotation.gtf.gz
+          fi
+          printf '%s  %s\n' "$GENCODE_GTF_SHA256" "$gtf" | sha256sum --check
 
           if ! printf '%s  %s\n' "$GRCH38_ARCHIVE_SHA256" "$reference" | sha256sum --check --status; then
             rm -f "$reference"
@@ -133,6 +142,12 @@ jobs:
           bgzip -f "$work/annotations.gff3"
           tabix -f -p gff "$work/annotations.gff3.gz"
 
+          python scripts/generate-ensembl-readthrough-transcripts.py \
+            "$downloads/gencode.v49.annotation.gtf.gz" \
+            config/ensembl-115-readthrough-transcripts.txt --check
+          cp config/ensembl-115-readthrough-transcripts.txt \
+            "$work/readthrough-transcripts.txt"
+
           for chromosome in $(seq 1 22) X Y; do
             printf '%s\tchr%s\n' "$chromosome" "$chromosome"
           done > "$work/chr_synonyms.txt"
@@ -140,10 +155,12 @@ jobs:
 
           sha256sum \
             "$downloads/Homo_sapiens.GRCh38.115.gff3.gz" \
+            "$downloads/gencode.v49.annotation.gtf.gz" \
             "$downloads/GRCh38_no_alt_analysis_set.fna.gz" \
             "$work/reference.fa" "$work/reference.fa.fai" \
             "$work/annotations.gff3.gz" "$work/annotations.gff3.gz.tbi" \
-            "$work/chr_synonyms.txt" > "$work/source-hashes.sha256"
+            "$work/chr_synonyms.txt" "$work/readthrough-transcripts.txt" \
+            > "$work/source-hashes.sha256"
           {
             samtools --version
             bgzip --version 2>&1
@@ -204,6 +221,7 @@ jobs:
               --gff /data/annotations.gff3.gz \
               --fasta /data/reference.fa \
               --synonyms /data/chr_synonyms.txt \
+              --transcript_filter "not stable_id in /data/readthrough-transcripts.txt" \
               --terms SO --distance 5000 --hgvs --symbol --canonical \
               --numbers --protein --biotype --tsl --mane \
               --show_ref_allele --uploaded_allele --no_check_variants_order \
@@ -235,19 +253,27 @@ jobs:
           status=0
           for corpus in legacy boundary clinvar-reviewed; do
             "$fastvep" annotate --input "$work/$corpus.vcf" \
+              --output "$work/fastvep-cache-unfiltered-$corpus.vcf" \
+              --transcript-cache "$work/transcripts.cache" \
+              --fasta "$work/reference.fa" --distance 5000 \
+              --hgvs --symbol --canonical --no-progress
+            "$fastvep" annotate --input "$work/$corpus.vcf" \
               --output "$work/fastvep-direct-$corpus.vcf" \
               --gff3 "Ensembl=$work/annotations.gff3.gz" \
               --fasta "$work/reference.fa" --distance 5000 \
+              --exclude-transcripts "$work/readthrough-transcripts.txt" \
               --hgvs --symbol --canonical --no-progress
             "$fastvep" annotate --input "$work/$corpus.vcf" \
               --output "$work/fastvep-cache-$corpus.vcf" \
               --transcript-cache "$work/transcripts.cache" \
               --fasta "$work/reference.fa" --distance 5000 \
+              --exclude-transcripts "$work/readthrough-transcripts.txt" \
               --hgvs --symbol --canonical --no-progress
             "$fastvep" annotate --input "$work/$corpus.vcf" \
               --output "$work/fastvep-production-$corpus.vcf" \
               --transcript-cache "$work/production.cache" \
               --fasta "$work/reference.fa" --distance 5000 \
+              --exclude-transcripts "$work/readthrough-transcripts.txt" \
               --hgvs --symbol --canonical --no-progress
             if ! cmp --silent "$work/fastvep-direct-$corpus.vcf" \
               "$work/fastvep-cache-$corpus.vcf"; then
@@ -258,6 +284,24 @@ jobs:
           sha256sum "$work/transcripts.cache" "$work/production.cache" \
             "$work"/fastvep-*.vcf \
             >> "$work/source-hashes.sha256"
+          exit "$status"
+
+      - name: Require declared readthrough filtering to be output-local
+        id: transcript_exclusion
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          work="$RUNNER_TEMP/concordance"
+          status=0
+          for corpus in legacy boundary clinvar-reviewed; do
+            if ! python scripts/verify-transcript-exclusion.py \
+              "$work/fastvep-cache-unfiltered-$corpus.vcf" \
+              "$work/fastvep-cache-$corpus.vcf" \
+              "$work/readthrough-transcripts.txt" --require-removals \
+              > "$work/transcript-exclusion-$corpus.json"; then
+              status=1
+            fi
+          done
           exit "$status"
 
       - name: Require GFF-derived field correctness
@@ -359,6 +403,7 @@ jobs:
         if: always()
         env:
           CACHE_PARITY: ${{ steps.cache_parity.outcome }}
+          TRANSCRIPT_EXCLUSION: ${{ steps.transcript_exclusion.outcome }}
           SOURCE_PROJECTION: ${{ steps.source_projection.outcome }}
           SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
           PRODUCTION_EQUIVALENCE: ${{ steps.production_equivalence.outcome }}
@@ -371,6 +416,7 @@ jobs:
             echo '| Lane | Outcome | Release gate |'
             echo '| --- | --- | --- |'
             echo "| fastVEP direct-GFF/cache parity | $CACHE_PARITY | Diagnostic |"
+            echo "| Declared readthrough filtering is output-local | $TRANSCRIPT_EXCLUSION | Yes |"
             echo "| GFF-derived field projection | $SOURCE_PROJECTION | Yes |"
             echo "| Production/oracle-prepared cache equivalence | $PRODUCTION_EQUIVALENCE | Yes |"
             echo "| Source-matched official VEP | $SOURCE_MATCHED | Yes |"
@@ -404,7 +450,9 @@ jobs:
           SOURCE_PROJECTION: ${{ steps.source_projection.outcome }}
           SOURCE_MATCHED: ${{ steps.source_matched.outcome }}
           PRODUCTION_EQUIVALENCE: ${{ steps.production_equivalence.outcome }}
+          TRANSCRIPT_EXCLUSION: ${{ steps.transcript_exclusion.outcome }}
         run: |
+          test "$TRANSCRIPT_EXCLUSION" = success
           test "$SOURCE_PROJECTION" = success
           test "$SOURCE_MATCHED" = success
           test "$PRODUCTION_EQUIVALENCE" = success
@@ -557,6 +605,7 @@ jobs:
           }
           $candidate = Join-Path $bundle.FullName "tools\fastvep\fastvep.exe"
           $annocat = Join-Path $bundle.FullName "annocat.exe"
+          $exclusions = Join-Path $bundle.FullName "config\ensembl-115-readthrough-transcripts.txt"
           & $candidate --version | Set-Content -LiteralPath (Join-Path $work "candidate-fastvep-version.txt")
           $binaryHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash.ToLowerInvariant()
           $annocatHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $annocat).Hash.ToLowerInvariant()
@@ -564,15 +613,21 @@ jobs:
           if ($bundlePin.commit -ne $env:FASTVEP_COMMIT -or $bundlePin.windowsX86_64.sha256 -ne $binaryHash) {
             throw "candidate bundle does not identify its exact fastVEP executable"
           }
+          $exclusionHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exclusions).Hash.ToLowerInvariant()
+          if ($exclusionHash -ne $bundlePin.readthroughTranscriptPolicy.sha256) {
+            throw "candidate bundle readthrough transcript list identity mismatch"
+          }
           @(
             "$binaryHash  $candidate"
             "$annocatHash  $annocat"
+            "$exclusionHash  $exclusions"
             "$lockHash  Cargo.lock"
           ) | Set-Content -LiteralPath (Join-Path $work "candidate-build-hashes.sha256")
           Copy-Item -LiteralPath (Join-Path $bundle.FullName "config\fastvep-pin.json") -Destination (Join-Path $work "candidate-bundle-fastvep-pin.json")
           "CANDIDATE_FASTVEP=$candidate" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CANDIDATE_ANNOCAT=$annocat" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CANDIDATE_BUNDLE=$($bundle.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TRANSCRIPT_EXCLUSIONS=$exclusions" | Out-File -FilePath $env:GITHUB_ENV -Append
           "sha256=$binaryHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "annocat_sha256=$annocatHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
@@ -695,9 +750,9 @@ jobs:
             $inputVcf = "fixtures/fastvep/ensembl-115-$corpus.vcf"
             $oldOutput = Join-Path $work "fastvep-previous-cache-$corpus.vcf"
             $newOutput = Join-Path $work "fastvep-windows-$corpus.vcf"
-            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $oldOutput --transcript-cache $env:BASELINE_CACHE --fasta $reference --distance 5000 --hgvs --symbol --canonical --no-progress
+            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $oldOutput --transcript-cache $env:BASELINE_CACHE --fasta $reference --distance 5000 --exclude-transcripts $env:TRANSCRIPT_EXCLUSIONS --hgvs --symbol --canonical --no-progress
             if ($LASTEXITCODE) { $status = 1; continue }
-            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $newOutput --transcript-cache $env:CANDIDATE_CACHE --fasta $reference --distance 5000 --hgvs --symbol --canonical --no-progress
+            & $env:CANDIDATE_FASTVEP annotate --input $inputVcf --output $newOutput --transcript-cache $env:CANDIDATE_CACHE --fasta $reference --distance 5000 --exclude-transcripts $env:TRANSCRIPT_EXCLUSIONS --hgvs --symbol --canonical --no-progress
             if ($LASTEXITCODE) { $status = 1; continue }
             $comparisons = @(
               @($oldOutput, (Join-Path $linux "vep-gff-$corpus.vcf"), "previous-cache-vs-vep"),

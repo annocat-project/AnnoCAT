@@ -20,8 +20,21 @@ struct FastVepPin {
     repository: String,
     commit: String,
     upstream_version: String,
+    readthrough_transcript_policy: ReadthroughTranscriptPolicy,
     #[serde(rename = "windowsX86_64")]
     windows_x86_64: WindowsPin,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadthroughTranscriptPolicy {
+    pub id: String,
+    filename: String,
+    pub assembly: String,
+    pub ensembl_release: u16,
+    pub transcript_count: u64,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +60,50 @@ pub fn pinned_builder_provenance() -> super::cache_contract::BuilderProvenance {
         commit: PIN.commit.clone(),
         binary_sha256: pinned_sha256().to_owned(),
     }
+}
+
+pub fn readthrough_transcript_policy() -> ReadthroughTranscriptPolicy {
+    PIN.readthrough_transcript_policy.clone()
+}
+
+pub fn readthrough_transcript_list() -> Result<PathBuf, String> {
+    let policy = &PIN.readthrough_transcript_policy;
+    let filename = Path::new(&policy.filename);
+    if filename.components().count() != 1
+        || !matches!(
+            filename.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err("fastVEP readthrough policy contains an unsafe filename".into());
+    }
+    let path = super::portable_home()?.join("config").join(filename);
+    validate_readthrough_transcript_list(&path, policy)?;
+    Ok(path)
+}
+
+fn validate_readthrough_transcript_list(
+    path: &Path,
+    policy: &ReadthroughTranscriptPolicy,
+) -> Result<(), String> {
+    let bytes = path
+        .metadata()
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?
+        .len();
+    if bytes != policy.bytes {
+        return Err(format!(
+            "fastVEP readthrough transcript list size mismatch: expected {}, found {bytes}",
+            policy.bytes
+        ));
+    }
+    let actual = sha256_file(path)?;
+    if actual != policy.sha256 {
+        return Err(format!(
+            "fastVEP readthrough transcript list checksum mismatch: expected {}, found {actual}",
+            policy.sha256
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,5 +327,17 @@ mod tests {
             provenance.commit,
             "7038e7c17708e7d2226149e78e0bb297bcc6d1d6"
         );
+    }
+
+    #[test]
+    fn readthrough_transcript_list_matches_its_pinned_identity() {
+        let policy = readthrough_transcript_policy();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config")
+            .join(&policy.filename);
+        validate_readthrough_transcript_list(&path, &policy).unwrap();
+        assert_eq!(policy.assembly, "GRCh38");
+        assert_eq!(policy.ensembl_release, 115);
+        assert_eq!(policy.transcript_count, 2_115);
     }
 }

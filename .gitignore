@@ -33,6 +33,7 @@ __pycache__/
 /config/*
 !/config/README.md
 !/config/fastvep-pin.json
+!/config/ensembl-115-readthrough-transcripts.txt
 !/config/dbnsfp-4.9a-members.json
 !/config/dbnsfp-4.9a-curated-fields.json
 !/config/evidence-calibrations.json

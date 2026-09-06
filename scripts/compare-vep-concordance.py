@@ -267,9 +267,15 @@ def joined(value):
 def position(row, prefix):
     start = row.get(f"{prefix}_start")
     end = row.get(f"{prefix}_end")
-    if start is None:
+    if start is None and end is None:
         return ""
-    return str(start) if end is None or end == start else f"{start}-{end}"
+    if start is None:
+        return f"?-{end}"
+    if end is None:
+        return f"{start}-?"
+    if start == end:
+        return str(start)
+    return f"{min(start, end)}-{max(start, end)}"
 
 
 def rest_row(row, feature_type, feature_key, fields=REST_FIELDS):
@@ -756,6 +762,11 @@ def compare(candidate, oracle, oracle_format="auto", contract=None, input_path=N
 
 def self_test():
     import tempfile
+
+    assert position({}, "cdna") == ""
+    assert position({"cdna_end": 7}, "cdna") == "?-7"
+    assert position({"cdna_start": 7}, "cdna") == "7-?"
+    assert position({"cdna_start": 9, "cdna_end": 7}, "cdna") == "7-9"
 
     header = (
         '##fileformat=VCFv4.2\n'

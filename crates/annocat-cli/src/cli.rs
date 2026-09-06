@@ -1206,6 +1206,23 @@ fn all_source_ids() -> Vec<String> {
     ids
 }
 
+fn normalize_install_source_ids(source_ids: Vec<String>) -> Result<Vec<String>, String> {
+    let install_reference = source_ids.iter().any(|id| id == "grch38-reference");
+    let install_transcripts = source_ids.iter().any(|id| id == "ensembl-gff3");
+    let annotation_sources = source_ids
+        .into_iter()
+        .filter(|id| !matches!(id.as_str(), "grch38-reference" | "ensembl-gff3"))
+        .collect();
+    let mut sources = annotation::normalize_source_ids(annotation_sources)?;
+    if install_transcripts {
+        sources.insert(0, "ensembl-gff3".into());
+    }
+    if install_reference {
+        sources.insert(0, "grch38-reference".into());
+    }
+    Ok(sources)
+}
+
 fn has_source_data(source_id: &str, resources: &Path) -> bool {
     match source_id {
         "grch38-reference" => resources.join("reference").is_dir(),
@@ -1499,10 +1516,7 @@ fn resolve_install_request(
         {
             return Err(format!("source '{duplicate}' was supplied more than once"));
         }
-        (
-            annotation::normalize_source_ids(direct_sources)?,
-            Vec::new(),
-        )
+        (normalize_install_source_ids(direct_sources)?, Vec::new())
     };
 
     let field_selections = if field_set.is_some() || !fields.is_empty() {
@@ -2074,5 +2088,31 @@ mod tests {
         assert_eq!(public_profile("comprehensive").unwrap(), "wgs");
         assert_eq!(public_profile("core").unwrap(), "online");
         assert!(public_profile("custom").is_err());
+    }
+
+    #[test]
+    fn direct_core_install_sources_are_valid_and_dependency_ordered() {
+        let root = PathBuf::from("unused-test-home");
+        let paths = PortablePaths {
+            home: root.clone(),
+            resource_directory: root.clone(),
+            resources: root.clone(),
+            downloads: root.clone(),
+            runs: root.clone(),
+            config: root,
+        };
+        assert_eq!(
+            resolve_install_request(
+                vec!["ensembl-gff3".into(), "grch38-reference".into()],
+                None,
+                None,
+                Vec::new(),
+                &paths,
+            )
+            .unwrap()
+            .source_ids,
+            vec!["grch38-reference", "ensembl-gff3"]
+        );
+        assert!(normalize_install_source_ids(vec!["not-a-source".into()]).is_err());
     }
 }

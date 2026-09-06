@@ -146,9 +146,39 @@ local candidate has zero non-`FLAGS` field-value mismatches over 41,720 shared
 boundary identities and 9,801 shared ClinVar identities. It is still not fully
 VEP-qualified: `FLAGS` differs on 4,451 and 590 shared identities respectively,
 and 16 boundary plus 52 ClinVar candidate identities are absent from the REST
-responses. Those candidate-only identities also occur in the release-equivalent
-and reviewed upstream outputs, so the current corrections did not introduce
-them, but they still require resolution or exact reviewed contract entries.
+responses. The candidate-only identities also occur in the release-equivalent
+and reviewed upstream outputs, so the current consequence corrections did not
+introduce them.
+
+The transcript-membership difference is now root-caused. Official indexed VEP
+caches remove transcripts marked `readthrough_tra`; the public Ensembl 115 GFF3
+used by AnnoCAT does not retain that marker. GENCODE 49 supplies the matching
+`readthrough_transcript` tag. All 52 distinct extra transcript IDs observed
+across the three frozen corpora carry it. This explains why a source-matched
+custom-GFF comparison can pass while an official-cache or database-backed
+comparison has fewer transcript rows. AnnoCAT will adopt the official-cache
+membership policy through the annotation-time, backward-compatible exclusion
+defined in the qualification document's “Readthrough-transcript policy without
+cache migration” section. Existing caches remain ready, readable, and
+byte-identical; users do not rebuild them or download the GENCODE GTF. The
+difference is not converted into a wildcard exception.
+
+The runtime filter is the declared compatibility boundary, not a temporary
+implementation detail. Installed caches are never patched in place. Omitting
+readthrough transcripts during cache construction is deferred until a future
+intentional cache-version transition, while the runtime filter remains for any
+older cache version still supported. Release qualification measures the
+one-time filtering cost separately and rejects material startup, throughput, or
+steady-state-memory regression.
+
+This policy does not claim that readthrough transcripts are biologically
+invalid. They are curated transcript models in GENCODE's comprehensive
+annotation. It means only that AnnoCAT's Ensembl 115 annotation path uses the
+same transcript membership as official indexed VEP 115. When removal leaves an
+allele with no retained transcript consequence, the ordinary
+`intergenic_variant` fallback is relative to that selected transcript set, not
+proof that the genomic region has no possible transcriptional activity.
+
 The complete correction and verification record is
 [fastVEP and Ensembl VEP 115 correctness work, 2026-09-04](fastvep-vep115-correctness-2026-09-04.md).
 Counts from the three corpora must be reported separately; affected input
@@ -297,6 +327,10 @@ rates can summarize a run, but they do not replace field-level gates.
 - Run the packaged end-to-end corpus.
 - Require the actual AnnoCAT annotated-VCF and consequence-table VEP lane, not
   only a direct fastVEP comparison.
+- Reproduce the supported legacy transcript cache, prove that the candidate
+  reads it without modification, apply the pinned readthrough exclusion in
+  memory, and run the packaged AnnoCAT path. The same on-disk cache is both the
+  compatibility target and the source of the VEP-compatible filtered output.
 - Freeze and replay online-source responses instead of using a live response as
   a release gate.
 

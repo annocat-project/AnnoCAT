@@ -1,9 +1,11 @@
 # fastVEP and Ensembl VEP 115 correctness work, 2026-09-04
 
-Status: Implemented, locally verified, committed, and pushed as fastVEP
-`0863825` on `codex/vep115-concordance`. The first source-matched run failed
-closed and produced follow-up corrections; the candidate is not qualified,
-pinned in AnnoCAT, packaged, or released.
+Status: Implemented and locally verified through fastVEP
+`2e1def60016566bb95397923eea5cdca77250798` on
+`codex/vep115-concordance`. The AnnoCAT working branch pins and locally packages
+that candidate, but it is not release-qualified or published. The first
+source-matched runs failed closed and produced the follow-up corrections and
+readthrough-membership policy described below.
 
 This record documents the consequence, coordinate, and HGVS corrections made
 on 2026-09-04. It records what changed, why it changed, what was compared, and
@@ -25,10 +27,12 @@ reviewed exception is approved.
 | Reference | GRCh38 no-alt analysis-set FASTA |
 | Transcript cache | Reproduced `v0.1.0` production cache |
 | Cache SHA-256 | `E5A82215F22B5FF7B20BB214873A24C5F22E9EAC8C1BC9FD403D9B22448BD4B2` |
-| Rebuilt local candidate SHA-256 | `CEA6C81D6BB921A5DDBCA0B0DE637BB22089EEA54B5DEE0CE93F89693F9676E1` |
+| Initial rebuilt local candidate SHA-256 | `CEA6C81D6BB921A5DDBCA0B0DE637BB22089EEA54B5DEE0CE93F89693F9676E1` |
+| Current deterministic Windows candidate SHA-256 | `F1D47278F11E6607E314D19788FB853215FDCA04BB9396B1FAF66B11EACE63F7` |
 
-The local release binary was built for verification only. The AnnoCAT fastVEP
-pin and distributed binary were not changed.
+The local release binaries were built for verification only. The AnnoCAT
+working-branch pin now names the current candidate; no distributed binary or
+GitHub release was changed.
 
 The follow-up release strategy is specified in
 [Source-matched Ensembl VEP 115.2 qualification](vep115-source-matched-qualification.md).
@@ -246,6 +250,36 @@ changed as part of the VEP-concordance work.
   temporary result list.
 - The fastVEP distance option and AnnoCAT invocation were not changed.
 
+## Why upstream validation did not expose the full difference set
+
+The upstream fastVEP validation suite and AnnoCAT's release qualification ask
+different questions. As inspected on 2026-09-05, upstream
+`validation/run_validation.sh` runs official VEP with `--gff` against the same
+public GFF3 and FASTA used by fastVEP. That is an appropriate source-matched
+algorithm comparison, but it cannot detect transcript-selection metadata that
+is absent from both copies of the GFF3. In particular, it cannot reproduce the
+official indexed-cache rule that removes `readthrough_tra` transcripts.
+
+The upstream validation is also not a fail-closed release gate:
+
+- the ordinary GitHub Actions CI workflow runs formatting, Clippy, and Rust
+  tests but does not invoke `validation/run_validation.sh`;
+- the human validation path generates fastVEP output but explicitly skips the
+  official VEP invocation, and the HGVSp comparison runs only when a previously
+  generated VEP file is already present;
+- `compare_vep.py` reports field differences and extra or missing transcripts
+  but does not return a failing exit status; and
+- field accuracy is calculated only over shared allele-transcript identities,
+  so missing or extra rows do not lower those percentages.
+
+Its tracked human inputs are useful but narrower: a 173-record VEP example,
+1,000 chr22 1000 Genomes records, and 400 ClinVar in-frame deletions. AnnoCAT's
+boundary corpus, reviewed-ClinVar corpus, complete row-multiset comparator,
+official-cache/REST diagnostics, previous-release cache lane, and packaged
+product projection therefore found classes that the upstream smoke and
+source-matched checks did not gate. This does not make upstream's same-input
+comparison invalid; it means the result supports a narrower concordance claim.
+
 ## Remaining release blockers and limits
 
 This working tree is not yet fully VEP-qualified.
@@ -257,21 +291,27 @@ This working tree is not yet fully VEP-qualified.
 2. The exact MANE fields still require oracle review. A proposed serialization
    change was reverted because it altered AnnoCAT's public VCF/JSON contract;
    the committed candidate retains the existing AnnoCAT-compatible output.
-3. `FLAGS` differences and the 16 boundary plus 52 ClinVar identities observed
-   against archived REST are compatibility diagnostics, not source-matched
-   failures, because REST uses a different transcript dataset. Their full
-   reports remain useful but do not determine the VEP 115.2 GFF verdict.
+3. `FLAGS` differences remain source-metadata diagnostics. The candidate-only
+   transcript identities are now explained by the official indexed-cache
+   exclusion of readthrough transcripts and the absence of that marker from
+   the public Ensembl GFF3. The VEP-compatible annotation-time filter is now
+   implemented locally but remains to be qualified against official VEP and
+   the packaged AnnoCAT path. It uses a pinned compact GENCODE-derived
+   transcript-ID list and leaves existing cache bytes unchanged; no user cache
+   rebuild or additional source download is required. The difference is not
+   hidden by a wildcard contract entry. Readthrough models are not declared
+   biologically false; this is compatibility with VEP's selected transcript
+   set.
 4. Metamorphic and discovery cohorts, a frozen archived-REST response, durable
    compact release evidence, and independently pinned real supplementary-source
    subsets remain unimplemented.
 5. Passing the frozen corpora shows concordance only for their declared scope;
    it is not proof of correctness for every possible human variant.
-6. No AnnoCAT pin, packaged executable, release ZIP, or remote branch was
-   updated by this work.
+6. The AnnoCAT working-branch pin and local verification package now identify
+   the candidate. No GitHub release or distributed package was updated.
 
 ## Release follow-up
 
-Before adoption, commit the fastVEP changes, update the AnnoCAT pin and binary
-identity through the normal reviewed procedure, repeat direct-GFF versus cache
-parity, run the packaged AnnoCAT end-to-end gate, and resolve or formally
-contract the two remaining qualification items above.
+Before adoption, run the updated GitHub compact-corpus gate, repeat direct-GFF
+versus cache parity, run the packaged AnnoCAT end-to-end lane, and resolve or
+formally contract the remaining qualification items above.

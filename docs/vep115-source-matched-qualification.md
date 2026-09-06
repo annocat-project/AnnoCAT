@@ -862,6 +862,138 @@ implementation is made backward-compatible or AnnoCAT adopts the explicit
 migration policy. The candidate must not silently rebuild the old cache and
 call that compatibility.
 
+### Readthrough-transcript policy without cache migration
+
+Official indexed Ensembl VEP caches remove transcripts carrying Ensembl's
+`readthrough_tra` attribute. AnnoCAT instead builds its transcript cache from
+the public Ensembl 115 GFF3, which does not retain the attribute needed to make
+that decision. GENCODE release 49 corresponds to Ensembl 115 on GRCh38.p14 and
+does retain `tag "readthrough_transcript"`. The release-matched comprehensive
+chromosome annotation is
+[`gencode.v49.annotation.gtf.gz`](https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.annotation.gtf.gz).
+Its compressed length is 93,374,019 bytes and its published MD5 is
+`0ef4a024ea2d35b1b88c12447b0b70b9`; its independently computed SHA-256 is
+`d6e6fe0515c95b2a8cd36a853c1989cee9115c736c60237c56ae92b9daaaf7c4`.
+Inspection found 2,115 versioned Ensembl transcript IDs carrying that tag and
+2,115 stable IDs after removing only a terminal `.` followed by decimal digits,
+with no normalization collision. The sorted stable-ID list uses UTF-8, one ID
+per line, and a final line feed; it is 33,840 bytes with SHA-256
+`78a58d8855af0a1ac2807b9ed45fedb061f936a37916faf054cacebe46ed63ef`.
+Every one of the 52 distinct candidate-only transcript IDs observed across the
+legacy, boundary, and reviewed-ClinVar differentials belongs to that set.
+
+This policy excludes only exact `transcript_id` values on GTF `transcript`
+features tagged `readthrough_transcript`. It strips an optional transcript
+version before comparison because the fastVEP cache stores stable IDs. It does
+not exclude `readthrough_gene`, `overlapping_locus`, or
+`stop_codon_readthrough`; those labels describe different biological or
+annotation properties.
+
+Readthrough transcripts are genuine curated transcript models, not presumed
+annotation errors. GENCODE defines them as transcripts that overlap multiple
+independent loci and includes them in its comprehensive annotation. This
+exclusion is scientifically appropriate for the narrower declared purpose of
+matching Ensembl VEP 115's indexed-cache transcript set. It must not be
+described as evidence that readthrough transcription is absent or biologically
+irrelevant.
+
+Matching the official indexed-cache output therefore requires a declared
+transcript-selection policy, not a consequence-algorithm exception. Physical
+cache migration is unnecessary: fastVEP already loads an explicit transcript
+cache into transcript objects before it constructs the indexed provider. The
+small exclusion set can be applied once at that boundary, before overlap lookup
+or consequence generation, without changing the cache on disk.
+
+This runtime boundary is an intentional compatibility policy, not a temporary
+fallback. Filtering during cache construction would save only the storage and
+startup work for 2,115 transcript objects while changing cache hashes and
+forcing existing installations to migrate. No release may patch an installed
+binary cache in place. A future, deliberately versioned cache format may omit
+these transcripts during construction, but it must retain this runtime policy
+for every older cache version that remains supported.
+
+The implementation contract is:
+
+1. Keep the `FSTVEP02` reader and existing manifest schema readable. A cache
+   produced by a supported release remains valid for annotation and is never
+   rewritten, converted, or marked stale by this correction.
+2. Derive a sorted unique exclusion list during release preparation, not on the
+   user's computer. The derivation accepts only the pinned GENCODE 49 file and
+   records its URL, byte length, MD5, SHA-256, tag, feature type, stable-ID
+   normalization rule, output count, and output SHA-256.
+3. Ship the small reviewed list with the qualified fastVEP/AnnoCAT release.
+   AnnoCAT users do not download or retain the 89.05 MiB GENCODE GTF merely to
+   obtain 2,115 identifiers.
+4. Pass the exact list to fastVEP for annotation only when the selected AnnoCAT
+   transcript resource identifies Ensembl 115 on GRCh38. The generic fastVEP
+   default remains unchanged for other inputs. fastVEP validates and loads the
+   list into a set, removes matching parsed transcript objects once before
+   building the transcript provider, and performs no output-row post-processing.
+   A missing, malformed, or wrong-hash list fails before annotation rather than
+   silently reverting to the unfiltered behavior.
+5. Record the exclusion-list identity and policy version in each new result's
+   provenance. The installed transcript-cache manifest and cache SHA-256 remain
+   unchanged because the cache itself is unchanged.
+6. Do not add an **Update transcript cache** prompt, automatic rebuild, modal,
+   or new Data Sources setting for this correction. Fresh and existing
+   installations use the same policy with the same Ensembl 115 cache format.
+7. Existing results are never rewritten. Reannotation with the corrected
+   release may contain fewer transcript consequences. The allele row remains,
+   but its representative transcript, displayed gene, consequence, or available
+   Variant Details transcript options can change when a removed readthrough
+   transcript previously supplied that value. This is the intended alignment
+   with official cached VEP, not a UI or schema migration.
+
+Gene lists, saved filters, supplementary caches, result schemas, and viewer
+code are not changed by this policy. A gene-filter result can nevertheless
+change after reannotation if its only match was an excluded readthrough
+transcript. The user sees no new control; provenance distinguishes results made
+before and after the correction.
+
+Qualification of this policy requires all of the following:
+
+- the candidate binary structurally verifies and annotates from the supported
+  release cache without changing its bytes;
+- the deterministic derivation binds to the exact GENCODE 49 source and emits
+  exactly the declared 2,115 unique stable transcript IDs;
+- applying the policy to an existing supported cache removes only transcript
+  objects in the declared set, leaves the cache file byte-identical, and adds no
+  per-variant or per-query disk writes;
+- filtering is one linear pass with constant-time set membership before provider
+  indexing; an alternating enabled/disabled release-build benchmark uses the
+  same warm cache for at least 20 paired runs and reports list validation, cache
+  loading, filtering, provider construction, end-to-end startup, throughput,
+  and memory separately; it extends to 30 pairs or moves to a quiet dedicated
+  runner when the first 20 are inconclusive;
+- the paired benchmark reports a 95% confidence interval whose upper bound must
+  remain below a 5% end-to-end regression; the filter also adds no more than 5%
+  to median transcript initialization or 500 ms absolute, whichever is
+  stricter, does not reduce median large-corpus throughput by more than 5%, and
+  does not increase steady-state memory by more than 2 MiB;
+- the same cache annotated with and without the policy differs only by removal
+  of consequence rows whose exact transcript ID is in the declared set and,
+  when those were the allele's only transcript consequences, one standard
+  `intergenic_variant` fallback that keeps the allele represented; all shared
+  rows and all non-CSQ fields are byte-for-byte identical before result
+  projection. Here `intergenic_variant` is relative to the retained VEP
+  transcript set and must not be interpreted as proof that no readthrough RNA
+  or other unselected feature exists at the locus;
+- the legacy, boundary, and reviewed-ClinVar corpora have no missing or extra
+  in-scope transcript identities relative to official cached VEP 115.2 and no
+  new shared-field difference;
+- the packaged AnnoCAT path produces the same VCF and Parquet schemas and keeps
+  every representative row traceable to a retained consequence row;
+- the packaged result opens normally, transcript selection contains only
+  retained consequences, and gene filtering cannot match an excluded
+  consequence; and
+- missing-list, bad-hash, malformed-line, duplicate-ID, versioned-ID, and
+  cancellation tests fail safely without modifying the installed cache.
+
+Source-matched custom-GFF and official-cache qualification remain separate.
+The former verifies consequence algorithms over the same input annotation; it
+cannot establish official-cache transcript membership when the public GFF3
+omits an attribute used by the official cache builder.
+
 The expanded REST differential is recorded but does not become a release gate
 until its source differences have exact reviewed contracts.
 
@@ -1048,12 +1180,32 @@ As of 2026-09-05:
 
 - the local fastVEP branch is named `codex/vep115-concordance`;
 - the latest tested fastVEP candidate is
-  `76dd05c43af3059b1f7b162ecbe5445af711aaa7`; the AnnoCAT branch pins
-  `78c870be81762f8cec0a020a76a0515cfdd1449c`, so the later candidate commits
-  are not yet part of the AnnoCAT pin;
+  `2e1def60016566bb95397923eea5cdca77250798`, and the AnnoCAT branch pins that
+  exact candidate. This records the candidate identity but does not by itself
+  qualify it for release;
 - the expanded Annotation concordance workflow, three compact frozen VCF
   inputs, their generators and manifests, and the verification helpers are
   implemented locally;
+- the readthrough compatibility filter is implemented locally after cache
+  loading and before provider indexing. A deterministic GENCODE 49 derivation
+  emits 2,115 stable transcript IDs, and the candidate leaves the existing
+  216,587,918-byte transcript cache byte-identical;
+- a 20-pair alternating release-build startup benchmark over the warm full
+  cache measured a mean paired delta of 1.15%, with a 95% confidence interval
+  from -0.63% to 2.93%; its 45.24 ms median filter time and 2.93% upper bound
+  pass the declared 500 ms and 5% limits;
+- ten alternating paired runs over 100,000 HG002 variants per mode processed
+  two million annotations. Median throughput was 12,246 variants/s without the
+  policy and 12,266 variants/s with it; the mean paired runtime delta was
+  0.99%, with a 95% confidence interval from -1.97% to 3.96%. The upper bound
+  passes the declared 5% throughput limit and shows no material regression on
+  this local workload; the point estimate is not a speedup claim;
+- the corresponding 100,000-record metamorphic comparison removed 7,100 CSQ
+  entries from 3,156 records, covering 54 declared transcript IDs. All retained
+  CSQ entries and non-CSQ fields were byte-identical; 18 alleles whose only
+  transcript consequence was excluded received the standard intergenic
+  fallback. This is implementation evidence, not yet official-oracle release
+  qualification;
 - the versioned qualification-input and 41-term supported-consequence
   contracts exist and pass their local integrity checks;
 - the historical 197-record corpus, generated 1,262-record transcript-boundary
@@ -1073,8 +1225,18 @@ As of 2026-09-05:
 - the manual workflow now builds the packaged Windows `annocat.exe`, invokes
   its annotation path over all three compact corpora, validates each completed
   result, and compares the retained VCF and canonical consequence table with
-  VEP. This new lane is implemented locally but has not yet run in GitHub
-  Actions;
+  VEP. The official VEP, candidate fastVEP, previous-cache, and packaged
+  AnnoCAT lanes now apply the same pinned readthrough transcript policy. A
+  separate unfiltered/filtered metamorphic gate proves that the policy changes
+  only declared transcript CSQ entries. These additions are implemented
+  locally but have not yet run in GitHub Actions;
+- a deterministic local package build passed the complete AnnoCAT, browser,
+  and fastVEP test suites. Its candidate fastVEP executable is 7,420,416 bytes
+  with SHA-256
+  `f1d47278f11e6607e314d19788fb853215fdca04bb9396b1faf66b11eace63f7`;
+- the CLI direct-source resolver now accepts the already-supported
+  `grch38-reference` and `ensembl-gff3` core install IDs in dependency order;
+  profile installation behavior is unchanged;
 - the proposed sampled full-WGS lane remains unimplemented and is still
   required for full-WGS scale qualification;
 - the independent published clinical/HGVS lane is specified but not
@@ -1122,6 +1284,14 @@ As of 2026-09-05:
 
 ## Scientific and technical references
 
+- [GENCODE human release 49](https://www.gencodegenes.org/human/release_49.html)
+  identifies the GRCh38.p14 annotation files used to derive the pinned
+  exclusion set.
+- [GENCODE tag definitions](https://www.gencodegenes.org/pages/tags.html)
+  defines `readthrough_transcript` separately from `readthrough_gene`,
+  `overlapping_locus`, and `stop_codon_readthrough`.
+- [GENCODE human release history](https://www.gencodegenes.org/human/releases.html)
+  maps GENCODE 49 to Ensembl 115 and GRCh38.p14.
 - [Ensembl release 115 VEP annotation sources](https://sep2025.archive.ensembl.org/info/docs/tools/vep/script/vep_cache.html)
   documents GFF/GTF use, sorting and indexing, and the FASTA requirement for
   transcript construction and offline HGVS.
